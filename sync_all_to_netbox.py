@@ -1721,10 +1721,13 @@ def probe_san_switch(ip, retries=2, retry_delay=3):
             # chassisshow gives the real supplier serial + model (PID)
             chs = sess.run("chassisshow")
             chs_map = _parse_chassisshow(chs) if chs else {}
-            model = (chs_map.get("chassis_pid")
+            model = (chs_map.get("supplier_part_num")
+                      or chs_map.get("chassis_pid")
                       or headers.get("switchtype") or headers.get("switch_type")
                       or headers.get("model") or headers.get("product"))
-            serial = (chs_map.get("chassis_serial_number")
+            serial = (chs_map.get("serial_num")
+                       or chs_map.get("factory_serial_num")
+                       or chs_map.get("chassis_serial_number")
                        or chs_map.get("chassis_serial_no")
                        or chs_map.get("serial_number")
                        or headers.get("switchwwn") or headers.get("switch_wwn"))
@@ -1785,11 +1788,14 @@ def san_collect_inventory(ip):
             sfp_rows = []
             log("WARN", f"  sfpshow failed: {exc}")
 
-        # Prefer chassisshow for real serial + model; fall back to switchshow
-        chs_serial = (chs_map.get("chassis_serial_number")
+        # Prefer chassisshow supplier (OEM) fields for real serial + model; fall back to switchshow
+        chs_serial = (chs_map.get("serial_num")
+                      or chs_map.get("factory_serial_num")
+                      or chs_map.get("chassis_serial_number")
                       or chs_map.get("chassis_serial_no")
                       or chs_map.get("serial_number"))
-        chs_model = (chs_map.get("chassis_pid")
+        chs_model = (chs_map.get("supplier_part_num")
+                     or chs_map.get("chassis_pid")
                      or chs_map.get("pid")
                      or chs_map.get("chassis_product_id"))
         sw_model_raw = (headers.get("switchtype") or headers.get("switch_type")
