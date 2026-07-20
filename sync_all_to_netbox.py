@@ -401,10 +401,13 @@ def expand_ranges(ranges):
             ips.extend(str(h) for h in net.hosts())
     return ips
 
-def is_port_open(ip, port, timeout=3):
-    try:
-        with socket.create_connection((ip, port), timeout=timeout): return True
-    except Exception: return False
+def is_port_open(ip, port, timeout=3, retries=2, retry_delay=2):
+    for attempt in range(1, retries + 1):
+        try:
+            with socket.create_connection((ip, port), timeout=timeout): return True
+        except Exception:
+            if attempt < retries: time.sleep(retry_delay)
+    return False
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Redfish (server) session
@@ -471,29 +474,33 @@ def _resolve_server_name(rf, sys_data):
     if serial: return f"HPE-{serial}"
     return f"HPE-{ip}"
 
-def probe_redfish(ip):
-    if not is_port_open(ip, REDFISH_PORT): return None
-    host = f"{ip}:{REDFISH_PORT}"
-    try:
-        rf = RedfishSession(host)
-        rf.login()
+def probe_redfish(ip, retries=2, retry_delay=3):
+    for attempt in range(1, retries + 1):
+        if not is_port_open(ip, REDFISH_PORT):
+            if attempt < retries: time.sleep(retry_delay); continue
+            return None
+        host = f"{ip}:{REDFISH_PORT}"
         try:
-            root   = rf.get("/redfish/v1/")
-            syscol = rf.get(root["Systems"]["@odata.id"])
-            sys    = rf.get(syscol["Members"][0]["@odata.id"])
-            name   = _resolve_server_name(rf, sys)
-            return {
-                "ip":           ip,
-                "host":         host,
-                "serial":       sys.get("SerialNumber"),
-                "model":        sys.get("Model"),
-                "hostname":     name,
-                "manufacturer": sys.get("Manufacturer") or "HPE",
-            }
-        finally:
-            rf.logout()
-    except Exception:
-        return None
+            rf = RedfishSession(host)
+            rf.login()
+            try:
+                root   = rf.get("/redfish/v1/")
+                syscol = rf.get(root["Systems"]["@odata.id"])
+                sys    = rf.get(syscol["Members"][0]["@odata.id"])
+                name   = _resolve_server_name(rf, sys)
+                return {
+                    "ip":           ip,
+                    "host":         host,
+                    "serial":       sys.get("SerialNumber"),
+                    "model":        sys.get("Model"),
+                    "hostname":     name,
+                    "manufacturer": sys.get("Manufacturer") or "HPE",
+                }
+            finally:
+                rf.logout()
+        except Exception:
+            if attempt < retries: time.sleep(retry_delay); continue
+    return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Storage session
@@ -611,39 +618,47 @@ class StorageSession:
             objects.append(props)
         return objects
 
-def probe_storage(ip):
-    if not is_port_open(ip, STORAGE_PORT): return None
-    storage = StorageSession(ip, STORAGE_PORT)
-    if not storage.quick_probe():
-        return None
-    try:
-        storage.login()
-        system_rows = storage.show("system")
-        version_rows = storage.show("versions")
-        if not system_rows: return None
+def probe_storage(ip, retries=2, retry_delay=3):
+    for attempt in range(1, retries + 1):
+        if not is_port_open(ip, STORAGE_PORT):
+            if attempt < retries: time.sleep(retry_delay); continue
+            return None
+        storage = StorageSession(ip, STORAGE_PORT)
+        if not storage.quick_probe():
+            if attempt < retries: time.sleep(retry_delay); continue
+            return None
+        try:
+            storage.login()
+            system_rows = storage.show("system")
+            version_rows = storage.show("versions")
+            if not system_rows: raise RuntimeError("empty system response")
 
-        system = system_rows[0]
-        serial = system.get("serial-number") or system.get("midplane-serial-number")
-        product = system.get("product-id") or system.get("vendor-name") or "Storage"
-        system_name = system.get("system-name") or system.get("system-contact") or f"storage-{ip.replace('.', '-')}"
-        firmware = None
-        for row in version_rows:
-            fw = row.get("bundle-version") or row.get("sc-firmware") or row.get("firmware-version")
-            if fw: firmware = fw; break
+            system = system_rows[0]
+            serial = system.get("serial-number") or system.get("midplane-serial-number")
+            product = system.get("product-id") or system.get("vendor-name") or "Storage"
+            system_name = system.get("system-name") or system.get("system-contact") or f"storage-{ip.replace('.', '-')}"
+            firmware = None
+            for row in version_rows:
+                fw = row.get("bundle-version") or row.get("sc-firmware") or row.get("firmware-version")
+                if fw: firmware = fw; break
 
-        return {
-            "ip":           ip,
-            "serial":       serial,
-            "model":        normalize_model(product, STORAGE_MODEL_MAP) or product,
-            "hostname":     system_name.strip(),
-            "manufacturer": system.get("vendor-name") or DEFAULT_MFR,
-            "health":       system.get("health"),
-            "firmware":     firmware,
-        }
-    except Exception:
-        return None
-    finally:
-        storage.logout()
+            return {
+                "ip":           ip,
+                "serial":       serial,
+                "model":        normalize_model(product, STORAGE_MODEL_MAP) or product,
+                "hostname":     system_name.strip(),
+                "manufacturer": system.get("vendor-name") or DEFAULT_MFR,
+                "health":       system.get("health"),
+                "firmware":     firmware,
+            }
+        except Exception:
+            if attempt < retries:
+                time.sleep(retry_delay); continue
+            return None
+        finally:
+            try: storage.logout()
+            except Exception: pass
+    return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # unified scanner
