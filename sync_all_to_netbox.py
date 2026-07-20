@@ -749,8 +749,29 @@ def _get_or_create(endpoint, lookup, create):
 def get_or_create_manufacturer(name):
     if not name: return None
     name = name.strip()
-    return _get_or_create(get_netbox().dcim.manufacturers, {"name": name},
-                          {"name": name, "slug": slugify(name)})
+    api = get_netbox()
+    # Primary lookup by name (case-insensitive in NetBox)
+    m = api.dcim.manufacturers.get(name=name)
+    if m: return m.id
+    # Secondary lookup by slug (handles pre-existing manufacturers with
+    # different casing or a manually-set slug)
+    slug = slugify(name)
+    try:
+        m = api.dcim.manufacturers.get(slug=slug)
+        if m: return m.id
+    except Exception: pass
+    # Try to create; if slug collides, fall back to a suffixed slug
+    for attempt in range(3):
+        try:
+            return api.dcim.manufacturers.create(
+                {"name": name, "slug": slug if attempt == 0 else f"{slug}-{attempt+1}"}).id
+        except Exception as e:
+            if "already exists" in str(e) and attempt < 2:
+                continue
+            # Last resort: re-query by name (race conditions, etc.)
+            m = api.dcim.manufacturers.get(name=name)
+            if m: return m.id
+            raise
 
 def get_or_create_device_type(model, mfr_id, model_map=None):
     m = normalize_model(model, model_map) or model or "Unknown"
@@ -1804,18 +1825,28 @@ def mark_san_offline(dev_id, dev_name):
     except Exception as e:
         log("ERROR", f"  Could not mark SAN switch offline {dev_name}: {e}")
 
-def _fc_interface_type_id():
-    """Get or create a 'fc' (Fibre Channel) interface type in NetBox."""
-    api = get_netbox()
-    try:
-        t = api.dcim.interface_types.get(name="FC")
-        if t: return t.id
-    except Exception: pass
-    try:
-        return api.dcim.interface_types.create({"name": "FC", "slug": "fc"}).id
-    except Exception:
-        # NetBox may not support custom interface types via API; fall back to None
-        return None
+def _fc_interface_type(speed):
+    """Map a Brocade port speed string to a NetBox interface type choice.
+
+    NetBox interface `type` is a choice string (not an ID), e.g.
+    '8gfc-sfp+', '16gfc-sfp+', '32gfc-sfp+', 'other'. Returns 'other'
+    if the speed is unknown or the port is offline."""
+    s = (speed or "").lower()
+    if "n2" in s or s.startswith("2g") or s == "2":
+        return "2gfc-sfp+"
+    if "n4" in s or s.startswith("4g") or s == "4":
+        return "4gfc-sfp+"
+    if "n8" in s or s.startswith("8g") or s == "8":
+        return "8gfc-sfp+"
+    if "n16" in s or s.startswith("16g") or s == "16":
+        return "16gfc-sfp+"
+    if "n32" in s or s.startswith("32g") or s == "32":
+        return "32gfc-sfp+"
+    if "n64" in s or s.startswith("64g") or s == "64":
+        return "64gfc-sfp+"
+    if "n128" in s or s.startswith("128g") or s == "128":
+        return "128gfc-sfp+"
+    return "other"
 
 def sync_san_interfaces(dev_id, ports, nameserver):
     """Create/update NetBox interfaces for each FC port on the switch.
@@ -1836,7 +1867,6 @@ def sync_san_interfaces(dev_id, ports, nameserver):
             wwn = _wwn_normalize(ns.get("port_world_wide_name") or ns.get("world_wide_port_name"))
             if wwn: port_wwns.setdefault(idx, []).append(wwn)
 
-    fc_type_id = _fc_interface_type_id()
     seen = set()
     for p in ports:
         name = f"FC {p['port']}"
@@ -1850,7 +1880,7 @@ def sync_san_interfaces(dev_id, ports, nameserver):
         payload = {
             "device":     dev_id,
             "name":       name,
-            "type":       fc_type_id,
+            "type":       _fc_interface_type(p.get("speed")),
             "enabled":    p.get("state", "").lower() == "online",
             "description": " | ".join(desc_parts)[:200],
             "mgmt_only":  False,
