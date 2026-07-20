@@ -1440,14 +1440,16 @@ def _collect_fru_storage(row, add_item):
 # ═══════════════════════════════════════════════════════════════════════════════
 class BrocadeSwitchSession:
     """Thin SSH wrapper that runs Brocade Fabric OS CLI commands and returns
-    raw text output. Works on HPE B-Series (Brocade OEM) firmware."""
+    raw text output. Works on HPE B-Series (Brocade OEM) firmware.
+
+    Uses exec_command per call rather than an interactive shell — Fabric OS
+    only allows one exec channel at a time, so calls are serialized."""
 
     def __init__(self, ip, port=22, timeout=20):
         self.ip = ip
         self.port = port
         self.timeout = timeout
         self.client = None
-        self.shell = None
 
     def login(self):
         self.client = paramiko.SSHClient()
@@ -1457,53 +1459,57 @@ class BrocadeSwitchSession:
             username=SWITCH_USER, password=SWITCH_PASS,
             timeout=self.timeout, allow_agent=False, look_for_keys=False,
         )
-        self.shell = self.client.invoke_shell()
-        # Drain banner
-        self._read_until_prompt(timeout=5)
+        # Verify transport is open
+        if not self.client.get_transport() or not self.client.get_transport().is_active():
+            raise RuntimeError(f"SSH transport not active for {self.ip}")
 
     def logout(self):
-        try:
-            if self.shell:
-                self.shell.close()
-        except Exception: pass
         try:
             if self.client:
                 self.client.close()
         except Exception: pass
-        self.shell = None
         self.client = None
 
-    def _read_until_prompt(self, timeout=10):
-        end = time.time() + timeout
-        buf = ""
-        while time.time() < end:
-            if self.shell.recv_ready():
-                chunk = self.shell.recv(65535).decode(errors="ignore")
-                buf += chunk
-                if re.search(r'[>:]\s*$', buf.splitlines()[-1] if buf.splitlines() else ""):
-                    break
-            else:
-                time.sleep(0.1)
-        return buf
-
     def run(self, command):
-        """Run a CLI command and return its text output (banner/prompt stripped)."""
-        if not self.shell:
-            raise RuntimeError("SSH shell not open")
-        # Send command + newline
-        self.shell.send(command + "\n")
-        raw = self._read_until_prompt(timeout=self.timeout)
-        lines = raw.splitlines()
-        # Drop the echo of the command line and the trailing prompt
-        out = []
-        for ln in lines:
+        """Run a CLI command via exec_command and return its stdout text.
+        Brocade Fabric OS does not echo the command on exec stdout; output is
+        just the command result. A trailing prompt line (if any) is stripped."""
+        if not self.client:
+            raise RuntimeError("SSH client not open")
+        # Fabric OS rejects parallel exec channels; retry briefly if busy.
+        last_err = None
+        for _ in range(5):
+            try:
+                stdin, stdout, stderr = self.client.exec_command(
+                    command, timeout=self.timeout)
+                out = stdout.read().decode(errors="ignore")
+                # Drain stderr to keep channel clean
+                try: stderr.read()
+                except Exception: pass
+                return self._strip_prompt(out, command)
+            except paramiko.SSHException as exc:
+                last_err = exc
+                time.sleep(0.5)
+            except Exception as exc:
+                last_err = exc
+                break
+        raise RuntimeError(f"exec_command '{command}' failed on {self.ip}: {last_err}")
+
+    @staticmethod
+    def _strip_prompt(text, command):
+        lines = []
+        for ln in text.splitlines():
             s = ln.strip()
+            if not s:
+                continue
+            # Drop echoed command line (some firmware echoes it on exec too)
             if s == command.strip():
                 continue
-            if re.match(r'^(admin@.*[>:]|.*[>:])\s*$', s):
+            # Drop trailing prompt: "admin@switch:>" or "switch>"
+            if re.match(r'^[\w.-]+@[\w.-]+[>:]\s*$', s) or re.match(r'^[\w.-]+[>:]\s*$', s):
                 continue
-            out.append(ln)
-        return "\n".join(out).strip()
+            lines.append(ln)
+        return "\n".join(lines).strip()
 
 # ── CLI output parsers ───────────────────────────────────────────────────────
 
@@ -1642,19 +1648,27 @@ def san_collect_inventory(ip):
     sess = BrocadeSwitchSession(ip, SWITCH_PORT)
     sess.login()
     try:
-        headers, ports = _parse_switchshow(sess.run("switchshow"))
-        ver_map = _parse_version(sess.run("version") or {})
+        sw_text = sess.run("switchshow")
+        headers, ports = _parse_switchshow(sw_text)
+        log("INFO", f"  switchshow: {len(sw_text)} bytes, {len(headers)} headers, {len(ports)} ports")
+        ver_map = _parse_version(sess.run("version") or "")
         # nameserver: combine nsshow + nscamshow to catch all logged-in devices
         ns_entries = []
         for cmd in ("nsshow", "nscamshow"):
             try:
-                ns_entries.extend(_parse_nsshow(sess.run(cmd) or ""))
-            except Exception:
-                pass
+                ns_text = sess.run(cmd) or ""
+                ns_count = len(_parse_nsshow(ns_text))
+                log("INFO", f"  {cmd}: {len(ns_text)} bytes, {ns_count} entries")
+                ns_entries.extend(_parse_nsshow(ns_text))
+            except Exception as exc:
+                log("WARN", f"  {cmd} failed: {exc}")
         try:
-            sfp_rows = _parse_sfpshow(sess.run("sfpshow") or "")
-        except Exception:
+            sfp_text = sess.run("sfpshow") or ""
+            sfp_rows = _parse_sfpshow(sfp_text)
+            log("INFO", f"  sfpshow: {len(sfp_text)} bytes, {len(sfp_rows)} SFPs")
+        except Exception as exc:
             sfp_rows = []
+            log("WARN", f"  sfpshow failed: {exc}")
 
         summary = {
             "serial":    headers.get("switch_wwn") or headers.get("serial_number"),
