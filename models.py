@@ -1,13 +1,15 @@
 """Device model normalization maps for the NetBox sync tool.
 
-HPE ProLiant server and HPE MSA storage model-name aliases live here so the
-sync script can stay product-agnostic. Import via:
+HPE ProLiant server, HPE MSA storage and HPE B-Series (Brocade OEM) SAN
+switch model-name aliases live here so the sync script can stay
+product-agnostic. Import via:
 
-    from models import SERVER_MODEL_MAP, STORAGE_MODEL_MAP
+    from models import SERVER_MODEL_MAP, STORAGE_MODEL_MAP, SWITCH_MODEL_MAP
 
 Keys are the raw vendor strings (lowercased) as returned by Redfish
-(servers) or the MSA XML API (storage); values are the canonical NetBox
-device-type model names.
+(servers), the MSA XML API (storage) or the Brocade CLI `switchshow`
+output (SAN switches); values are the canonical NetBox device-type
+model names.
 """
 
 # ── HPE ProLiant servers ─────────────────────────────────────────────────────
@@ -43,4 +45,35 @@ STORAGE_MODEL_MAP = {
     "msa 2060":      "HPE MSA 2060",
     "msa 2062 san":  "HPE MSA 2062",
     "msa 2062":      "HPE MSA 2062",
+}
+
+# ── HPE B-Series (Brocade OEM) SAN switches ──────────────────────────────────
+# Keys: raw Brocade `switchshow` "switchType" / model string, lowercased.
+SWITCH_MODEL_MAP = {
+    # Brocade / HPE B-Series common models (HPE SNxxxx = rebadged Brocade)
+    "brocade 300":              "HPE B-series 300",
+    "brocade 320":              "HPE B-series 320",
+    "brocade 5100":             "HPE B-series 5100",
+    "brocade 5300":             "HPE B-series 5300",
+    "brocade 6505":             "HPE B-series 6505",
+    "brocade 6510":             "HPE B-series 6510",
+    "brocade 6520":             "HPE B-series 6520",
+    "brocade 6547":             "HPE B-series 6547",
+    "brocade 7800":             "HPE B-series 7800",
+    "brocade 7840":             "HPE B-series 7840",
+    "brocade dcx 4s":           "HPE B-series DCX 4s",
+    "brocade dcx-4s":           "HPE B-series DCX 4s",
+    "brocade sx6":              "HPE B-series SX6",
+    "hpe sn6500b":              "HPE SN6500B",
+    "hpe sn6010b":              "HPE SN6010B",
+    "hpe sn6010c":              "HPE SN6010C",
+    "hpe sn6500c":              "HPE SN6500C",
+    "hpe sn6700b":              "HPE SN6700B",
+    "hpe sn8700c":              "HPE SN8700C",
+    "hpe sn8600c":              "HPE SN8600C",
+    # Fallback friendly names for bare Brocade model strings
+    "300":                      "HPE B-series 300",
+    "6505":                     "HPE B-series 6505",
+    "6510":                     "HPE B-series 6510",
+    "6520":                     "HPE B-series 6520",
 }

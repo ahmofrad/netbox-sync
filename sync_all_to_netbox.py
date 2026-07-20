@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 sync_all_to_netbox.py
-Merged automation: scans IP ranges for iLO/Redfish BMCs (servers) AND
-HPE storage arrays, auto-creates/updates/removes devices and
-inventory in NetBox. Runs at 00:00 and 12:00 daily.
+Merged automation: scans IP ranges for iLO/Redfish BMCs (servers),
+HPE storage arrays, and HPE B-Series (Brocade OEM) SAN switches,
+auto-creates/updates/removes devices, interfaces and inventory in
+NetBox. Runs at 00:00 and 12:00 daily.
 """
 import hashlib
 import os
@@ -19,9 +20,10 @@ from xml.etree import ElementTree as ET
 import requests
 import pynetbox
 import schedule
+import paramiko
 from dotenv import load_dotenv
 
-from models import SERVER_MODEL_MAP, STORAGE_MODEL_MAP
+from models import SERVER_MODEL_MAP, STORAGE_MODEL_MAP, SWITCH_MODEL_MAP
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
@@ -37,12 +39,17 @@ REDFISH_PASS = os.getenv("REDFISH_PASS")
 STORAGE_USER = os.getenv("STORAGE_USER")
 STORAGE_PASS = os.getenv("STORAGE_PASS")
 
+SWITCH_USER = os.getenv("SWITCH_USER")
+SWITCH_PASS = os.getenv("SWITCH_PASS")
+
 if not NETBOX_URL or not NETBOX_TOKEN:
     raise RuntimeError("NETBOX_URL/NETBOX_TOKEN missing in .env")
 if not REDFISH_USER or not REDFISH_PASS:
     raise RuntimeError("REDFISH_USER/REDFISH_PASS missing in .env")
 if not STORAGE_USER or not STORAGE_PASS:
     raise RuntimeError("STORAGE_USER/STORAGE_PASS missing in .env")
+if not SWITCH_USER or not SWITCH_PASS:
+    raise RuntimeError("SWITCH_USER/SWITCH_PASS missing in .env")
 
 nb = None
 
@@ -73,12 +80,22 @@ STORAGE_RANGES = DEFAULT_STORAGE_RANGES
 if os.getenv("STORAGE_RANGES"):
     STORAGE_RANGES = [r.strip() for r in os.getenv("STORAGE_RANGES").split(",") if r.strip()]
 
+DEFAULT_SAN_RANGES = [
+    "192.0.2.32/29",
+    "198.51.100.32/29",
+]
+SAN_RANGES = DEFAULT_SAN_RANGES
+if os.getenv("SAN_RANGES"):
+    SAN_RANGES = [r.strip() for r in os.getenv("SAN_RANGES").split(",") if r.strip()]
+
 REDFISH_PORT  = int(os.getenv("REDFISH_PORT", "443"))
 STORAGE_PORT  = int(os.getenv("STORAGE_PORT", "443"))
+SWITCH_PORT   = int(os.getenv("SWITCH_PORT", "22"))
 STORAGE_AUTH_HASH = os.getenv("STORAGE_AUTH_HASH", "sha256").lower()
 SCAN_WORKERS  = int(os.getenv("SCAN_WORKERS", "20"))
 SERVER_ROLE   = os.getenv("DEFAULT_ROLE_NAME", "Server")
 STORAGE_ROLE  = os.getenv("DEFAULT_STORAGE_ROLE", "Storage")
+SWITCH_ROLE   = os.getenv("DEFAULT_SWITCH_ROLE", "SAN Switch")
 DEFAULT_MFR   = "HPE"
 DEFAULT_SITE  = os.getenv("DEFAULT_SITE_NAME", "")
 
@@ -95,6 +112,8 @@ ROLE_CONTROLLER = 7
 ROLE_HBA        = 8
 ROLE_BATTERY    = 9
 ROLE_SAS_EXP    = 10
+ROLE_SFP        = 11
+ROLE_FC_PORT    = 12
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # site keyword mapping
@@ -664,7 +683,7 @@ def probe_storage(ip, retries=2, retry_delay=3):
 # unified scanner
 # ═══════════════════════════════════════════════════════════════════════════════
 def scan_all():
-    all_found = {"servers": [], "storage": []}
+    all_found = {"servers": [], "storage": [], "san_switches": []}
 
     bmc_ips = expand_ranges(BMC_RANGES)
     log("INFO", f"Scanning {len(bmc_ips)} IPs across {len(BMC_RANGES)} BMC ranges ...")
@@ -696,6 +715,26 @@ def scan_all():
         log("INFO", f"Storage scan done: {len(all_found['storage'])} found.")
     else:
         log("WARN", "No storage ranges to scan (all excluded or none configured).")
+
+    # ── SAN switches (SSH on port 22) ────────────────────────────────────────
+    used_ips = server_ips | {h["ip"] for h in all_found["storage"]}
+    all_san_ips = expand_ranges(SAN_RANGES)
+    san_ips = [ip for ip in all_san_ips if ip not in used_ips]
+    skipped_san = len(all_san_ips) - len(san_ips)
+    if skipped_san:
+        log("INFO", f"Skipped {skipped_san} IP(s) in SAN ranges already found as server/storage.")
+    if san_ips:
+        log("INFO", f"Scanning {len(san_ips)} IPs for SAN switches (SSH) ...")
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as ex:
+            futures = {ex.submit(probe_san_switch, ip): ip for ip in san_ips}
+            for f in as_completed(futures):
+                r = f.result()
+                if r:
+                    log("INFO", f"  + SAN {r['ip']}  {r.get('model')}  wwn={r.get('wwn')}")
+                    all_found["san_switches"].append(r)
+        log("INFO", f"SAN switch scan done: {len(all_found['san_switches'])} found.")
+    else:
+        log("WARN", "No SAN switch ranges to scan (all excluded or none configured).")
 
     return all_found
 
@@ -1397,6 +1436,379 @@ def _collect_fru_storage(row, add_item):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# SAN switch (Brocade / HPE B-Series) — SSH CLI session + parsers
+# ═══════════════════════════════════════════════════════════════════════════════
+class BrocadeSwitchSession:
+    """Thin SSH wrapper that runs Brocade Fabric OS CLI commands and returns
+    raw text output. Works on HPE B-Series (Brocade OEM) firmware."""
+
+    def __init__(self, ip, port=22, timeout=20):
+        self.ip = ip
+        self.port = port
+        self.timeout = timeout
+        self.client = None
+        self.shell = None
+
+    def login(self):
+        self.client = paramiko.SSHClient()
+        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self.client.connect(
+            hostname=self.ip, port=self.port,
+            username=SWITCH_USER, password=SWITCH_PASS,
+            timeout=self.timeout, allow_agent=False, look_for_keys=False,
+        )
+        self.shell = self.client.invoke_shell()
+        # Drain banner
+        self._read_until_prompt(timeout=5)
+
+    def logout(self):
+        try:
+            if self.shell:
+                self.shell.close()
+        except Exception: pass
+        try:
+            if self.client:
+                self.client.close()
+        except Exception: pass
+        self.shell = None
+        self.client = None
+
+    def _read_until_prompt(self, timeout=10):
+        end = time.time() + timeout
+        buf = ""
+        while time.time() < end:
+            if self.shell.recv_ready():
+                chunk = self.shell.recv(65535).decode(errors="ignore")
+                buf += chunk
+                if re.search(r'[>:]\s*$', buf.splitlines()[-1] if buf.splitlines() else ""):
+                    break
+            else:
+                time.sleep(0.1)
+        return buf
+
+    def run(self, command):
+        """Run a CLI command and return its text output (banner/prompt stripped)."""
+        if not self.shell:
+            raise RuntimeError("SSH shell not open")
+        # Send command + newline
+        self.shell.send(command + "\n")
+        raw = self._read_until_prompt(timeout=self.timeout)
+        lines = raw.splitlines()
+        # Drop the echo of the command line and the trailing prompt
+        out = []
+        for ln in lines:
+            s = ln.strip()
+            if s == command.strip():
+                continue
+            if re.match(r'^(admin@.*[>:]|.*[>:])\s*$', s):
+                continue
+            out.append(ln)
+        return "\n".join(out).strip()
+
+# ── CLI output parsers ───────────────────────────────────────────────────────
+
+def _parse_switchshow(text):
+    """Parse `switchshow` output into key/value headers + port rows."""
+    headers = {}
+    ports = []
+    in_ports = False
+    for line in text.splitlines():
+        s = line.rstrip()
+        if not s: continue
+        if re.match(r'^\s*Index\s+Port\s+Address\s+Media\s+Speed\s+State\s+Proto\s+Comment', s, re.IGNORECASE):
+            in_ports = True
+            continue
+        if in_ports:
+            # Brocade port line: " 0  0  010000  id  N2  Online  FC  F-Port  50:01:43..."
+            m = re.match(
+                r'^\s*(\d+)\s+(\d+)\s+([0-9a-fA-F]+)\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+(\S+))?\s*(.*)$',
+                s,
+            )
+            if m:
+                ports.append({
+                    "index":     int(m.group(1)),
+                    "port":      int(m.group(2)),
+                    "address":   m.group(3),
+                    "media":     m.group(4),
+                    "speed":     m.group(5),
+                    "state":     m.group(6),
+                    "proto":     m.group(7) or "",
+                    "comment":   m.group(8) or "",
+                })
+                continue
+        # Header lines: "key: value" or "key           value"
+        m = re.match(r'^([A-Za-z][\w \-/]+?):\s+(.+)$', s)
+        if m and not in_ports:
+            key = m.group(1).strip().lower().replace(" ", "_")
+            headers[key] = m.group(2).strip()
+    return headers, ports
+
+def _parse_version(text):
+    """Parse `version` / `firmwareshow` output."""
+    out = {}
+    for line in text.splitlines():
+        m = re.match(r'^([A-Za-z][\w \-/]*?):\s+(.+)$', line.strip())
+        if m:
+            out[m.group(1).strip().lower().replace(" ", "_")] = m.group(2).strip()
+    return out
+
+def _parse_nsshow(text):
+    """Parse `nsshow` output. Returns list of dicts per logged-in device."""
+    entries = []
+    cur = {}
+    for line in text.splitlines():
+        s = line.strip()
+        if not s: continue
+        # Each entry begins with a line containing "Port Id:" or "Port Name:"
+        if re.match(r'^Port\s+(Id|Name|World Wide Node Name|World Wide Port Name)\s*:', s, re.IGNORECASE):
+            if cur:
+                entries.append(cur); cur = {}
+        m = re.match(r'^([A-Za-z][\w ]*?):\s+(.+)$', s)
+        if m:
+            key = m.group(1).strip().lower().replace(" ", "_")
+            cur[key] = m.group(2).strip()
+    if cur:
+        entries.append(cur)
+    return entries
+
+def _parse_sfpshow(text):
+    """Parse `sfpshow` output. Returns list of dicts per port SFP."""
+    rows = []
+    cur = {}
+    for line in text.splitlines():
+        s = line.strip()
+        if not s: continue
+        if re.match(r'^Identifier\s*:', s, re.IGNORECASE):
+            if cur:
+                rows.append(cur); cur = {}
+        m = re.match(r'^([A-Za-z][\w \-/]*?):\s+(.+)$', s)
+        if m:
+            key = m.group(1).strip().lower().replace(" ", "_")
+            cur[key] = m.group(2).strip()
+    if cur:
+        rows.append(cur)
+    return rows
+
+def _wwn_normalize(wwn):
+    """Normalize a WWN to colon-separated lowercase form."""
+    if not wwn: return None
+    s = re.sub(r'[^0-9a-fA-F]', '', str(wwn)).lower()
+    if len(s) != 16: return None
+    return ":".join(s[i:i+2] for i in range(0, 16, 2))
+
+# ── probe + inventory collection ─────────────────────────────────────────────
+
+def probe_san_switch(ip, retries=2, retry_delay=3):
+    for attempt in range(1, retries + 1):
+        if not is_port_open(ip, SWITCH_PORT):
+            if attempt < retries: time.sleep(retry_delay); continue
+            return None
+        sess = BrocadeSwitchSession(ip, SWITCH_PORT)
+        try:
+            sess.login()
+            sw = sess.run("switchshow")
+            if not sw:
+                if attempt < retries: time.sleep(retry_delay); continue
+                return None
+            headers, _ = _parse_switchshow(sw)
+            ver = sess.run("version")
+            ver_map = _parse_version(ver) if ver else {}
+            model = headers.get("switch_type") or headers.get("model") or headers.get("product")
+            serial = headers.get("switch_wwn") or headers.get("serial_number")
+            wwn = _wwn_normalize(headers.get("switch_wwn"))
+            name = headers.get("switch_name") or headers.get("switchname") or f"san-{ip.replace('.', '-')}"
+            fw = (ver_map.get("fabric_os") or ver_map.get("kernel") or
+                  ver_map.get("firmware") or ver_map.get("version"))
+            return {
+                "ip":           ip,
+                "host":         f"{ip}:{SWITCH_PORT}",
+                "serial":       serial,
+                "model":        model,
+                "hostname":     name.strip(),
+                "manufacturer": "Brocade",
+                "wwn":          wwn,
+                "firmware":     fw,
+            }
+        except Exception:
+            if attempt < retries: time.sleep(retry_delay); continue
+            return None
+        finally:
+            try: sess.logout()
+            except Exception: pass
+    return None
+
+def san_collect_inventory(ip):
+    """Full inventory pull for a SAN switch: identity, ports, nameserver, SFPs."""
+    sess = BrocadeSwitchSession(ip, SWITCH_PORT)
+    sess.login()
+    try:
+        headers, ports = _parse_switchshow(sess.run("switchshow"))
+        ver_map = _parse_version(sess.run("version") or {})
+        # nameserver: combine nsshow + nscamshow to catch all logged-in devices
+        ns_entries = []
+        for cmd in ("nsshow", "nscamshow"):
+            try:
+                ns_entries.extend(_parse_nsshow(sess.run(cmd) or ""))
+            except Exception:
+                pass
+        try:
+            sfp_rows = _parse_sfpshow(sess.run("sfpshow") or "")
+        except Exception:
+            sfp_rows = []
+
+        summary = {
+            "serial":    headers.get("switch_wwn") or headers.get("serial_number"),
+            "wwn":       _wwn_normalize(headers.get("switch_wwn")),
+            "model":     normalize_model(headers.get("switch_type") or headers.get("model"),
+                                        SWITCH_MODEL_MAP) or headers.get("switch_type"),
+            "firmware":  (ver_map.get("fabric_os") or ver_map.get("kernel") or
+                          ver_map.get("firmware") or ver_map.get("version")),
+            "hostname":  (headers.get("switch_name") or headers.get("switchname") or "").strip(),
+            "port_count": len(ports),
+        }
+
+        # Build inventory items: SFPs and FC port modules
+        inventory = {}
+        add_item = _make_add_item(inventory)
+
+        # Map SFP rows to ports by index when possible (sfpshow is ordered)
+        for idx, sfp in enumerate(sfp_rows):
+            sfp_serial = sfp.get("vendor_serial_number") or sfp.get("serial_number")
+            if not _invalid_serial(sfp_serial):
+                add_item(
+                    name=f"SFP Port {idx}",
+                    manufacturer=sfp.get("vendor_name") or sfp.get("vendor") or "Brocade",
+                    part_number=sfp.get("vendor_part_number") or sfp.get("part_number"),
+                    serial=sfp_serial,
+                    description=(f"Port={idx} Type={sfp.get('identifier') or 'SFP'} "
+                                 f"Temp={sfp.get('temperature')} "
+                                 f"VendorPN={sfp.get('vendor_part_number')}"),
+                    role_id=ROLE_SFP,
+                )
+
+        return {
+            "summary":    summary,
+            "ports":      ports,
+            "nameserver": ns_entries,
+            "sfp":        sfp_rows,
+            "inventory":  inventory,
+        }
+    finally:
+        sess.logout()
+
+# ── NetBox CRUD for SAN switches ─────────────────────────────────────────────
+
+def ensure_san_switch_device(probe):
+    serial = (probe.get("serial") or "").strip()
+    mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Brocade")
+    role_id = get_or_create_role(SWITCH_ROLE, "f44336")
+    site_name = resolve_site_from_name(probe.get("hostname") or "")
+    site_id = get_or_create_site(site_name)
+    dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, SWITCH_MODEL_MAP)
+    name = _device_name(probe, prefix="san")
+    api = get_netbox()
+    dev = find_device(serial, role_name=SWITCH_ROLE)
+    if dev is None:
+        cands = list(api.dcim.devices.filter(name=name, site_id=site_id, role_id=role_id))
+        dev = cands[0] if cands else None
+        if dev: log("INFO", f"  Found san switch by name+site: {name} (id={dev.id})")
+    payload = {
+        "name": name, "status": "active", "site": site_id,
+        "device_type": dtype_id, "role": role_id,
+        "custom_fields": {
+            "san_switch_ip":      probe["ip"],
+            "san_switch_enabled": True,
+            "san_switch_wwn":     probe.get("wwn"),
+            "san_switch_firmware": probe.get("firmware"),
+            "san_switch_model":   probe.get("model"),
+        },
+        **({"serial": serial} if not _invalid_serial(serial) else {}),
+    }
+    if dev:
+        api.dcim.devices.update([{"id": dev.id, **payload}])
+        log("INFO", f"  SAN switch updated: {name} (id={dev.id})")
+        return dev.id
+    new = api.dcim.devices.create(payload)
+    log("INFO", f"  SAN switch created: {name} (id={new.id})")
+    return new.id
+
+def mark_san_offline(dev_id, dev_name):
+    try:
+        get_netbox().dcim.devices.update([{
+            "id": dev_id, "status": "offline",
+            "custom_fields": {"san_switch_enabled": False},
+        }])
+        log("WARN", f"  SAN switch marked offline: {dev_name} (id={dev_id})")
+    except Exception as e:
+        log("ERROR", f"  Could not mark SAN switch offline {dev_name}: {e}")
+
+def _fc_interface_type_id():
+    """Get or create a 'fc' (Fibre Channel) interface type in NetBox."""
+    api = get_netbox()
+    try:
+        t = api.dcim.interface_types.get(name="FC")
+        if t: return t.id
+    except Exception: pass
+    try:
+        return api.dcim.interface_types.create({"name": "FC", "slug": "fc"}).id
+    except Exception:
+        # NetBox may not support custom interface types via API; fall back to None
+        return None
+
+def sync_san_interfaces(dev_id, ports, nameserver):
+    """Create/update NetBox interfaces for each FC port on the switch.
+    Connected device WWN (from nameserver) is stored in interface description."""
+    api = get_netbox()
+    existing = {}
+    for iface in list(api.dcim.interfaces.filter(device_id=dev_id)):
+        existing[str(iface.name)] = iface
+
+    # Map port index -> logged-in WWNs (from nameserver entries that include port id)
+    port_wwns = {}
+    for ns in nameserver:
+        # Port Id typically like "010c00" -> first 2 hex digits = switch port index (octant)
+        pid = (ns.get("port_id") or "").lower()
+        if len(pid) >= 2:
+            try: idx = int(pid[:2], 16)
+            except Exception: continue
+            wwn = _wwn_normalize(ns.get("port_world_wide_name") or ns.get("world_wide_port_name"))
+            if wwn: port_wwns.setdefault(idx, []).append(wwn)
+
+    fc_type_id = _fc_interface_type_id()
+    seen = set()
+    for p in ports:
+        name = f"FC {p['port']}"
+        seen.add(name)
+        desc_parts = [f"speed={p.get('speed')}", f"state={p.get('state')}"]
+        wwns = port_wwns.get(p["index"]) or []
+        if wwns:
+            desc_parts.append("WWNs=" + ",".join(wwns))
+        elif p.get("comment"):
+            desc_parts.append(p["comment"])
+        payload = {
+            "device":     dev_id,
+            "name":       name,
+            "type":       fc_type_id,
+            "enabled":    p.get("state", "").lower() == "online",
+            "description": " | ".join(desc_parts)[:200],
+            "mgmt_only":  False,
+        }
+        if name in existing:
+            api.dcim.interfaces.update([{"id": existing[name].id, **payload}])
+        else:
+            try:
+                api.dcim.interfaces.create(payload)
+            except Exception as e:
+                log("WARN", f"  Could not create interface {name}: {e}")
+
+    # Remove interfaces that no longer exist on the switch
+    for name, iface in existing.items():
+        if name not in seen:
+            try: iface.delete()
+            except Exception: pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # NetBox inventory sync (shared)
 # ═══════════════════════════════════════════════════════════════════════════════
 def sync_inventory(dev_id, new_inventory):
@@ -1437,7 +1849,7 @@ def sync_inventory(dev_id, new_inventory):
 # ═══════════════════════════════════════════════════════════════════════════════
 def run_sync():
     log("INFO", "=" * 60)
-    log("INFO", "Unified sync started (servers + storage)")
+    log("INFO", "Unified sync started (servers + storage + SAN switches)")
     log("INFO", "=" * 60)
 
     found = scan_all()
@@ -1538,6 +1950,58 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  inventory sync failed for {ip}: {e}")
 
+    # ── Process SAN switches ──────────────────────────────────────────────────
+    live_san_ips = {h["ip"] for h in found["san_switches"]}
+    for probe in found["san_switches"]:
+        ip = probe["ip"]
+        log("INFO", f"Processing SAN SWITCH {ip}  ({probe.get('model')} / wwn={probe.get('wwn')})")
+
+        try:
+            dev_id = ensure_san_switch_device(probe)
+        except Exception as e:
+            log("ERROR", f"  ensure_san_switch_device failed for {ip}: {e}"); continue
+
+        try:
+            data = san_collect_inventory(ip)
+        except KeyboardInterrupt: raise
+        except Exception as e:
+            log("ERROR", f"  SAN inventory collection failed for {ip}: {e}"); continue
+
+        summary = data["summary"]
+        ports = data["ports"]
+        nameserver = data["nameserver"]
+        inv = data["inventory"]
+
+        try:
+            payload = {
+                "id": dev_id,
+                "status": "active",
+                "custom_fields": {
+                    "san_switch_ip":        ip,
+                    "san_switch_enabled":   True,
+                    "san_switch_wwn":       summary.get("wwn") or probe.get("wwn"),
+                    "san_switch_firmware":  summary.get("firmware") or probe.get("firmware"),
+                    "san_switch_model":     summary.get("model") or probe.get("model"),
+                    "san_switch_port_count": summary.get("port_count"),
+                },
+            }
+            if summary.get("serial"): payload["serial"] = summary["serial"]
+            api.dcim.devices.update([payload])
+        except Exception as e:
+            log("ERROR", f"  SAN switch update failed for {ip}: {e}")
+
+        try:
+            sync_san_interfaces(dev_id, ports, nameserver)
+            log("INFO", f"  [OK] SAN {ip} — {len(ports)} ports, {len(nameserver)} nameserver entries")
+        except Exception as e:
+            log("ERROR", f"  SAN interface sync failed for {ip}: {e}")
+
+        try:
+            sync_inventory(dev_id, inv)
+            log("INFO", f"  [OK] SAN {ip} — {len(inv)} inventory items synced")
+        except Exception as e:
+            log("ERROR", f"  SAN inventory sync failed for {ip}: {e}")
+
     # ── Mark unreachable devices offline ─────────────────────────────────────
     log("INFO", "Checking for unreachable servers (Redfish) ...")
     try:
@@ -1560,6 +2024,17 @@ def run_sync():
                 mark_storage_offline(dev.id, dev.name)
     except Exception as e:
         log("ERROR", f"Storage offline check failed: {e}")
+
+    log("INFO", "Checking for unreachable SAN switches ...")
+    try:
+        for dev in list(api.dcim.devices.filter(cf_san_switch_enabled=True)):
+            san_ip = (dev.custom_fields or {}).get("san_switch_ip")
+            if not san_ip: continue
+            ip = str(san_ip).split("/")[0].strip()
+            if ip not in live_san_ips:
+                mark_san_offline(dev.id, dev.name)
+    except Exception as e:
+        log("ERROR", f"SAN switch offline check failed: {e}")
 
     log("INFO", "Unified sync complete")
     log("INFO", "=" * 60)

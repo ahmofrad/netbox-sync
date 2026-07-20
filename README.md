@@ -161,8 +161,13 @@ STORAGE_PASS=changeme
 STORAGE_PORT=443
 STORAGE_AUTH_HASH=sha256
 
+SWITCH_USER=netbox
+SWITCH_PASS=changeme
+SWITCH_PORT=22
+
 BMC_RANGES=192.0.2.0/27,198.51.100.0/27
 STORAGE_RANGES=192.0.2.16/32,198.51.100.16/32
+SAN_RANGES=192.0.2.32/29,198.51.100.32/29
 
 SITE_KEYWORD_MAP=dc1:Datacenter1,hq:HQ
 
@@ -170,6 +175,7 @@ SCAN_WORKERS=20
 DEFAULT_SITE_NAME=Default
 DEFAULT_ROLE_NAME=Server
 DEFAULT_STORAGE_ROLE=Storage
+DEFAULT_SWITCH_ROLE=SAN Switch
 ```
 
 ## NetBox prerequisites
@@ -190,6 +196,8 @@ The script assigns inventory-item **roles** by **hardcoded ID**. Ensure these ro
 | 8  | HBA       | Host bus adapters / FC |
 | 9  | Battery   | Smart storage batteries |
 | 10 | SAS Exp   | SAS expanders / FRUs |
+| 11 | SFP       | SFP transceivers (SAN switches) |
+| 12 | FC Port   | Fibre Channel ports (SAN switches) |
 
 ### 2. Custom fields
 
@@ -223,11 +231,31 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 | `storage_disk_count` | Integer | Disk count |
 | `storage_total_capacity_gib` | Integer | Total capacity (GiB) |
 
-> The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` (NetBox custom-field filter syntax).
+**For SAN switches (HPE B-Series / Brocade):**
+
+| Custom field | Type | Label |
+|--------------|------|-------|
+| `san_switch_ip` | Text | SAN switch IP |
+| `san_switch_enabled` | Boolean | SAN switch enabled |
+| `san_switch_wwn` | Text | Switch WWN |
+| `san_switch_firmware` | Text | Firmware (Fabric OS) |
+| `san_switch_model` | Text | Model |
+| `san_switch_port_count` | Integer | Port count |
+
+> The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` (NetBox custom-field filter syntax).
 
 ### 3. Device roles & sites
 
-`Server` and `Storage` device roles, `HPE` manufacturer, and sites are **auto-created** if missing. You may also pre-create them.
+`Server`, `Storage`, and `SAN Switch` device roles, `HPE` / `Brocade` manufacturers, and sites are **auto-created** if missing. You may also pre-create them.
+
+### 4. Inventory item roles (SAN switches)
+
+In addition to the server/storage roles (1–10), the SAN switch collector writes inventory items with these roles:
+
+| ID | Name | Used for |
+|----|------|----------|
+| 11 | SFP | SFP transceivers |
+| 12 | FC Port | Fibre Channel ports (reserved) |
 
 ## Running
 
@@ -269,6 +297,10 @@ For production, run under systemd, a Windows service, or a container so it survi
 - HPE MSA 2040, 2042, 2050, 2052, 2060
 - Handles field-name differences between `show disks` (newer firmware) and `show disk-parameters` (older firmware).
 
+**SAN switches (Brocade / HPE B-Series, SSH CLI):**
+- HPE SN6010B/C, SN6500B/C, SN6700B, SN8600C, SN8700C and equivalent Brocade 300/320/5100/5300/6505/6510/6520/6547/7800/7840/DCX-4S/SX6.
+- Connects via SSH and runs `switchshow`, `version`, `nsshow`, `nscamshow`, `sfpshow`.
+
 See `models.py` for the full model alias maps. Add your own models there.
 
 ## Inventory items collected
@@ -295,6 +327,16 @@ See `models.py` for the full model alias maps. Add your own models there.
 | PSUs | `show power-supplies` | location, health, status, serial |
 | FRUs / SAS expanders | `show frus` / `show enclosure-fru` | name, location, health, serial |
 
+**From each SAN switch (Brocade CLI):**
+
+| Component | CLI command | Key fields |
+|----------|-------------|------------|
+| Switch identity | `switchshow` | switch WWN, model, switch name |
+| Firmware | `version` | Fabric OS version |
+| FC ports (NetBox interfaces) | `switchshow` | index, port, media, speed, state, proto, connected WWN |
+| Name server (logged-in devices) | `nsshow` / `nscamshow` | port id, port WWN, node WWN |
+| SFP transceivers | `sfpshow` | vendor, part number, serial, temperature |
+
 ## How devices are matched
 
 Each discovered device is matched to an existing NetBox device by **serial number** (primary). If the serial is invalid/missing, a secondary lookup by **name + site + role** is used. This prevents duplicate devices across runs.
@@ -303,7 +345,7 @@ For storage, the secondary lookup also avoids clashing with a server that has th
 
 ## Offline detection
 
-After each sync, the script queries NetBox for all devices where `redfish_enabled=True` (servers) or `storage_enabled=True` (storage). If a device's stored BMC/storage IP was **not** seen in the current scan, it is marked `status=offline` and its `*_enabled` flag is set to `false`. It is **not** deleted — the next successful scan flips it back to `active`.
+After each sync, the script queries NetBox for all devices where `redfish_enabled=True` (servers), `storage_enabled=True` (storage), or `san_switch_enabled=True` (SAN switches). If a device's stored BMC/storage/SAN IP was **not** seen in the current scan, it is marked `status=offline` and its `*_enabled` flag is set to `false`. It is **not** deleted — the next successful scan flips it back to `active`.
 
 ---
 
@@ -433,8 +475,13 @@ STORAGE_PASS=changeme
 STORAGE_PORT=443
 STORAGE_AUTH_HASH=sha256
 
+SWITCH_USER=netbox
+SWITCH_PASS=changeme
+SWITCH_PORT=22
+
 BMC_RANGES=192.0.2.0/27,198.51.100.0/27
 STORAGE_RANGES=192.0.2.16/32,198.51.100.16/32
+SAN_RANGES=192.0.2.32/29,198.51.100.32/29
 
 SITE_KEYWORD_MAP=dc1:Datacenter1,hq:HQ
 
@@ -442,6 +489,7 @@ SCAN_WORKERS=20
 DEFAULT_SITE_NAME=Default
 DEFAULT_ROLE_NAME=Server
 DEFAULT_STORAGE_ROLE=Storage
+DEFAULT_SWITCH_ROLE=SAN Switch
 ```
 
 ## پیش‌نیازهای NetBox
@@ -462,6 +510,8 @@ DEFAULT_STORAGE_ROLE=Storage
 | 8  | HBA | هاست باس آداپتور / FC |
 | 9  | Battery | باتری Smart Storage |
 | 10 | SAS Exp | اکسپندر SAS / FRU |
+| 11 | SFP | ترانسسیور SFP (سوئیچ SAN) |
+| 12 | FC Port | پورت Fibre Channel (سوئیچ SAN) |
 
 ### ۲. فیلدهای سفارشی
 
@@ -495,11 +545,31 @@ DEFAULT_STORAGE_ROLE=Storage
 | `storage_disk_count` | Integer | تعداد دیسک‌ها |
 | `storage_total_capacity_gib` | Integer | کل ظرفیت (GiB) |
 
-> حلقه تشخیص آفلاین، دستگاه‌ها را با فیلتر `cf_redfish_enabled=True` / `cf_storage_enabled=True` فیلتر می‌کند (سینتکس فیلتر custom field در NetBox).
+**برای سوئیچ‌های SAN (HPE B-Series / Brocade):**
+
+| فیلد سفارشی | نوع | برچسب |
+|--------------|------|-------|
+| `san_switch_ip` | Text | IP سوئیچ SAN |
+| `san_switch_enabled` | Boolean | سوئیچ SAN فعال |
+| `san_switch_wwn` | Text | WWN سوئیچ |
+| `san_switch_firmware` | Text | فریم‌ور (Fabric OS) |
+| `san_switch_model` | Text | مدل |
+| `san_switch_port_count` | Integer | تعداد پورت‌ها |
+
+> حلقه تشخیص آفلاین، دستگاه‌ها را با فیلتر `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` فیلتر می‌کند (سینتکس فیلتر custom field در NetBox).
 
 ### ۳. نقش‌ها و سایت‌های دستگاه
 
-نقش‌های `Server` و `Storage`، سازنده `HPE` و سایت‌ها **به‌طور خودکار** ساخته می‌شوند اگر از قبل وجود نداشته باشند. البته می‌توانید آن‌ها را پیش از اجرا نیز دستی بسازید.
+نقش‌های `Server`، `Storage` و `SAN Switch`، سازندگان `HPE` / `Brocade` و سایت‌ها **به‌طور خودکار** ساخته می‌شوند اگر از قبل وجود نداشته باشند. البته می‌توانید آن‌ها را پیش از اجرا نیز دستی بسازید.
+
+### ۴. نقش‌های inventory item (سوئیچ‌های SAN)
+
+علاوه بر نقش‌های سرور/ذخیره‌سازی (۱ تا ۱۰)، کلکتور سوئیچ SAN آیتم‌های inventory را با این نقش‌ها ثبت می‌کند:
+
+| ID | نام نقش | کاربرد |
+|----|--------|--------|
+| 11 | SFP | ترانسسیورهای SFP |
+| 12 | FC Port | پورت‌های Fibre Channel (رزرو شده) |
 
 ## اجرای برنامه
 
@@ -541,6 +611,10 @@ python sync_all_to_netbox.py
 - HPE MSA 2040، 2042، 2050، 2052، 2060، 2062
 - تفاوت نام فیلدها بین `show disks` (فریم‌ور جدیدتر) و `show disk-parameters` (فریم‌ور قدیمی‌تر) به‌طور خودکار مدیریت می‌شود.
 
+**سوئیچ‌های SAN (Brocade / HPE B-Series، CLI از طریق SSH):**
+- HPE SN6010B/C، SN6500B/C، SN6700B، SN8600C، SN8700C و معادل‌های Brocade 300/320/5100/5300/6505/6510/6520/6547/7800/7840/DCX-4S/SX6.
+- اتصال از طریق SSH و اجرای `switchshow`، `version`، `nsshow`، `nscamshow`، `sfpshow`.
+
 برای مشاهده نگاشت کامل نام مدل‌ها به `models.py` مراجعه کنید. می‌توانید مدل‌های جدید را نیز در همان فایل اضافه کنید.
 
 ## آیتم‌های inventory جمع‌آوری‌شده
@@ -567,6 +641,16 @@ python sync_all_to_netbox.py
 | PSU | `show power-supplies` | مکان، سلامت، وضعیت، سریال |
 | FRU / اکسپندر SAS | `show frus` / `show enclosure-fru` | نام، مکان، سلامت، سریال |
 
+**از هر سوئیچ SAN (Brocade CLI):**
+
+| قطعه | دستور CLI | فیلدهای کلیدی |
+|----------|-------------|------------|
+| هویت سوئیچ | `switchshow` | WWN سوئیچ، مدل، نام سوئیچ |
+| فریم‌ور | `version` | نسخه Fabric OS |
+| پورت‌های FC (رابط‌های NetBox) | `switchshow` | ایندکس، پورت، مدیا، سرعت، وضعیت، WWN متصل |
+| Name server (دستگاه‌های لاگین‌شده) | `nsshow` / `nscamshow` | port id، port WWN، node WWN |
+| ترانسسیورهای SFP | `sfpshow` | سازنده، پارت‌نامبر، سریال، دما |
+
 ## نحوه تطبیق دستگاه‌ها
 
 هر دستگاه کشف‌شده عمدتاً از طریق **شماره سریال** با دستگاه موجود در NetBox تطبیق داده می‌شود. اگر سریال نامعتبر یا ناموجود باشد، جستجوی ثانویه بر اساس **نام + سایت + نقش** انجام می‌شود. این رویکرد از ایجاد دستگاه‌های تکراری بین اجراهای مختلف جلوگیری می‌کند.
@@ -575,4 +659,4 @@ python sync_all_to_netbox.py
 
 ## تشخیص آفلاین
 
-پس از هر همگام‌سازی، اسکریپت تمام دستگاه‌هایی که `redfish_enabled=True` (سرورها) یا `storage_enabled=True` (ذخیره‌سازی) دارند را از NetBox استعلام می‌کند. اگر IP ذخیره‌شده BMC/ذخیره‌سازی دستگاه در اسکن فعلی **دیده نشده باشد**، وضعیت آن به `status=offline` و فلگ `*_enabled` آن به `false` تغییر می‌کند. دستگاه **حذف نمی‌شود** — اسکن موفق بعدی آن را مجدداً به `active` بازمی‌گرداند.
+پس از هر همگام‌سازی، اسکریپت تمام دستگاه‌هایی که `redfish_enabled=True` (سرورها)، `storage_enabled=True` (ذخیره‌سازی) یا `san_switch_enabled=True` (سوئیچ‌های SAN) دارند را از NetBox استعلام می‌کند. اگر IP ذخیره‌شده BMC/ذخیره‌سازی/SAN دستگاه در اسکن فعلی **دیده نشده باشد**، وضعیت آن به `status=offline` و فلگ `*_enabled` آن به `false` تغییر می‌کند. دستگاه **حذف نمی‌شود** — اسکن موفق بعدی آن را مجدداً به `active` بازمی‌گرداند.
