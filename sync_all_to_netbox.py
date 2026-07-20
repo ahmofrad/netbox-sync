@@ -1521,13 +1521,19 @@ def _parse_switchshow(text):
     for line in text.splitlines():
         s = line.rstrip()
         if not s: continue
-        if re.match(r'^\s*Index\s+Port\s+Address\s+Media\s+Speed\s+State\s+Proto\s+Comment', s, re.IGNORECASE):
+        # Header: "Index Port Address Media Speed State Proto [Comment]"
+        if re.match(r'^\s*Index\s+Port\s+Address\s+Media\s+Speed\s+State\s+Proto(\s+Comment)?\s*$', s, re.IGNORECASE):
             in_ports = True
             continue
+        # Skip the "=" separator line that follows the header
+        if in_ports and re.match(r'^=+\s*$', s):
+            continue
         if in_ports:
-            # Brocade port line: " 0  0  010000  id  N2  Online  FC  F-Port  50:01:43..."
+            # Brocade port line:
+            #   " 0  0  010000  id  N16  Online  FC  F-Port  51:40:2e:c0:18:1b:52:20"
+            #   " 5  5  010500  id  N16  No_Light  FC  (Ports on Demand ...)"
             m = re.match(
-                r'^\s*(\d+)\s+(\d+)\s+([0-9a-fA-F]+)\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+(\S+))?\s*(.*)$',
+                r'^\s*(\d+)\s+(\d+)\s+([0-9a-fA-F]+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+(.*))?$',
                 s,
             )
             if m:
@@ -1539,10 +1545,10 @@ def _parse_switchshow(text):
                     "speed":     m.group(5),
                     "state":     m.group(6),
                     "proto":     m.group(7) or "",
-                    "comment":   m.group(8) or "",
+                    "comment":   (m.group(8) or "").strip(),
                 })
                 continue
-        # Header lines: "key: value" or "key           value"
+        # Header lines: "key: value" (before the port table)
         m = re.match(r'^([A-Za-z][\w \-/]+?):\s+(.+)$', s)
         if m and not in_ports:
             key = m.group(1).strip().lower().replace(" ", "_")
@@ -1578,13 +1584,50 @@ def _parse_nsshow(text):
     return entries
 
 def _parse_sfpshow(text):
-    """Parse `sfpshow` output. Returns list of dicts per port SFP."""
+    """Parse `sfpshow` output. Returns list of dicts per port SFP.
+
+    Supports two formats emitted by Fabric OS:
+      1. Compact one-line-per-port (older/common firmware):
+         "Port  0: id (sw) Vendor: BROCADE  Serial No: HAA...  Speed: 4,8,16_Gbps"
+      2. Detailed multi-line key:value blocks (newer firmware):
+         "Port  0:\\n  Identifier: ...\\n  Vendor: ..."
+    """
     rows = []
+    lines = text.splitlines()
+
+    # Detect compact format: any line starts with "Port <n>:"
+    compact = any(re.match(r'^\s*Port\s+\d+\s*:', ln) for ln in lines)
+
+    if compact:
+        for ln in lines:
+            s = ln.strip()
+            if not s: continue
+            m = re.match(r'^\s*Port\s+(\d+)\s*:\s*(.*)$', s)
+            if not m: continue
+            port = int(m.group(1))
+            rest = m.group(2)
+            row = {"port": port}
+            # Pull "Vendor: X", "Serial No: Y", "Speed: Z" out of the rest.
+            # Each value extends until the next known key or end of string.
+            keys = ("Vendor", "Serial No", "Speed", "Part Number", "Part No")
+            for key in keys:
+                mm = re.search(
+                    rf'{re.escape(key)}\s*:\s*(.+?)(?=\s+(?:{"|".join(re.escape(k) for k in keys)})\s*:|$)',
+                    rest,
+                )
+                if mm:
+                    k = key.lower().replace(" ", "_")
+                    row[k] = mm.group(1).strip()
+            rows.append(row)
+        return rows
+
+    # Detailed multi-line format
     cur = {}
-    for line in text.splitlines():
+    for line in lines:
         s = line.strip()
         if not s: continue
-        if re.match(r'^Identifier\s*:', s, re.IGNORECASE):
+        # New block boundary: a "Port N:" line or an "Identifier:" line
+        if re.match(r'^\s*Port\s+\d+\s*:', s, re.IGNORECASE) or re.match(r'^Identifier\s*:', s, re.IGNORECASE):
             if cur:
                 rows.append(cur); cur = {}
         m = re.match(r'^([A-Za-z][\w \-/]*?):\s+(.+)$', s)
@@ -1687,16 +1730,21 @@ def san_collect_inventory(ip):
 
         # Map SFP rows to ports by index when possible (sfpshow is ordered)
         for idx, sfp in enumerate(sfp_rows):
-            sfp_serial = sfp.get("vendor_serial_number") or sfp.get("serial_number")
+            sfp_serial = (sfp.get("vendor_serial_number") or sfp.get("serial_no")
+                          or sfp.get("serial_number"))
             if not _invalid_serial(sfp_serial):
+                port_num = sfp.get("port", idx)
                 add_item(
-                    name=f"SFP Port {idx}",
-                    manufacturer=sfp.get("vendor_name") or sfp.get("vendor") or "Brocade",
-                    part_number=sfp.get("vendor_part_number") or sfp.get("part_number"),
+                    name=f"SFP Port {port_num}",
+                    manufacturer=(sfp.get("vendor_name") or sfp.get("vendor")
+                                  or "Brocade"),
+                    part_number=(sfp.get("vendor_part_number")
+                                 or sfp.get("part_number") or sfp.get("part_no")),
                     serial=sfp_serial,
-                    description=(f"Port={idx} Type={sfp.get('identifier') or 'SFP'} "
+                    description=(f"Port={port_num} Type={sfp.get('identifier') or 'SFP'} "
+                                 f"Speed={sfp.get('speed') or sfp.get('speed_capability')} "
                                  f"Temp={sfp.get('temperature')} "
-                                 f"VendorPN={sfp.get('vendor_part_number')}"),
+                                 f"VendorPN={sfp.get('vendor_part_number') or sfp.get('part_no')}"),
                     role_id=ROLE_SFP,
                 )
 
