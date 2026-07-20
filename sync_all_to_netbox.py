@@ -787,6 +787,23 @@ def get_or_create_role(name, color="9e9e9e"):
     return api.dcim.device_roles.create(
         {"name": name, "slug": slugify(name), "color": color}).id
 
+_INVENTORY_ROLE_CACHE = {}
+def get_or_create_inventory_role(name, color="9e9e9e"):
+    """Inventory-item-role IDs are NOT portable between NetBox instances —
+    unlike device roles, they can't safely be hardcoded, so resolve by name
+    (creating the role if it doesn't exist yet) and cache the result."""
+    if name in _INVENTORY_ROLE_CACHE:
+        return _INVENTORY_ROLE_CACHE[name]
+    api = get_netbox()
+    r = api.dcim.inventory_item_roles.get(name=name)
+    if not r:
+        r = api.dcim.inventory_item_roles.get(slug=slugify(name))
+    if not r:
+        r = api.dcim.inventory_item_roles.create(
+            {"name": name, "slug": slugify(name), "color": color})
+    _INVENTORY_ROLE_CACHE[name] = r.id
+    return r.id
+
 def get_or_create_site(name):
     return _get_or_create(get_netbox().dcim.sites, {"name": name},
                           {"name": name, "slug": slugify(name), "status": "active"})
@@ -1666,6 +1683,24 @@ def _wwn_normalize(wwn):
     if len(s) != 16: return None
     return ":".join(s[i:i+2] for i in range(0, 16, 2))
 
+def _parse_chassisshow(text):
+    """Parse `chassisshow` output for the real chassis serial + model.
+
+    Brocade `chassisshow` returns key/value pairs like:
+        Chassis PID: BES-6510
+        Chassis Serial No: XXXXXXXXX
+        ...
+    Returns a dict with lowercased-underscore keys."""
+    out = {}
+    for line in text.splitlines():
+        s = line.strip()
+        if not s: continue
+        m = re.match(r'^([A-Za-z][\w \-/]*?):\s+(.+)$', s)
+        if m:
+            key = m.group(1).strip().lower().replace(" ", "_")
+            out[key] = m.group(2).strip()
+    return out
+
 # ── probe + inventory collection ─────────────────────────────────────────────
 
 def probe_san_switch(ip, retries=2, retry_delay=3):
@@ -1683,9 +1718,17 @@ def probe_san_switch(ip, retries=2, retry_delay=3):
             headers, _ = _parse_switchshow(sw)
             ver = sess.run("version")
             ver_map = _parse_version(ver) if ver else {}
-            model = headers.get("switch_type") or headers.get("model") or headers.get("product")
-            serial = headers.get("switch_wwn") or headers.get("serial_number")
-            wwn = _wwn_normalize(headers.get("switch_wwn"))
+            # chassisshow gives the real supplier serial + model (PID)
+            chs = sess.run("chassisshow")
+            chs_map = _parse_chassisshow(chs) if chs else {}
+            model = (chs_map.get("chassis_pid")
+                      or headers.get("switchtype") or headers.get("switch_type")
+                      or headers.get("model") or headers.get("product"))
+            serial = (chs_map.get("chassis_serial_number")
+                       or chs_map.get("chassis_serial_no")
+                       or chs_map.get("serial_number")
+                       or headers.get("switchwwn") or headers.get("switch_wwn"))
+            wwn = _wwn_normalize(headers.get("switchwwn") or headers.get("switch_wwn"))
             name = headers.get("switch_name") or headers.get("switchname") or f"san-{ip.replace('.', '-')}"
             fw = (ver_map.get("fabric_os") or ver_map.get("kernel") or
                   ver_map.get("firmware") or ver_map.get("version"))
@@ -1716,6 +1759,14 @@ def san_collect_inventory(ip):
         headers, ports = _parse_switchshow(sw_text)
         log("INFO", f"  switchshow: {len(sw_text)} bytes, {len(headers)} headers, {len(ports)} ports")
         ver_map = _parse_version(sess.run("version") or "")
+        # chassisshow gives the real supplier serial + model (PID)
+        try:
+            chs_text = sess.run("chassisshow") or ""
+            chs_map = _parse_chassisshow(chs_text) if chs_text else {}
+            log("INFO", f"  chassisshow: {len(chs_text)} bytes, {len(chs_map)} fields")
+        except Exception as exc:
+            chs_map = {}
+            log("WARN", f"  chassisshow failed: {exc}")
         # nameserver: combine nsshow + nscamshow to catch all logged-in devices
         ns_entries = []
         for cmd in ("nsshow", "nscamshow"):
@@ -1734,11 +1785,23 @@ def san_collect_inventory(ip):
             sfp_rows = []
             log("WARN", f"  sfpshow failed: {exc}")
 
+        # Prefer chassisshow for real serial + model; fall back to switchshow
+        chs_serial = (chs_map.get("chassis_serial_number")
+                      or chs_map.get("chassis_serial_no")
+                      or chs_map.get("serial_number"))
+        chs_model = (chs_map.get("chassis_pid")
+                     or chs_map.get("pid")
+                     or chs_map.get("chassis_product_id"))
+        sw_model_raw = (headers.get("switchtype") or headers.get("switch_type")
+                        or headers.get("model"))
         summary = {
-            "serial":    headers.get("switch_wwn") or headers.get("serial_number"),
-            "wwn":       _wwn_normalize(headers.get("switch_wwn")),
-            "model":     normalize_model(headers.get("switch_type") or headers.get("model"),
-                                        SWITCH_MODEL_MAP) or headers.get("switch_type"),
+            "serial":    (chs_serial
+                          or headers.get("switchwwn") or headers.get("switch_wwn")
+                          or headers.get("serial_number")),
+            "wwn":       _wwn_normalize(headers.get("switchwwn") or headers.get("switch_wwn")),
+            "model":     (chs_model
+                          or normalize_model(sw_model_raw, SWITCH_MODEL_MAP)
+                          or sw_model_raw),
             "firmware":  (ver_map.get("fabric_os") or ver_map.get("kernel") or
                           ver_map.get("firmware") or ver_map.get("version")),
             "hostname":  (headers.get("switch_name") or headers.get("switchname") or "").strip(),
@@ -1766,7 +1829,7 @@ def san_collect_inventory(ip):
                                  f"Speed={sfp.get('speed') or sfp.get('speed_capability')} "
                                  f"Temp={sfp.get('temperature')} "
                                  f"VendorPN={sfp.get('vendor_part_number') or sfp.get('part_no')}"),
-                    role_id=ROLE_SFP,
+                    role_id=get_or_create_inventory_role("SFP", "4caf50"),
                 )
 
         return {
@@ -1832,20 +1895,22 @@ def _fc_interface_type(speed):
     '8gfc-sfp+', '16gfc-sfp+', '32gfc-sfp+', 'other'. Returns 'other'
     if the speed is unknown or the port is offline."""
     s = (speed or "").lower()
+    if "n1" in s or s.startswith("1g") or s == "1":
+        return "1gfc-sfp"
     if "n2" in s or s.startswith("2g") or s == "2":
-        return "2gfc-sfp+"
+        return "2gfc-sfp"
     if "n4" in s or s.startswith("4g") or s == "4":
-        return "4gfc-sfp+"
+        return "4gfc-sfp"
     if "n8" in s or s.startswith("8g") or s == "8":
-        return "8gfc-sfp+"
+        return "8gfc-sfpp"
     if "n16" in s or s.startswith("16g") or s == "16":
-        return "16gfc-sfp+"
+        return "16gfc-sfpp"
     if "n32" in s or s.startswith("32g") or s == "32":
-        return "32gfc-sfp+"
+        return "32gfc-sfp28"
     if "n64" in s or s.startswith("64g") or s == "64":
-        return "64gfc-sfp+"
+        return "64gfc-qsfpp"
     if "n128" in s or s.startswith("128g") or s == "128":
-        return "128gfc-sfp+"
+        return "128gfc-qsfp28"
     return "other"
 
 def sync_san_interfaces(dev_id, ports, nameserver):
