@@ -420,12 +420,16 @@ def expand_ranges(ranges):
             ips.extend(str(h) for h in net.hosts())
     return ips
 
-def is_port_open(ip, port, timeout=3, retries=2, retry_delay=2):
+def is_port_open(ip, port, timeout=1.5, retries=2, retry_delay=1):
+    # Short timeout on first attempt (fast reject of dead hosts), then a
+    # slightly longer retry to avoid false negatives under load.
     for attempt in range(1, retries + 1):
         try:
             with socket.create_connection((ip, port), timeout=timeout): return True
         except Exception:
-            if attempt < retries: time.sleep(retry_delay)
+            if attempt < retries:
+                time.sleep(retry_delay)
+                timeout = 3  # second chance: be more patient
     return False
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -452,7 +456,7 @@ class RedfishSession:
     def get(self, path):
         r = self.s.get(f"{self.base}{path}",
                        headers={"X-Auth-Token": self.token},
-                       verify=False, timeout=30)
+                       verify=False, timeout=15)
         r.raise_for_status()
         return r.json()
 
@@ -503,6 +507,8 @@ def probe_redfish(ip, retries=2, retry_delay=3):
             rf = RedfishSession(host)
             rf.login()
             try:
+                # Fetch once and reuse: pass cached data to inventory collector
+                # so we don't repeat these 3 GETs per server.
                 root   = rf.get("/redfish/v1/")
                 syscol = rf.get(root["Systems"]["@odata.id"])
                 sys    = rf.get(syscol["Members"][0]["@odata.id"])
@@ -514,6 +520,11 @@ def probe_redfish(ip, retries=2, retry_delay=3):
                     "model":        sys.get("Model"),
                     "hostname":     name,
                     "manufacturer": sys.get("Manufacturer") or "HPE",
+                    # Cache the already-fetched payloads so rf_collect_inventory
+                    # can skip re-requesting them.
+                    "_root":        root,
+                    "_syscol":      syscol,
+                    "_sys":         sys,
                 }
             finally:
                 rf.logout()
@@ -571,7 +582,9 @@ class StorageSession:
     def _quick_request(self, path):
         url = f"{self.base}{self.API_PREFIX}{path.lstrip('/')}"
         try:
-            r = self.session.get(url, headers={"dataType": "api"}, verify=False, timeout=5)
+            # Short timeout (2s) -- this is just a probe to see if the XML
+            # API exists. is_port_open has already confirmed TCP reachability.
+            r = self.session.get(url, headers={"dataType": "api"}, verify=False, timeout=2)
             if r.status_code != 200:
                 return None
             return ET.fromstring(r.text)
@@ -579,14 +592,9 @@ class StorageSession:
             return None
 
     def quick_probe(self):
-        """Fast check without login – is this a storage XML API?"""
-        xml = self._quick_request("login/check")
-        if xml is not None:
-            return True
-        xml = self._quick_request("show/system")
-        if xml is not None:
-            return True
-        return False
+        """Fast check without login - is this a storage XML API?"""
+        # Only one HTTP request: login/check is enough to identify the API.
+        return self._quick_request("login/check") is not None
 
     def _request(self, path, method="GET"):
         url = f"{self.base}{self.API_PREFIX}{path.lstrip('/')}"
@@ -741,6 +749,10 @@ def scan_all():
 # ═══════════════════════════════════════════════════════════════════════════════
 # NetBox CRUD helpers
 # ═══════════════════════════════════════════════════════════════════════════════
+# In-process cache for NetBox lookups that return the same value every run
+# (manufacturers, device types, roles, sites). Keyed by tuple to be hashable.
+_CACHE = {}
+
 def _get_or_create(endpoint, lookup, create):
     obj = endpoint.get(**lookup)
     if obj: return obj.id
@@ -749,47 +761,68 @@ def _get_or_create(endpoint, lookup, create):
 def get_or_create_manufacturer(name):
     if not name: return None
     name = name.strip()
+    cache_key = ("mfr", name)
+    cached = _CACHE.get(cache_key)
+    if cached is not None: return cached
     api = get_netbox()
     # Primary lookup by name (case-insensitive in NetBox)
     m = api.dcim.manufacturers.get(name=name)
-    if m: return m.id
+    if m:
+        _CACHE[cache_key] = m.id
+        return m.id
     # Secondary lookup by slug (handles pre-existing manufacturers with
     # different casing or a manually-set slug)
     slug = slugify(name)
     try:
         m = api.dcim.manufacturers.get(slug=slug)
-        if m: return m.id
+        if m:
+            _CACHE[cache_key] = m.id
+            return m.id
     except Exception: pass
     # Try to create; if slug collides, fall back to a suffixed slug
     for attempt in range(3):
         try:
-            return api.dcim.manufacturers.create(
+            new_id = api.dcim.manufacturers.create(
                 {"name": name, "slug": slug if attempt == 0 else f"{slug}-{attempt+1}"}).id
+            _CACHE[cache_key] = new_id
+            return new_id
         except Exception as e:
             if "already exists" in str(e) and attempt < 2:
                 continue
             # Last resort: re-query by name (race conditions, etc.)
             m = api.dcim.manufacturers.get(name=name)
-            if m: return m.id
+            if m:
+                _CACHE[cache_key] = m.id
+                return m.id
             raise
 
 def get_or_create_device_type(model, mfr_id, model_map=None):
     m = normalize_model(model, model_map) or model or "Unknown"
-    return _get_or_create(get_netbox().dcim.device_types, {"model": m},
-                          {"model": m, "slug": slugify(m), "manufacturer": mfr_id})
+    cache_key = ("dtype", m, mfr_id)
+    cached = _CACHE.get(cache_key)
+    if cached is not None: return cached
+    new_id = _get_or_create(get_netbox().dcim.device_types, {"model": m},
+                            {"model": m, "slug": slugify(m), "manufacturer": mfr_id})
+    _CACHE[cache_key] = new_id
+    return new_id
 
 def get_or_create_role(name, color="9e9e9e"):
+    cache_key = ("role", name)
+    cached = _CACHE.get(cache_key)
+    if cached is not None: return cached
     api = get_netbox()
     r = api.dcim.device_roles.get(name=name)
-    if r: return r.id
-    r = api.dcim.device_roles.get(slug=slugify(name))
-    if r: return r.id
-    return api.dcim.device_roles.create(
-        {"name": name, "slug": slugify(name), "color": color}).id
+    if not r:
+        r = api.dcim.device_roles.get(slug=slugify(name))
+    if not r:
+        r = api.dcim.device_roles.create(
+            {"name": name, "slug": slugify(name), "color": color})
+    _CACHE[cache_key] = r.id
+    return r.id
 
 _INVENTORY_ROLE_CACHE = {}
 def get_or_create_inventory_role(name, color="9e9e9e"):
-    """Inventory-item-role IDs are NOT portable between NetBox instances —
+    """Inventory-item-role IDs are NOT portable between NetBox instances --
     unlike device roles, they can't safely be hardcoded, so resolve by name
     (creating the role if it doesn't exist yet) and cache the result."""
     if name in _INVENTORY_ROLE_CACHE:
@@ -805,8 +838,13 @@ def get_or_create_inventory_role(name, color="9e9e9e"):
     return r.id
 
 def get_or_create_site(name):
-    return _get_or_create(get_netbox().dcim.sites, {"name": name},
-                          {"name": name, "slug": slugify(name), "status": "active"})
+    cache_key = ("site", name)
+    cached = _CACHE.get(cache_key)
+    if cached is not None: return cached
+    new_id = _get_or_create(get_netbox().dcim.sites, {"name": name},
+                            {"name": name, "slug": slugify(name), "status": "active"})
+    _CACHE[cache_key] = new_id
+    return new_id
 
 def find_device(serial, role_name=None):
     """Search by serial only — custom field filters are unreliable in this NetBox."""
@@ -919,13 +957,20 @@ def mark_storage_offline(dev_id, dev_name):
 # ═══════════════════════════════════════════════════════════════════════════════
 # inventory collection – Redfish (server)
 # ═══════════════════════════════════════════════════════════════════════════════
-def rf_collect_inventory(host):
+def rf_collect_inventory(host, cached=None):
     rf = RedfishSession(host)
     rf.login()
     try:
-        root      = rf.get("/redfish/v1/")
-        syscol    = rf.get(root["Systems"]["@odata.id"])
-        sys       = rf.get(syscol["Members"][0]["@odata.id"])
+        # Reuse the root/systems/system payloads already fetched during
+        # probe_redfish to avoid 3 redundant GETs per server.
+        if cached and cached.get("_root") is not None:
+            root      = cached["_root"]
+            syscol    = cached["_syscol"]
+            sys       = cached["_sys"]
+        else:
+            root      = rf.get("/redfish/v1/")
+            syscol    = rf.get(root["Systems"]["@odata.id"])
+            sys       = rf.get(syscol["Members"][0]["@odata.id"])
         sys_odata = sys.get("@odata.id")
         oem_data  = _get_oem(sys)
 
@@ -1483,7 +1528,7 @@ class BrocadeSwitchSession:
     Uses exec_command per call rather than an interactive shell — Fabric OS
     only allows one exec channel at a time, so calls are serialized."""
 
-    def __init__(self, ip, port=22, timeout=20):
+    def __init__(self, ip, port=22, timeout=10):
         self.ip = ip
         self.port = port
         self.timeout = timeout
@@ -1744,6 +1789,12 @@ def probe_san_switch(ip, retries=2, retry_delay=3):
                 "manufacturer": "Brocade",
                 "wwn":          wwn,
                 "firmware":     fw,
+                # Cache raw CLI output so san_collect_inventory can reuse it
+                # instead of re-running switchshow/version/chassisshow (3 fewer
+                # SSH exec_command round-trips per switch).
+                "_sw_text":     sw,
+                "_ver_text":    ver,
+                "_chs_text":    chs,
             }
         except Exception:
             if attempt < retries: time.sleep(retry_delay); continue
@@ -1753,23 +1804,32 @@ def probe_san_switch(ip, retries=2, retry_delay=3):
             except Exception: pass
     return None
 
-def san_collect_inventory(ip):
-    """Full inventory pull for a SAN switch: identity, ports, nameserver, SFPs."""
+def san_collect_inventory(ip, cached=None):
+    """Full inventory pull for a SAN switch: identity, ports, nameserver, SFPs.
+
+    `cached` may carry already-fetched switchshow/version/chassisshow text
+    from probe_san_switch to avoid re-running those three SSH commands."""
     sess = BrocadeSwitchSession(ip, SWITCH_PORT)
     sess.login()
     try:
-        sw_text = sess.run("switchshow")
+        # Reuse cached CLI output when available (saves 3 SSH round-trips).
+        sw_text  = (cached or {}).get("_sw_text") or sess.run("switchshow")
+        ver_text = (cached or {}).get("_ver_text")
+        if ver_text is None:
+            ver_text = sess.run("version") or ""
+        chs_text = (cached or {}).get("_chs_text")
+        if chs_text is None:
+            try:
+                chs_text = sess.run("chassisshow") or ""
+            except Exception as exc:
+                chs_text = ""
+                log("WARN", f"  chassisshow failed: {exc}")
         headers, ports = _parse_switchshow(sw_text)
         log("INFO", f"  switchshow: {len(sw_text)} bytes, {len(headers)} headers, {len(ports)} ports")
-        ver_map = _parse_version(sess.run("version") or "")
-        # chassisshow gives the real supplier serial + model (PID)
-        try:
-            chs_text = sess.run("chassisshow") or ""
-            chs_map = _parse_chassisshow(chs_text) if chs_text else {}
+        ver_map = _parse_version(ver_text)
+        chs_map = _parse_chassisshow(chs_text) if chs_text else {}
+        if chs_text:
             log("INFO", f"  chassisshow: {len(chs_text)} bytes, {len(chs_map)} fields")
-        except Exception as exc:
-            chs_map = {}
-            log("WARN", f"  chassisshow failed: {exc}")
         # nameserver: combine nsshow + nscamshow to catch all logged-in devices
         ns_entries = []
         for cmd in ("nsshow", "nscamshow"):
@@ -1939,6 +1999,8 @@ def sync_san_interfaces(dev_id, ports, nameserver):
             if wwn: port_wwns.setdefault(idx, []).append(wwn)
 
     seen = set()
+    to_update = []
+    to_create = []
     for p in ports:
         name = f"FC {p['port']}"
         seen.add(name)
@@ -1957,12 +2019,24 @@ def sync_san_interfaces(dev_id, ports, nameserver):
             "mgmt_only":  False,
         }
         if name in existing:
-            api.dcim.interfaces.update([{"id": existing[name].id, **payload}])
+            to_update.append({"id": existing[name].id, **payload})
         else:
-            try:
-                api.dcim.interfaces.create(payload)
-            except Exception as e:
-                log("WARN", f"  Could not create interface {name}: {e}")
+            to_create.append(payload)
+
+    if to_update:
+        try: api.dcim.interfaces.update(to_update)
+        except Exception as e:
+            log("WARN", f"  batch interface update failed ({len(to_update)}): {e}; retrying one-by-one")
+            for p in to_update:
+                try: api.dcim.interfaces.update([p])
+                except Exception as ee: log("WARN", f"    iface update {p.get('name')}: {ee}")
+    if to_create:
+        try: api.dcim.interfaces.create(to_create)
+        except Exception as e:
+            log("WARN", f"  batch interface create failed ({len(to_create)}): {e}; retrying one-by-one")
+            for p in to_create:
+                try: api.dcim.interfaces.create(p)
+                except Exception as ee: log("WARN", f"    iface create {p.get('name')}: {ee}")
 
     # Remove interfaces that no longer exist on the switch
     for name, iface in existing.items():
@@ -1976,35 +2050,69 @@ def sync_san_interfaces(dev_id, ports, nameserver):
 # ═══════════════════════════════════════════════════════════════════════════════
 def sync_inventory(dev_id, new_inventory):
     api = get_netbox()
+    # Single filter call instead of two; reuse the result for dedupe + stale
+    # detection + matching against new inventory.
+    existing_items = list(api.dcim.inventory_items.filter(device_id=dev_id))
     by_serial = {}
-    for item in list(api.dcim.inventory_items.filter(device_id=dev_id)):
+    for item in existing_items:
         s = str(item.serial or "").strip()
         if s: by_serial.setdefault(s, []).append(item)
+    # Delete duplicates (keep none -- next block will recreate one).
     for s, items in by_serial.items():
         if len(items) > 1:
             for item in items: item.delete()
+            # Remove from by_serial so the create path below handles it.
+            by_serial[s] = []
 
     new_serials = set(new_inventory.keys())
-    for item in list(api.dcim.inventory_items.filter(device_id=dev_id)):
+    # Delete items whose serial is no longer present on the device.
+    for item in existing_items:
         if item.serial and item.serial not in new_serials:
-            item.delete()
+            try: item.delete()
+            except Exception: pass
 
+    # Pre-resolve manufacturer IDs once (they're shared across many items).
+    mfr_cache = {}
+    def _mfr_id_for(name):
+        if name not in mfr_cache:
+            mfr_cache[name] = get_or_create_manufacturer(name)
+        return mfr_cache[name]
+
+    # Batch updates and creates into single API calls per operation type.
+    to_update = []
+    to_create = []
     for serial, item in new_inventory.items():
-        mfr_id = get_or_create_manufacturer(item.get("manufacturer"))
+        mfr_id = _mfr_id_for(item.get("manufacturer"))
         payload = {
-            "device":      dev_id,
-            "name":        item["name"],
+            "device":       dev_id,
+            "name":         item["name"],
             "manufacturer": mfr_id,
-            "part_id":     item.get("part_number") or "",
-            "serial":      serial,
-            "description": item.get("description") or "",
+            "part_id":      item.get("part_number") or "",
+            "serial":       serial,
+            "description":  item.get("description") or "",
             **({"role": item["role"]} if item.get("role") else {}),
         }
-        existing = api.dcim.inventory_items.get(device_id=dev_id, serial=serial)
-        if existing:
-            api.dcim.inventory_items.update([{"id": existing.id, **payload}])
+        # Match against the in-memory by_serial index (already filtered above).
+        match = by_serial.get(serial)
+        if match:
+            to_update.append({"id": match[0].id, **payload})
         else:
-            api.dcim.inventory_items.create(payload)
+            to_create.append(payload)
+
+    if to_update:
+        try: api.dcim.inventory_items.update(to_update)
+        except Exception as e:
+            log("WARN", f"  batch inventory update failed ({len(to_update)} items): {e}; retrying one-by-one")
+            for p in to_update:
+                try: api.dcim.inventory_items.update([p])
+                except Exception as ee: log("WARN", f"    inventory update {p.get('serial')}: {ee}")
+    if to_create:
+        try: api.dcim.inventory_items.create(to_create)
+        except Exception as e:
+            log("WARN", f"  batch inventory create failed ({len(to_create)} items): {e}; retrying one-by-one")
+            for p in to_create:
+                try: api.dcim.inventory_items.create(p)
+                except Exception as ee: log("WARN", f"    inventory create {p.get('serial')}: {ee}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2031,7 +2139,7 @@ def run_sync():
             log("ERROR", f"  ensure_server_device failed for {ip}: {e}"); continue
 
         try:
-            data = rf_collect_inventory(host)
+            data = rf_collect_inventory(host, cached=probe)
         except KeyboardInterrupt: raise
         except Exception as e:
             log("ERROR", f"  inventory collection failed for {ip}: {e}"); continue
@@ -2125,7 +2233,7 @@ def run_sync():
             log("ERROR", f"  ensure_san_switch_device failed for {ip}: {e}"); continue
 
         try:
-            data = san_collect_inventory(ip)
+            data = san_collect_inventory(ip, cached=probe)
         except KeyboardInterrupt: raise
         except Exception as e:
             log("ERROR", f"  SAN inventory collection failed for {ip}: {e}"); continue
