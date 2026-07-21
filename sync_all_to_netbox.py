@@ -390,12 +390,23 @@ def is_ssd_storage(props):
 
 def name_storage_disk(props):
     media = "SSD" if is_ssd_storage(props) else "HDD"
-    # "show disks" → size field; "show disk-parameters" → total-size field
-    size  = props.get("size") or props.get("total-size") or props.get("formatted-size")
-    model = props.get("model") or props.get("disk-description")
+    # Three possible field-name sets across MSA firmware versions:
+    #   show disks           (MSA 2060): size, model
+    #   show disk-parameters  (older):   total-size, disk-description
+    #   show disk-statistics  (MSA 2040): no size/model, use location/durable-id
+    size  = (props.get("size") or props.get("total-size")
+             or props.get("formatted-size") or props.get("raw-size"))
+    model = (props.get("model") or props.get("disk-description")
+             or props.get("description") or props.get("vendor"))
+    location = props.get("location") or props.get("durable-id") or ""
     parts = [media]
-    if size:  parts.append(str(size))
-    elif model: parts.append(str(model)[:30])
+    if size:
+        parts.append(str(size))
+    elif model:
+        parts.append(str(model)[:30])
+    elif location:
+        # disk-statistics rows: use location as the distinguishing suffix
+        parts.append(str(location))
     return " ".join(parts)[:64]
 
 def name_storage_psu(props):
@@ -1333,16 +1344,16 @@ def storage_collect_inventory(ip):
         for command, expected_type, collector in show_commands:
             rows = None
             if command == "disks":
-                # MSA 2040 (older firmware) may use different basetype names
-                # and different show commands than MSA 2060. Try all known
-                # disk commands and log raw responses for diagnosis.
+                # MSA 2040 (older firmware): "show disks" returns a rate-limit
+                # info message instead of rows. The real per-disk data lives
+                # in "show disk-statistics" (basetype "disk-statistics") which
+                # has serial-number, location, durable-id, power-on-hours, etc.
+                # MSA 2060 (newer firmware): "show disks" works directly with
+                # basetype "drive". Try both, preferring the richer one.
                 disk_commands = [
-                    "disks",                    # MSA 2060 (newer firmware)
-                    "disk-parameters",          # MSA 2040 (older firmware)
-                    "disk-statistics",
-                    "disks-all",                # some firmwares
-                    "maps-disks",
-                    "drives",                   # fallback
+                    "disks",            # MSA 2060 (drive basetype, has size/model)
+                    "disk-statistics",  # MSA 2040 (disk-statistics basetype)
+                    "disk-parameters",  # MSA 2040 fallback (global params only)
                 ]
                 for dcmd in disk_commands:
                     try:
@@ -1370,11 +1381,10 @@ def storage_collect_inventory(ip):
                                 time.sleep(5)
                             except Exception as login_exc:
                                 log("WARN", f"  Re-login failed for {ip}: {login_exc}")
-                                break
+                                # Continue to next command instead of breaking
                         else:
                             log("WARN", f"  show {dcmd} failed on {ip}: {exc}")
-                            # DEBUG: try the next command instead of giving up
-                            continue
+                            # Try next command instead of giving up
                 if rows is None:
                     log("WARN", f"  All disk commands failed on {ip} -- disks will not be synced")
             else:
@@ -1391,14 +1401,17 @@ def storage_collect_inventory(ip):
             for row in rows:
                 bt = row.get("basetype") or ""
                 if command == "disks":
-                    # MSA 2040 (older firmware) may use basetype names like
-                    # "disk", "disk-parameters", "drive", "drives". Accept any
-                    # row whose basetype contains "disk" or "drive".
+                    # Accept any basetype that represents a physical disk:
+                    #   MSA 2060: "drive"
+                    #   MSA 2040: "disk-statistics", "disk-parameters"
                     bt_lower = bt.lower()
                     if "drive" not in bt_lower and "disk" not in bt_lower:
-                        # DEBUG: log rows that are being skipped so we can see
-                        # what basetypes the MSA 2040 emits.
-                        log("INFO", f"    [DEBUG] skipping row basetype='{bt}' keys={list(row.keys())[:8]}")
+                        continue
+                    # Skip global/non-per-disk rows (e.g. disk-parameters on
+                    # MSA 2040 returns a single row of global params with no
+                    # serial-number -- we only want rows that represent an
+                    # actual disk with an identity).
+                    if not (row.get("serial-number") or row.get("durable-id")):
                         continue
                 elif expected_type and bt != expected_type:
                     continue
@@ -1437,23 +1450,48 @@ def storage_collect_inventory(ip):
 
 
 def _collect_disk_storage(row, add_item):
-    # Support both "show disks" and "show disk-parameters" field names
+    # Support three MSA response formats:
+    #   "show disks"          (MSA 2060, basetype "drive"): has size, model, drive-type
+    #   "show disk-statistics" (MSA 2040, basetype "disk-statistics"): has serial,
+    #       location, durable-id, power-on-hours, data-read/written, NO size/model
+    #   "show disk-parameters" (older fallback): per-disk rows with size/model
     serial = row.get("serial-number")
-    size_str = row.get("size") or row.get("total-size") or row.get("formatted-size")
-    size_num = row.get("size-numeric") or row.get("total-size-numeric")
+    if not serial:
+        # disk-statistics rows sometimes use durable-id as identifier
+        return 0
+
+    size_str = (row.get("size") or row.get("total-size")
+                or row.get("formatted-size") or row.get("raw-size"))
+    size_num = (row.get("size-numeric") or row.get("total-size-numeric")
+                or row.get("raw-size-numeric"))
     cap = parse_storage_size_bytes(size_str, size_num)
     role_id = ROLE_SSD if is_ssd_storage(row) else ROLE_HDD
-    model = row.get("model") or row.get("disk-description") or row.get("description")
-    location = row.get("location") or row.get("slot")
-    health = row.get("health") or row.get("disk-state")
+    model = (row.get("model") or row.get("disk-description")
+             or row.get("description") or row.get("vendor"))
+    location = row.get("location") or row.get("slot") or row.get("durable-id")
+    health = row.get("health") or row.get("disk-state") or row.get("status")
+
+    # disk-statistics has I/O stats instead of size/model -- include them in
+    # the description so the disk is still useful in NetBox even without size.
+    extra = []
+    if row.get("power-on-hours"):
+        extra.append(f"PowerOnHours={row.get('power-on-hours')}")
+    if row.get("data-read"):
+        extra.append(f"Read={row.get('data-read')}")
+    if row.get("data-written"):
+        extra.append(f"Written={row.get('data-written')}")
+    if row.get("iops"):
+        extra.append(f"IOPS={row.get('iops')}")
+
     add_item(
         name=name_storage_disk(row),
         manufacturer=row.get("vendor") or row.get("manufacturer") or DEFAULT_MFR,
         part_number=model,
         serial=serial,
         description=(f"Location={location} Model={model} "
-                     f"Size={size_str} Health={health} "
-                     f"Type={row.get('drive-type') or row.get('disk-type')}"),
+                    f"Size={size_str or 'N/A'} Health={health} "
+                    f"Type={row.get('drive-type') or row.get('disk-type') or 'disk'}"
+                    + (f" {' '.join(extra)}" if extra else "")),
         role_id=role_id,
     )
     return cap or 0
