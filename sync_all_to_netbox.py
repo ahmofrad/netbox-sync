@@ -1333,11 +1333,28 @@ def storage_collect_inventory(ip):
         for command, expected_type, collector in show_commands:
             rows = None
             if command == "disks":
-                disk_commands = ["disks", "disk-parameters", "disk-statistics"]
+                # MSA 2040 (older firmware) may use different basetype names
+                # and different show commands than MSA 2060. Try all known
+                # disk commands and log raw responses for diagnosis.
+                disk_commands = [
+                    "disks",                    # MSA 2060 (newer firmware)
+                    "disk-parameters",          # MSA 2040 (older firmware)
+                    "disk-statistics",
+                    "disks-all",                # some firmwares
+                    "maps-disks",
+                    "drives",                   # fallback
+                ]
                 for dcmd in disk_commands:
                     try:
                         rows = storage.show(dcmd)
                         log("INFO", f"    disk command '{dcmd}' succeeded on {ip}")
+                        # DEBUG: dump basetypes and a sample row to identify format
+                        if rows:
+                            bts = set(r.get("basetype") for r in rows)
+                            log("INFO", f"    [DEBUG] {dcmd}: {len(rows)} rows, basetypes={bts}")
+                            sample = rows[0]
+                            log("INFO", f"    [DEBUG] {dcmd} sample row keys: {list(sample.keys())}")
+                            log("INFO", f"    [DEBUG] {dcmd} sample row: { {k: sample.get(k) for k in list(sample.keys())[:12]} }")
                         break
                     except Exception as exc:
                         msg = str(exc)
@@ -1356,9 +1373,10 @@ def storage_collect_inventory(ip):
                                 break
                         else:
                             log("WARN", f"  show {dcmd} failed on {ip}: {exc}")
-                            break
+                            # DEBUG: try the next command instead of giving up
+                            continue
                 if rows is None:
-                    log("WARN", f"  All disk commands failed on {ip} — disks will not be synced")
+                    log("WARN", f"  All disk commands failed on {ip} -- disks will not be synced")
             else:
                 try:
                     rows = storage.show(command)
@@ -1373,7 +1391,14 @@ def storage_collect_inventory(ip):
             for row in rows:
                 bt = row.get("basetype") or ""
                 if command == "disks":
-                    if "drive" not in bt.lower():
+                    # MSA 2040 (older firmware) may use basetype names like
+                    # "disk", "disk-parameters", "drive", "drives". Accept any
+                    # row whose basetype contains "disk" or "drive".
+                    bt_lower = bt.lower()
+                    if "drive" not in bt_lower and "disk" not in bt_lower:
+                        # DEBUG: log rows that are being skipped so we can see
+                        # what basetypes the MSA 2040 emits.
+                        log("INFO", f"    [DEBUG] skipping row basetype='{bt}' keys={list(row.keys())[:8]}")
                         continue
                 elif expected_type and bt != expected_type:
                     continue
