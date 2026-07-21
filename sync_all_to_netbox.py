@@ -582,9 +582,10 @@ class StorageSession:
     def _quick_request(self, path):
         url = f"{self.base}{self.API_PREFIX}{path.lstrip('/')}"
         try:
-            # Short timeout (2s) -- this is just a probe to see if the XML
-            # API exists. is_port_open has already confirmed TCP reachability.
-            r = self.session.get(url, headers={"dataType": "api"}, verify=False, timeout=2)
+            # Probe to see if the XML API exists. is_port_open has already
+            # confirmed TCP reachability, but MSA arrays can be slow to
+            # respond on first request, so use a generous timeout.
+            r = self.session.get(url, headers={"dataType": "api"}, verify=False, timeout=10)
             if r.status_code != 200:
                 return None
             return ET.fromstring(r.text)
@@ -598,7 +599,9 @@ class StorageSession:
 
     def _request(self, path, method="GET"):
         url = f"{self.base}{self.API_PREFIX}{path.lstrip('/')}"
-        r = self.session.request(method, url, headers=self._headers(), timeout=30)
+        # MSA arrays can be slow under load (especially 'show disks'); use a
+        # 60s timeout for real data requests.
+        r = self.session.request(method, url, headers=self._headers(), timeout=60)
         r.raise_for_status()
         if r.text.strip().startswith("*"):
             raise RuntimeError(f"STORAGE_RATE_LIMIT:{r.text.strip()}")
