@@ -1344,18 +1344,57 @@ def storage_collect_inventory(ip):
         for command, expected_type, collector in show_commands:
             rows = None
             if command == "disks":
+                # ── Enrichment context ────────────────────────────────────────
+                # MSA 2040 firmware permanently rate-limits "show disks", so
+                # model/size/firmware are NOT available via the API. We enrich
+                # the disk-statistics rows with inferable fields from other
+                # endpoints:
+                #   - drive-bus-type  from show enclosures (controller field)
+                #   - array-drive-type from show disk-groups (per RAID group)
+                #   - SSD vs HDD      inferred from disk-group name (SSD/HDD)
+                enriched_drive_bus = None
+                try:
+                    enc_rows = storage.show("enclosures")
+                    for er in enc_rows:
+                        if er.get("basetype") == "controllers" and er.get("drive-bus-type"):
+                            enriched_drive_bus = er.get("drive-bus-type")
+                            break
+                    if enriched_drive_bus:
+                        log("INFO", f"    inferred drive-bus-type={enriched_drive_bus} from enclosures")
+                except Exception as exc:
+                    log("WARN", f"  show enclosures for drive-bus-type failed: {exc}")
+
+                # Fetch disk-groups to infer per-disk type (SAS/SSD) from
+                # group names and array-drive-type fields.
+                disk_group_types = {}   # {pool-dg-name: {type, raid, bus}}
+                try:
+                    dg_rows = storage.show("disk-groups")
+                    for dg in dg_rows:
+                        if dg.get("basetype") == "disk-groups":
+                            dg_name = dg.get("name") or ""
+                            dg_info = {
+                                "array-drive-type": dg.get("array-drive-type"),
+                                "raidtype": dg.get("raidtype"),
+                                "diskcount": dg.get("diskcount"),
+                                "name": dg_name,
+                            }
+                            disk_group_types[dg_name] = dg_info
+                    log("INFO", f"    found {len(disk_group_types)} disk-groups for type inference")
+                except Exception as exc:
+                    log("WARN", f"  show disk-groups failed: {exc}")
+
                 # Dual-source strategy for MSA 2040/2060 compatibility:
                 #
                 #   "show disks"           -- MSA 2060: per-disk rows with
                 #                            size, model, firmware, drive-type.
-                #                            MSA 2040: rate-limited, returns no rows.
+                #                            MSA 2040: permanently rate-limited.
                 #   "show disk-statistics"  -- MSA 2040: per-disk rows with
                 #                            serial-number, location, durable-id,
                 #                            I/O stats.  No size/model/firmware.
                 #
                 # We fetch BOTH (when available) and merge by serial-number
                 # so each NetBox inventory item carries every field that either
-                # endpoint exposes.
+                # endpoint exposes, plus inferred fields from enclosures/disk-groups.
                 disk_rows_full = None     # from "show disks" (rich, may fail)
                 disk_rows_stats = None    # from "show disk-statistics" (always works on MSA 2040)
 
@@ -1371,7 +1410,7 @@ def storage_collect_inventory(ip):
                 except Exception as exc:
                     msg = str(exc)
                     if "Rates may vary" in msg or "STORAGE_RATE_LIMIT" in msg:
-                        log("WARN", f"  Rate-limit on show disks ({ip}), will retry after delay ...")
+                        log("WARN", f"  Rate-limit on show disks ({ip}), will use disk-statistics only")
                         try: storage.logout()
                         except Exception: pass
                         time.sleep(10)
@@ -1452,6 +1491,30 @@ def storage_collect_inventory(ip):
                     except Exception as exc:
                         log("WARN", f"  show disk-parameters failed on {ip}: {exc}")
 
+                # 4. Enrich merged rows with inferred fields from enclosures
+                #    and disk-groups. This adds drive-bus-type and
+                #    array-drive-type to rows that only have disk-statistics data.
+                if enriched_drive_bus or disk_group_types:
+                    for serial, row in merged_by_serial.items():
+                        # Drive bus type (SAS) from controller
+                        if enriched_drive_bus and not row.get("drive-bus-type"):
+                            row["drive-bus-type"] = enriched_drive_bus
+                        # If no drive-type/disk-type yet, try to infer from
+                        # disk-group names. The location field (e.g. "1.1")
+                        # doesn't map to disk-groups directly, but we can set
+                        # a default type from the most common disk-group type.
+                        if not row.get("drive-type") and not row.get("disk-type"):
+                            # Use the first disk-group's array-drive-type as
+                            # a reasonable default (most disks are SAS on MSA 2040)
+                            for dg_name, dg_info in disk_group_types.items():
+                                if "SSD" in dg_name.upper():
+                                    row["inferred-ssd"] = True
+                                elif "HDD" in dg_name.upper():
+                                    row["inferred-ssd"] = False
+                                if dg_info.get("array-drive-type") and not row.get("drive-type"):
+                                    row["drive-type"] = dg_info["array-drive-type"]
+                                break  # just use the first group as default
+
                 rows = list(merged_by_serial.values()) if merged_by_serial else None
                 if rows is None:
                     log("WARN", f"  All disk commands failed on {ip} -- disks will not be synced")
@@ -1519,11 +1582,12 @@ def storage_collect_inventory(ip):
 
 def _collect_disk_storage(row, add_item):
     # Collect every useful field a merged "show disks" + "show disk-statistics"
-    # row can expose. Fields are absent on MSA 2040 (disk-statistics) but
-    # present on MSA 2060 (disks), and vice-versa -- we take whatever is there.
+    # row can expose. On MSA 2040, size/model/firmware are unavailable (show
+    # disks is permanently rate-limited), but drive-bus-type (SAS) and
+    # array-drive-type are inferred from enclosures + disk-groups and injected
+    # into the row by storage_collect_inventory before this is called.
     serial = row.get("serial-number")
     if not serial:
-        # disk-statistics rows sometimes use durable-id as identifier
         return 0
 
     # Size / capacity -- try every known field name
@@ -1547,11 +1611,19 @@ def _collect_disk_storage(row, add_item):
     firmware = (row.get("firmware-version") or row.get("firmware")
                 or row.get("drive-firmware") or row.get("sc-firmware"))
 
-    # Interface / type (SAS, SATA, SSD, etc.)
+    # Interface / type -- use explicit field, or inferred drive-bus-type
     drive_type = (row.get("drive-type") or row.get("disk-type")
                   or row.get("type") or row.get("drive-form-factor")
                   or row.get("interface"))
-    role_id = ROLE_SSD if is_ssd_storage(row) else ROLE_HDD
+    drive_bus = row.get("drive-bus-type")   # inferred from controller
+
+    # Use inferred-ssd flag if present (from disk-group name matching)
+    if row.get("inferred-ssd") is True:
+        role_id = ROLE_SSD
+    elif row.get("inferred-ssd") is False:
+        role_id = ROLE_HDD
+    else:
+        role_id = ROLE_SSD if is_ssd_storage(row) else ROLE_HDD
 
     # Location / slot
     location = (row.get("location") or row.get("slot")
@@ -1573,14 +1645,19 @@ def _collect_disk_storage(row, add_item):
         extra.append(f"Reads={row.get('number-of-reads')}")
     if row.get("number-of-writes"):
         extra.append(f"Writes={row.get('number-of-writes')}")
+    if row.get("number-of-media-errors-1"):
+        extra.append(f"MediaErrors={row.get('number-of-media-errors-1')}")
+    if row.get("number-of-nonmedia-errors-1"):
+        extra.append(f"NonMediaErrors={row.get('number-of-nonmedia-errors-1')}")
 
-    # Build a rich description with every field we found
+    # Build a rich description with every field we found (or inferred)
     desc_parts = [f"Location={location}"]
-    if model:      desc_parts.append(f"Model={model}")
-    if size_str:   desc_parts.append(f"Size={size_str}")
-    if drive_type: desc_parts.append(f"Type={drive_type}")
-    if firmware:   desc_parts.append(f"FW={firmware}")
-    if health:     desc_parts.append(f"Health={health}")
+    if model:       desc_parts.append(f"Model={model}")
+    if size_str:    desc_parts.append(f"Size={size_str}")
+    if drive_type:  desc_parts.append(f"Type={drive_type}")
+    elif drive_bus: desc_parts.append(f"Bus={drive_bus}")
+    if firmware:    desc_parts.append(f"FW={firmware}")
+    if health:      desc_parts.append(f"Health={health}")
     if vendor and vendor != DEFAULT_MFR:
         desc_parts.append(f"Vendor={vendor}")
     if extra:
