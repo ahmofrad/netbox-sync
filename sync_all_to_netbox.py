@@ -1344,47 +1344,115 @@ def storage_collect_inventory(ip):
         for command, expected_type, collector in show_commands:
             rows = None
             if command == "disks":
-                # MSA 2040 (older firmware): "show disks" returns a rate-limit
-                # info message instead of rows. The real per-disk data lives
-                # in "show disk-statistics" (basetype "disk-statistics") which
-                # has serial-number, location, durable-id, power-on-hours, etc.
-                # MSA 2060 (newer firmware): "show disks" works directly with
-                # basetype "drive". Try both, preferring the richer one.
-                disk_commands = [
-                    "disks",            # MSA 2060 (drive basetype, has size/model)
-                    "disk-statistics",  # MSA 2040 (disk-statistics basetype)
-                    "disk-parameters",  # MSA 2040 fallback (global params only)
-                ]
-                for dcmd in disk_commands:
+                # Dual-source strategy for MSA 2040/2060 compatibility:
+                #
+                #   "show disks"           -- MSA 2060: per-disk rows with
+                #                            size, model, firmware, drive-type.
+                #                            MSA 2040: rate-limited, returns no rows.
+                #   "show disk-statistics"  -- MSA 2040: per-disk rows with
+                #                            serial-number, location, durable-id,
+                #                            I/O stats.  No size/model/firmware.
+                #
+                # We fetch BOTH (when available) and merge by serial-number
+                # so each NetBox inventory item carries every field that either
+                # endpoint exposes.
+                disk_rows_full = None     # from "show disks" (rich, may fail)
+                disk_rows_stats = None    # from "show disk-statistics" (always works on MSA 2040)
+
+                # 1. Try "show disks" (rich data). Tolerate rate-limit / failure.
+                try:
+                    disk_rows_full = storage.show("disks")
+                    log("INFO", f"    disk command 'disks' succeeded on {ip}: {len(disk_rows_full)} rows")
+                    if disk_rows_full:
+                        bts = set(r.get("basetype") for r in disk_rows_full)
+                        log("INFO", f"    [DEBUG] disks: {len(disk_rows_full)} rows, basetypes={bts}")
+                        sample = disk_rows_full[0]
+                        log("INFO", f"    [DEBUG] disks sample keys: {list(sample.keys())}")
+                except Exception as exc:
+                    msg = str(exc)
+                    if "Rates may vary" in msg or "STORAGE_RATE_LIMIT" in msg:
+                        log("WARN", f"  Rate-limit on show disks ({ip}), will retry after delay ...")
+                        try: storage.logout()
+                        except Exception: pass
+                        time.sleep(10)
+                        try:
+                            storage.login()
+                            time.sleep(5)
+                        except Exception as le:
+                            log("WARN", f"  Re-login failed for {ip}: {le}")
+                    else:
+                        log("WARN", f"  show disks failed on {ip}: {exc}")
+                    disk_rows_full = None
+
+                # 2. Try "show disk-statistics" (always works on MSA 2040).
+                #    Retries once if the session died during the disks attempt.
+                for stat_attempt in range(2):
                     try:
-                        rows = storage.show(dcmd)
-                        log("INFO", f"    disk command '{dcmd}' succeeded on {ip}")
-                        # DEBUG: dump basetypes and a sample row to identify format
-                        if rows:
-                            bts = set(r.get("basetype") for r in rows)
-                            log("INFO", f"    [DEBUG] {dcmd}: {len(rows)} rows, basetypes={bts}")
-                            sample = rows[0]
-                            log("INFO", f"    [DEBUG] {dcmd} sample row keys: {list(sample.keys())}")
-                            log("INFO", f"    [DEBUG] {dcmd} sample row: { {k: sample.get(k) for k in list(sample.keys())[:12]} }")
+                        disk_rows_stats = storage.show("disk-statistics")
+                        log("INFO", f"    disk command 'disk-statistics' succeeded on {ip}: {len(disk_rows_stats)} rows")
+                        if disk_rows_stats:
+                            bts = set(r.get("basetype") for r in disk_rows_stats)
+                            log("INFO", f"    [DEBUG] disk-statistics: {len(disk_rows_stats)} rows, basetypes={bts}")
+                            sample = disk_rows_stats[0]
+                            log("INFO", f"    [DEBUG] disk-statistics sample keys: {list(sample.keys())}")
                         break
                     except Exception as exc:
                         msg = str(exc)
                         if "Rates may vary" in msg or "STORAGE_RATE_LIMIT" in msg:
-                            log("WARN", f"  Rate-limit on show {dcmd} ({ip}), trying next command ...")
-                            try:
-                                storage.logout()
-                            except Exception:
-                                pass
+                            log("WARN", f"  Rate-limit on show disk-statistics ({ip}), retrying ...")
+                            try: storage.logout()
+                            except Exception: pass
                             time.sleep(10)
                             try:
-                                storage.login()
-                                time.sleep(5)
-                            except Exception as login_exc:
-                                log("WARN", f"  Re-login failed for {ip}: {login_exc}")
-                                # Continue to next command instead of breaking
+                                storage.login(); time.sleep(5)
+                            except Exception as le:
+                                log("WARN", f"  Re-login failed for {ip}: {le}")
+                                break
                         else:
-                            log("WARN", f"  show {dcmd} failed on {ip}: {exc}")
-                            # Try next command instead of giving up
+                            log("WARN", f"  show disk-statistics failed on {ip}: {exc}")
+                            break
+
+                # 3. Merge: build a {serial: merged_row} dict from both sources.
+                #    Fields from "show disks" (rich) take precedence; fields
+                #    from "disk-statistics" fill the gaps (serial, location,
+                #    I/O stats, power-on-hours).
+                merged_by_serial = {}
+                # Start with disk-statistics (always available on MSA 2040)
+                if disk_rows_stats:
+                    for row in disk_rows_stats:
+                        serial = (row.get("serial-number") or "").strip()
+                        if serial:
+                            merged_by_serial[serial] = dict(row)
+                # Overlay "show disks" rows (richer data wins)
+                if disk_rows_full:
+                    for row in disk_rows_full:
+                        serial = (row.get("serial-number") or "").strip()
+                        if not serial:
+                            continue
+                        if serial in merged_by_serial:
+                            # Merge: disks fields override, stats fields fill gaps
+                            base = merged_by_serial[serial]
+                            for k, v in row.items():
+                                if v and not base.get(k):
+                                    base[k] = v
+                            # Ensure the richer basetype is used for filtering
+                            base["basetype"] = row.get("basetype") or base.get("basetype")
+                        else:
+                            merged_by_serial[serial] = dict(row)
+
+                if not merged_by_serial:
+                    # Last resort: try disk-parameters (global params only,
+                    # but some firmwares emit per-disk rows here too)
+                    try:
+                        dp_rows = storage.show("disk-parameters")
+                        for row in dp_rows:
+                            serial = (row.get("serial-number") or "").strip()
+                            if serial:
+                                merged_by_serial[serial] = dict(row)
+                    except Exception as exc:
+                        log("WARN", f"  show disk-parameters failed on {ip}: {exc}")
+
+                rows = list(merged_by_serial.values()) if merged_by_serial else None
                 if rows is None:
                     log("WARN", f"  All disk commands failed on {ip} -- disks will not be synced")
             else:
@@ -1450,29 +1518,48 @@ def storage_collect_inventory(ip):
 
 
 def _collect_disk_storage(row, add_item):
-    # Support three MSA response formats:
-    #   "show disks"          (MSA 2060, basetype "drive"): has size, model, drive-type
-    #   "show disk-statistics" (MSA 2040, basetype "disk-statistics"): has serial,
-    #       location, durable-id, power-on-hours, data-read/written, NO size/model
-    #   "show disk-parameters" (older fallback): per-disk rows with size/model
+    # Collect every useful field a merged "show disks" + "show disk-statistics"
+    # row can expose. Fields are absent on MSA 2040 (disk-statistics) but
+    # present on MSA 2060 (disks), and vice-versa -- we take whatever is there.
     serial = row.get("serial-number")
     if not serial:
         # disk-statistics rows sometimes use durable-id as identifier
         return 0
 
+    # Size / capacity -- try every known field name
     size_str = (row.get("size") or row.get("total-size")
-                or row.get("formatted-size") or row.get("raw-size"))
+                or row.get("formatted-size") or row.get("raw-size")
+                or row.get("capacity") or row.get("disk-size"))
     size_num = (row.get("size-numeric") or row.get("total-size-numeric")
-                or row.get("raw-size-numeric"))
+                or row.get("raw-size-numeric") or row.get("capacity-numeric"))
     cap = parse_storage_size_bytes(size_str, size_num)
-    role_id = ROLE_SSD if is_ssd_storage(row) else ROLE_HDD
-    model = (row.get("model") or row.get("disk-description")
-             or row.get("description") or row.get("vendor"))
-    location = row.get("location") or row.get("slot") or row.get("durable-id")
-    health = row.get("health") or row.get("disk-state") or row.get("status")
 
-    # disk-statistics has I/O stats instead of size/model -- include them in
-    # the description so the disk is still useful in NetBox even without size.
+    # Model / part number
+    model = (row.get("model") or row.get("disk-description")
+             or row.get("description") or row.get("product-id")
+             or row.get("vendor-product-id"))
+
+    # Manufacturer / vendor
+    vendor = (row.get("vendor") or row.get("manufacturer")
+              or row.get("vendor-name") or DEFAULT_MFR)
+
+    # Firmware version
+    firmware = (row.get("firmware-version") or row.get("firmware")
+                or row.get("drive-firmware") or row.get("sc-firmware"))
+
+    # Interface / type (SAS, SATA, SSD, etc.)
+    drive_type = (row.get("drive-type") or row.get("disk-type")
+                  or row.get("type") or row.get("drive-form-factor")
+                  or row.get("interface"))
+    role_id = ROLE_SSD if is_ssd_storage(row) else ROLE_HDD
+
+    # Location / slot
+    location = (row.get("location") or row.get("slot")
+                or row.get("durable-id"))
+    health = (row.get("health") or row.get("disk-state")
+              or row.get("status") or row.get("health-reason"))
+
+    # I/O stats from disk-statistics (MSA 2040)
     extra = []
     if row.get("power-on-hours"):
         extra.append(f"PowerOnHours={row.get('power-on-hours')}")
@@ -1482,16 +1569,29 @@ def _collect_disk_storage(row, add_item):
         extra.append(f"Written={row.get('data-written')}")
     if row.get("iops"):
         extra.append(f"IOPS={row.get('iops')}")
+    if row.get("number-of-reads"):
+        extra.append(f"Reads={row.get('number-of-reads')}")
+    if row.get("number-of-writes"):
+        extra.append(f"Writes={row.get('number-of-writes')}")
+
+    # Build a rich description with every field we found
+    desc_parts = [f"Location={location}"]
+    if model:      desc_parts.append(f"Model={model}")
+    if size_str:   desc_parts.append(f"Size={size_str}")
+    if drive_type: desc_parts.append(f"Type={drive_type}")
+    if firmware:   desc_parts.append(f"FW={firmware}")
+    if health:     desc_parts.append(f"Health={health}")
+    if vendor and vendor != DEFAULT_MFR:
+        desc_parts.append(f"Vendor={vendor}")
+    if extra:
+        desc_parts.append(" ".join(extra))
 
     add_item(
         name=name_storage_disk(row),
-        manufacturer=row.get("vendor") or row.get("manufacturer") or DEFAULT_MFR,
+        manufacturer=vendor,
         part_number=model,
         serial=serial,
-        description=(f"Location={location} Model={model} "
-                    f"Size={size_str or 'N/A'} Health={health} "
-                    f"Type={row.get('drive-type') or row.get('disk-type') or 'disk'}"
-                    + (f" {' '.join(extra)}" if extra else "")),
+        description=" ".join(desc_parts)[:200],
         role_id=role_id,
     )
     return cap or 0
