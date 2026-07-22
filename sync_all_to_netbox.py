@@ -624,8 +624,33 @@ class StorageSession:
         for attempt in range(1, retries + 1):
             try:
                 xml = self._request(f"show/{command}")
-                self._response_status(xml)
+                # Check status but don't discard the response if it's just an
+                # Info-level message (e.g. "Rates may vary"). The XML may still
+                # contain the requested data alongside the info status object.
+                # Only raise on Error-level status or when there are no data
+                # objects at all.
+                status_props = {}
+                status_obj = xml.find("./OBJECT[@name='status']")
+                if status_obj is not None:
+                    status_props = {p.get("name"): (p.text or "").strip()
+                                    for p in status_obj.findall("PROPERTY")}
+                resp_type = status_props.get("response-type", "").lower()
+
+                if resp_type == "error":
+                    raise RuntimeError(status_props.get("response") or "Storage API error")
+
+                if resp_type == "info":
+                    # Info-level (e.g. "Rates may vary") -- the data may still
+                    # be present. Parse objects and return them if we got any.
+                    objects = self._parse_objects(xml)
+                    if objects:
+                        return objects
+                    # No data objects -- treat as rate-limit and retry
+                    raise RuntimeError(f"STORAGE_RATE_LIMIT:{status_props.get('response', '')}")
+
+                # Success or unknown status -- parse and return
                 return self._parse_objects(xml)
+
             except RuntimeError as exc:
                 if "STORAGE_RATE_LIMIT" in str(exc):
                     if attempt < retries:
