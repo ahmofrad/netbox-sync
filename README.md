@@ -2,7 +2,7 @@
 
 > **English** documentation below · مستندات **فارسی** در ادامه
 
-A Python automation tool that automatically discovers HPE ProLiant servers (via Redfish/iLO) and HPE MSA storage arrays (via the XML API) on your network, then synchronizes their hardware inventory into [NetBox](https://github.com/netbox-community/netbox) DCIM. It creates, updates, and marks devices offline, and keeps per-component inventory (CPU, RAM, disks, PSUs, NICs, HBAs, controllers, batteries, FRUs) in sync — running on a daily scheduler.
+A Python automation tool that automatically discovers **HPE ProLiant servers** (via Redfish/iLO), **HPE MSA storage arrays** (via the XML API), and **Brocade / HPE B-Series SAN switches** (via SSH CLI) on your network, then synchronizes their hardware inventory into [NetBox](https://github.com/netbox-community/netbox) DCIM. It creates, updates, and marks devices offline, and keeps per-component inventory (CPU, RAM, disks, PSUs, NICs, HBAs, controllers, batteries, FRUs, SFP transceivers, FC ports) in sync — running on a daily scheduler.
 
 ---
 
@@ -39,11 +39,12 @@ A Python automation tool that automatically discovers HPE ProLiant servers (via 
 
 ## What it does
 
-1. **Scans IP ranges** you define (CIDR notation) for two kinds of devices:
+1. **Scans IP ranges** you define (CIDR notation) for three kinds of devices:
    - **HPE ProLiant servers** — detected via the Redfish API on the iLO BMC.
    - **HPE MSA storage arrays** — detected via the MSA XML API.
-2. **Creates or updates** a NetBox **device** for each discovered server/storage unit, including manufacturer, device type, role, site, serial, and custom fields (BMC IP, firmware, CPU/RAM/disk summaries, health…).
-3. **Collects detailed hardware inventory** from each device (CPUs, RAM modules, disks, PSUs, NICs, HBAs, controllers, batteries, FRUs) and syncs each component as a NetBox **inventory item** keyed by serial number.
+   - **Brocade / HPE B-Series SAN switches** — detected via SSH CLI (Fabric OS).
+2. **Creates or updates** a NetBox **device** for each discovered server/storage/SAN-switch unit, including manufacturer, device type, role, site, serial, and custom fields (BMC IP, firmware, CPU/RAM/disk summaries, health…).
+3. **Collects detailed hardware inventory** from each device (CPUs, RAM modules, disks, PSUs, NICs, HBAs, controllers, batteries, FRUs, SFP transceivers, FC ports) and syncs each component as a NetBox **inventory item** keyed by serial number.
 4. **Removes stale inventory items** that are no longer reported by the device.
 5. **Marks devices offline** in NetBox when they stop responding to the scan.
 6. **Runs automatically** on a schedule (default: 00:00 and 12:00 daily) plus an immediate run on startup.
@@ -65,7 +66,7 @@ A Python automation tool that automatically discovers HPE ProLiant servers (via 
                 │  └─────┬──────┘    │  StorageSession      │   │
                 │        │           │  → login + XML show  │   │
                 │        ▼           └──────────────────────┘   │
-                │  found = {servers:[...], storage:[...]}       │
+                │  found = {servers:[...], storage:[...], san_switches:[...]}       │
                 │        │                                     │
                 │        ▼                                     │
                 │  for each server:                            │
@@ -77,6 +78,11 @@ A Python automation tool that automatically discovers HPE ProLiant servers (via 
                 │    ensure_storage_device() →  NetBox device  │
                 │    storage_collect_inventory() → items      │
                 │    sync_inventory()        →  diff by serial  │
+                │                                              │
+                │  for each SAN switch:                        │
+                │    ensure_san_switch_device() → NetBox device │
+                │    san_collect_inventory()  → items + FC ports │
+                │    sync_inventory()         →  diff by serial  │
                 │                                              │
                 │  mark unreachable devices offline             │
                 └──────────────────────────────────────────────┘
@@ -101,9 +107,9 @@ A Python automation tool that automatically discovers HPE ProLiant servers (via 
 | File | Purpose |
 |------|---------|
 | `sync_all_to_netbox.py` | Main automation script — scanner, collectors, NetBox sync, scheduler. |
-| `models.py` | Server (`SERVER_MODEL_MAP`) and storage (`STORAGE_MODEL_MAP`) model-name normalization maps. Maps vendor strings (e.g. `proliant dl360 gen10`) to canonical NetBox device-type names (e.g. `HPE DL360 G10`). |
+| `models.py` | Server (`SERVER_MODEL_MAP`), storage (`STORAGE_MODEL_MAP`), and SAN switch (`SWITCH_MODEL_MAP`) model-name normalization maps. Maps vendor strings (e.g. `proliant dl360 gen10`) to canonical NetBox device-type names (e.g. `HPE DL360 G10`). |
 | `.env.example` | Template for your `.env` file. Copy to `.env` and fill in real values. |
-| `requirements` | Python dependencies (`requests`, `pynetbox`, `schedule`, `python-dotenv`). |
+| `requirements` | Python dependencies (`requests`, `pynetbox`, `schedule`, `python-dotenv`, `paramiko`). |
 | `.gitignore` | Ignores `.env`, `__pycache__/`, venvs, and any personal working folders. |
 
 ## Requirements
@@ -113,8 +119,10 @@ A Python automation tool that automatically discovers HPE ProLiant servers (via 
 - Network access from the host running this script to:
   - iLO/BMC IPs on `REDFISH_PORT` (default 443)
   - MSA storage IPs on `STORAGE_PORT` (default 443)
+  - SAN switch IPs on `SWITCH_PORT` (default 22, SSH)
 - HPE ProLiant servers with iLO 4 / iLO 5 (Redfish capable)
 - HPE MSA storage arrays (2040 / 2042 / 2050 / 2052 / 2060 class)
+- Brocade / HPE B-Series SAN switches (Fabric OS, SSH-enabled)
 
 Install dependencies:
 ```bash
@@ -143,6 +151,11 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `DEFAULT_SITE_NAME` | ❌ | `Default` | Fallback site name when no keyword matches. |
 | `DEFAULT_ROLE_NAME` | ❌ | `Server` | NetBox device role for servers. |
 | `DEFAULT_STORAGE_ROLE` | ❌ | `Storage` | NetBox device role for storage arrays. |
+| `SWITCH_USER` | ✅ | -- | SSH username for Brocade SAN switches. |
+| `SWITCH_PASS` | ✅ | -- | SSH password for Brocade SAN switches. |
+| `SWITCH_PORT` | ❌ | `22` | SSH port for SAN switch CLI. |
+| `SAN_RANGES` | ❌* | example CIDRs | Comma-separated CIDR ranges to scan for SAN switches. IPs already found as server/storage are skipped. |
+| `DEFAULT_SWITCH_ROLE` | ❌ | `SAN Switch` | NetBox device role for SAN switches. |
 
 > *The shipped defaults in `sync_all_to_netbox.py` are **documentation-only** placeholder CIDRs (`192.0.2.0/27` = TEST-NET). Set `BMC_RANGES` and `STORAGE_RANGES` in `.env` to your real ranges.
 
@@ -274,7 +287,7 @@ The script:
 [2026-06-30 00:00:01] [INFO] Scheduler started — runs at 00:00 and 12:00 daily.
 [2026-06-30 00:00:01] [INFO] Running initial unified sync now ...
 [2026-06-30 00:00:01] [INFO] ============================================================
-[2026-06-30 00:00:01] [INFO] Unified sync started (servers + storage)
+[2026-06-30 00:00:01] [INFO] Unified sync started (servers + storage + SAN switches)
 [2026-06-30 00:00:02] [INFO] Scanning 62 IPs across 2 BMC ranges ...
 [2026-06-30 00:00:15] [INFO]   + SERVER 192.0.2.5  HPE DL360 G10  s/n=XXXXXXX
 ...
@@ -353,7 +366,7 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 
 ## این برنامه چه می‌کند
 
-1. **بازه‌های IP** که شما تعریف کرده‌اید (به‌صورت CIDR) را برای دو نوع دستگاه اسکن می‌کند:
+1. **بازه‌های IP** که شما تعریف کرده‌اید (به‌صورت CIDR) را برای سه نوع دستگاه اسکن می‌کند:
    - **سرورهای HPE ProLiant** — از طریق API سِ Redfish روی iLO/BMC.
    - **آرایه‌های ذخیره‌سازی HPE MSA** — از طریق XML API اختصاصی MSA.
 2. برای هر سرور یا ذخیره‌سازی کشف‌شده، یک **دستگاه (device)** در NetBox **ایجاد یا به‌روزرسانی** می‌کند؛ اطلاعاتی نظیر سازنده، نوع دستگاه، نقش، سایت، شماره سریال و فیلدهای سفارشی (IP بورد BMC، نسخه فریم‌ور، خلاصه CPU/RAM/دیسک، وضعیت سلامت و …).
@@ -379,7 +392,7 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
                 │  └─────┬──────┘    │  StorageSession      │   │
                 │        │           │  → login + XML show  │   │
                 │        ▼           └──────────────────────┘   │
-                │  found = {servers:[...], storage:[...]}       │
+                │  found = {servers:[...], storage:[...], san_switches:[...]}       │
                 │        │                                     │
                 │        ▼                                     │
                 │  برای هر سرور:                               │
@@ -415,9 +428,9 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 | فایل | کاربرد |
 |------|--------|
 | `sync_all_to_netbox.py` | اسکریپت اصلی اتوماسیون — شامل اسکنر، collectorها، همگام‌سازی با NetBox و زمان‌بند. |
-| `models.py` | نگاشت‌های نرمال‌سازی نام مدل سرور (`SERVER_MODEL_MAP`) و ذخیره‌سازی (`STORAGE_MODEL_MAP`). رشته‌های سازنده (مانند `proliant dl360 gen10`) را به نام‌های متعارف نوع دستگاه در NetBox (مانند `HPE DL360 G10`) تبدیل می‌کند. |
+| `models.py` | نگاشت‌های نرمال‌سازی نام مدل سرور (`SERVER_MODEL_MAP`)، ذخیره‌سازی (`STORAGE_MODEL_MAP`) و سوئچ SAN (`SWITCH_MODEL_MAP`). رشته‌های سازنده (مانند `proliant dl360 gen10`) را به نام‌های متعارف نوع دستگاه در NetBox (مانند `HPE DL360 G10`) تبدیل می‌کند. |
 | `.env.example` | قالب فایل `.env`. آن را به `.env` کپی کرده و مقادیر واقعی خود را وارد کنید. |
-| `requirements` | وابستگی‌های پایتون (`requests`, `pynetbox`, `schedule`, `python-dotenv`). |
+| `requirements` | وابستگی‌های پایتون (`requests`, `pynetbox`, `schedule`, `python-dotenv`, `paramiko`). |
 | `.gitignore` | فایل‌های `.env`، `__pycache__/`، venv و پوشه‌های کاری شخصی را نادیده می‌گیرد. |
 
 ## پیش‌نیازها
@@ -429,6 +442,7 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
   - IPهای ذخیره‌سازی MSA روی `STORAGE_PORT` (پیش‌فرض ۴۴۳)
 - سرورهای HPE ProLiant دارای iLO 4 یا iLO 5 (پشتیبان Redfish)
 - آرایه‌های ذخیره‌سازی HPE MSA (نسل‌های ۲۰۴۰ / ۲۰۴۲ / ۲۰۵۰ / ۲۰۵۲ / ۲۰۶۰ / ۲۰۶۲)
+- سوئچ‌های Brocade / HPE B-Series (مجهز به Fabric OS، قابلیت SSH)
 
 نصب وابستگی‌ها:
 ```bash
@@ -457,6 +471,11 @@ pip install -r requirements
 | `DEFAULT_SITE_NAME` | ❌ | `Default` | نام سایت پیش‌فرض در صورت عدم تطابق هیچ کلیدواژه‌ای. |
 | `DEFAULT_ROLE_NAME` | ❌ | `Server` | نقش دستگاه در NetBox برای سرورها. |
 | `DEFAULT_STORAGE_ROLE` | ❌ | `Storage` | نقش دستگاه در NetBox برای ذخیره‌سازی. |
+| `SWITCH_USER` | ✅ | -- | نام کاربری SSH برای سوئچ‌های Brocade SAN. |
+| `SWITCH_PASS` | ✅ | -- | رمز عبور SSH برای سوئچ‌های Brocade SAN. |
+| `SWITCH_PORT` | ❌ | `22` | پورت SSH برای CLI سوئچ SAN. |
+| `SAN_RANGES` | ❌* | CIDR نمونه | بازه‌های CIDR جداشده با کاما برای اسکن سوئچ‌های SAN. IP‌هایی که قبلاً به‌عنوان سرور/ذخیره‌سازی یافت شده‌اند نادیده گرفته می‌شوند. |
+| `DEFAULT_SWITCH_ROLE` | ❌ | `SAN Switch` | نقش دستگاه در NetBox برای سوئچ‌های SAN. |
 
 > *پیش‌فرض‌های موجود در `sync_all_to_netbox.py` صرفاً CIDR‌های **نمونه/تست** هستند (`192.0.2.0/27` = TEST-NET). حتماً بازه‌های واقعی خود را در `.env` تنظیم کنید.
 
@@ -588,7 +607,7 @@ python sync_all_to_netbox.py
 [2026-06-30 00:00:01] [INFO] Scheduler started — runs at 00:00 and 12:00 daily.
 [2026-06-30 00:00:01] [INFO] Running initial unified sync now ...
 [2026-06-30 00:00:01] [INFO] ============================================================
-[2026-06-30 00:00:01] [INFO] Unified sync started (servers + storage)
+[2026-06-30 00:00:01] [INFO] Unified sync started (servers + storage + SAN switches)
 [2026-06-30 00:00:02] [INFO] Scanning 62 IPs across 2 BMC ranges ...
 [2026-06-30 00:00:15] [INFO]   + SERVER 192.0.2.5  HPE DL360 G10  s/n=XXXXXXX
 ...
