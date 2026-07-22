@@ -116,14 +116,14 @@ except Exception as e:
 # Try every known disk command
 disk_cmds = [
     "disks",
+    "disk-statistics",   # MSA 2040 - has 68 disk rows with serial + location
     "disk-parameters",
-    "disk-statistics",
     "disks-all",
     "maps-disks",
     "drives",
     "disk-groups",
     "vdisk-info",
-    "storage-system",  # sometimes lists disks under enclosures
+    "storage-system",
 ]
 
 print(f"\n=== DISK COMMANDS ===")
@@ -139,18 +139,20 @@ for cmd in disk_cmds:
         for r in rows:
             bts[r.get("basetype", "?")] = bts.get(r.get("basetype", "?"), 0) + 1
         print(f"\n[{cmd}] {len(rows)} rows, basetypes={bts}")
-        # Show first row of each basetype
+        # Show ALL fields of the first row of each basetype
         seen_bt = set()
         for r in rows:
             bt = r.get("basetype", "?")
             if bt in seen_bt:
                 continue
             seen_bt.add(bt)
-            compact = {k: r.get(k) for k in list(r.keys())[:15] if r.get(k)}
-            print(f"  sample [{bt}]: {compact}")
+            print(f"  FULL sample [{bt}]:")
+            for k, v in r.items():
+                if k not in ("basetype", "name", "oid") and v:
+                    print(f"    {k} = {v}")
     except Exception as e:
         print(f"[{cmd}] FAILED: {e}")
-    time.sleep(1)  # avoid rate-limit
+    time.sleep(2)  # avoid rate-limit
 
 # Try enclosure/disk-combination commands
 print(f"\n=== ENCLOSURE / FRU COMMANDS ===")
