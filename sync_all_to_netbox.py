@@ -431,7 +431,7 @@ def expand_ranges(ranges):
             ips.extend(str(h) for h in net.hosts())
     return ips
 
-def is_port_open(ip, port, timeout=3, retries=2, retry_delay=2):
+def is_port_open(ip, port, timeout=5, retries=3, retry_delay=2):
     for attempt in range(1, retries + 1):
         try:
             with socket.create_connection((ip, port), timeout=timeout): return True
@@ -504,7 +504,7 @@ def _resolve_server_name(rf, sys_data):
     if serial: return f"HPE-{serial}"
     return f"HPE-{ip}"
 
-def probe_redfish(ip, retries=2, retry_delay=3):
+def probe_redfish(ip, retries=3, retry_delay=5):
     for attempt in range(1, retries + 1):
         if not is_port_open(ip, REDFISH_PORT):
             if attempt < retries: time.sleep(retry_delay); continue
