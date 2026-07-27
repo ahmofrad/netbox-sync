@@ -952,6 +952,29 @@ def mark_storage_offline(dev_id, dev_name):
     except Exception as e:
         log("ERROR", f"  Could not mark storage offline {dev_name}: {e}")
 
+# ── Consecutive-failure tracking (prevents flapping) ─────────────────────────
+# A device must fail to appear in the scan for OFFLINE_THRESHOLD consecutive
+# runs before being marked offline. The counter persists across scheduled runs
+# in process memory and resets to 0 the moment the device is seen again.
+OFFLINE_THRESHOLD = int(os.getenv("OFFLINE_THRESHOLD", "2"))
+_scan_fail_counts = {}   # {ip: consecutive_miss_count}
+
+def _check_offline(ip, live_ips, dev_id, dev_name, mark_fn, label):
+    """Shared logic: increment miss counter if absent, mark offline only
+    when the threshold is reached. Reset counter when the device is present."""
+    if ip in live_ips:
+        if ip in _scan_fail_counts:
+            _scan_fail_counts.pop(ip, None)
+        return
+    misses = _scan_fail_counts.get(ip, 0) + 1
+    _scan_fail_counts[ip] = misses
+    if misses >= OFFLINE_THRESHOLD:
+        mark_fn(dev_id, dev_name)
+        _scan_fail_counts.pop(ip, None)   # reset after marking
+    else:
+        log("INFO", f"  {label} {dev_name} not seen this run "
+            f"(miss {misses}/{OFFLINE_THRESHOLD}) -- keeping active")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # inventory collection – Redfish (server)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2431,14 +2454,17 @@ def run_sync():
             log("ERROR", f"  SAN inventory sync failed for {ip}: {e}")
 
     # ── Mark unreachable devices offline ─────────────────────────────────────
+    # A device must be missing from OFFLINE_THRESHOLD consecutive scans before
+    # being marked offline. This prevents transient iLO slowness under load
+    # from causing false offline markings.
     log("INFO", "Checking for unreachable servers (Redfish) ...")
     try:
         for dev in list(api.dcim.devices.filter(cf_redfish_enabled=True)):
             bmc_ip = (dev.custom_fields or {}).get("bmc_ip")
             if not bmc_ip: continue
             ip = bmc_ip.split("/")[0].strip()
-            if ip not in live_server_ips:
-                mark_server_offline(dev.id, dev.name)
+            _check_offline(ip, live_server_ips, dev.id, dev.name,
+                           mark_server_offline, "Server")
     except Exception as e:
         log("ERROR", f"Server offline check failed: {e}")
 
@@ -2448,8 +2474,8 @@ def run_sync():
             storage_ip = (dev.custom_fields or {}).get("storage_ip")
             if not storage_ip: continue
             ip = str(storage_ip).split("/")[0].strip()
-            if ip not in live_storage_ips:
-                mark_storage_offline(dev.id, dev.name)
+            _check_offline(ip, live_storage_ips, dev.id, dev.name,
+                           mark_storage_offline, "Storage")
     except Exception as e:
         log("ERROR", f"Storage offline check failed: {e}")
 
@@ -2459,8 +2485,8 @@ def run_sync():
             san_ip = (dev.custom_fields or {}).get("san_switch_ip")
             if not san_ip: continue
             ip = str(san_ip).split("/")[0].strip()
-            if ip not in live_san_ips:
-                mark_san_offline(dev.id, dev.name)
+            _check_offline(ip, live_san_ips, dev.id, dev.name,
+                           mark_san_offline, "SAN switch")
     except Exception as e:
         log("ERROR", f"SAN switch offline check failed: {e}")
 
