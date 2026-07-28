@@ -1,13 +1,18 @@
 """run_sync: the main reconciliation job — scan, ensure devices, collect and
 sync inventory, sync SAN interfaces, then mark unreachable devices offline."""
 from netbox_sync.collectors.brocade import san_collect_inventory, sync_san_interfaces
+from netbox_sync.collectors.cisco import (cisco_collect_inventory,
+                                          sync_cisco_interfaces,
+                                          sync_cdp_cables)
 from netbox_sync.collectors.msa import storage_collect_inventory
 from netbox_sync.collectors.redfish import rf_collect_inventory
 from netbox_sync.config import log
 from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_storage_device, ensure_san_switch_device,
+                                ensure_cisco_device,
                                 mark_server_offline, mark_storage_offline,
-                                mark_san_offline, _check_offline,
+                                mark_san_offline, mark_cisco_offline,
+                                _check_offline,
                                 sync_inventory)
 from netbox_sync.scanner import scan_all
 
@@ -167,6 +172,63 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  SAN inventory sync failed for {ip}: {e}")
 
+    # ── Process Cisco switches ────────────────────────────────────────────────
+    live_cisco_ips = {h["ip"] for h in found["cisco_switches"]}
+    for probe in found["cisco_switches"]:
+        ip = probe["ip"]
+        log("INFO", f"Processing CISCO {ip}  ({probe.get('model')} / {probe.get('serial')})")
+
+        try:
+            dev_id = ensure_cisco_device(probe)
+        except Exception as e:
+            log("ERROR", f"  ensure_cisco_device failed for {ip}: {e}"); continue
+
+        try:
+            data = cisco_collect_inventory(ip)
+        except KeyboardInterrupt: raise
+        except Exception as e:
+            log("ERROR", f"  Cisco inventory collection failed for {ip}: {e}"); continue
+
+        summary = data["summary"]
+        ports = data["ports"]
+        neighbors = data["neighbors"]
+        inv = data["inventory"]
+
+        try:
+            payload = {
+                "id": dev_id,
+                "status": "active",
+                "custom_fields": {
+                    "cisco_ip":         ip,
+                    "cisco_enabled":    True,
+                    "cisco_firmware":   summary.get("firmware") or probe.get("firmware"),
+                    "cisco_model":      summary.get("model") or probe.get("model"),
+                    "cisco_port_count": summary.get("port_count"),
+                },
+            }
+            if summary.get("serial"): payload["serial"] = summary["serial"]
+            api.dcim.devices.update([payload])
+        except Exception as e:
+            log("ERROR", f"  Cisco switch update failed for {ip}: {e}")
+
+        try:
+            sync_cisco_interfaces(dev_id, ports)
+            log("INFO", f"  [OK] Cisco {ip} — {len(ports)} interfaces synced")
+        except Exception as e:
+            log("ERROR", f"  Cisco interface sync failed for {ip}: {e}")
+
+        try:
+            sync_inventory(dev_id, inv)
+            log("INFO", f"  [OK] Cisco {ip} — {len(inv)} inventory items synced")
+        except Exception as e:
+            log("ERROR", f"  Cisco inventory sync failed for {ip}: {e}")
+
+        try:
+            sync_cdp_cables(dev_id, neighbors)
+            log("INFO", f"  [OK] Cisco {ip} — {len(neighbors)} neighbors processed")
+        except Exception as e:
+            log("ERROR", f"  Cisco cable sync failed for {ip}: {e}")
+
     # ── Mark unreachable devices offline ─────────────────────────────────────
     # A device must be missing from OFFLINE_THRESHOLD consecutive scans before
     # being marked offline. This prevents transient iLO slowness under load
@@ -203,6 +265,17 @@ def run_sync():
                            mark_san_offline, "SAN switch")
     except Exception as e:
         log("ERROR", f"SAN switch offline check failed: {e}")
+
+    log("INFO", "Checking for unreachable Cisco switches ...")
+    try:
+        for dev in list(api.dcim.devices.filter(cf_cisco_enabled=True)):
+            cisco_ip = (dev.custom_fields or {}).get("cisco_ip")
+            if not cisco_ip: continue
+            ip = str(cisco_ip).split("/")[0].strip()
+            _check_offline(ip, live_cisco_ips, dev.id, dev.name,
+                           mark_cisco_offline, "Cisco switch")
+    except Exception as e:
+        log("ERROR", f"Cisco offline check failed: {e}")
 
     log("INFO", "Unified sync complete")
     log("INFO", "=" * 60)
