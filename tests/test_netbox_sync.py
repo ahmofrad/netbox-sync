@@ -254,6 +254,33 @@ def test_validate_config_lists_missing_vars(monkeypatch):
         cfg._validate_config()
 
 
+# ── Cisco config ─────────────────────────────────────────────────────────────
+
+def test_cisco_ranges_default_empty_and_parse(monkeypatch):
+    import importlib
+    monkeypatch.delenv("CISCO_RANGES", raising=False)
+    importlib.reload(cfg)
+    assert cfg.CISCO_RANGES == []
+    monkeypatch.setenv("CISCO_RANGES", "192.0.2.0/29, 198.51.100.0/29")
+    importlib.reload(cfg)
+    assert cfg.CISCO_RANGES == ["192.0.2.0/29", "198.51.100.0/29"]
+    monkeypatch.delenv("CISCO_RANGES", raising=False)
+    importlib.reload(cfg)
+
+
+def test_validate_config_requires_cisco_creds_only_when_ranges_set(monkeypatch):
+    for var in REQUIRED_VARS:
+        monkeypatch.setenv(var, "x")
+    monkeypatch.delenv("CISCO_RANGES", raising=False)
+    monkeypatch.delenv("CISCO_USER", raising=False)
+    monkeypatch.delenv("CISCO_PASS", raising=False)
+    cfg._validate_config()  # no ranges -> no creds needed
+
+    monkeypatch.setenv("CISCO_RANGES", "192.0.2.0/29")
+    with pytest.raises(RuntimeError, match="CISCO_USER"):
+        cfg._validate_config()
+
+
 # ── log level filtering ──────────────────────────────────────────────────────
 
 def test_debug_logs_hidden_by_default(capsys, monkeypatch):

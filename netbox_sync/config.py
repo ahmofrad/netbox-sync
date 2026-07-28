@@ -25,6 +25,9 @@ STORAGE_PASS = os.getenv("STORAGE_PASS")
 SWITCH_USER = os.getenv("SWITCH_USER")
 SWITCH_PASS = os.getenv("SWITCH_PASS")
 
+CISCO_USER = os.getenv("CISCO_USER")
+CISCO_PASS = os.getenv("CISCO_PASS")
+
 REQUIRED_ENV_VARS = ("NETBOX_URL", "NETBOX_TOKEN",
                      "REDFISH_USER", "REDFISH_PASS",
                      "STORAGE_USER", "STORAGE_PASS",
@@ -34,6 +37,10 @@ def _validate_config():
     """Fail fast at startup if required .env variables are missing.
     Kept out of module scope so the modules stay importable for tests."""
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
+    # Cisco family is opt-in; its creds are required only when ranges are set.
+    if os.getenv("CISCO_RANGES") and (not os.getenv("CISCO_USER")
+                                      or not os.getenv("CISCO_PASS")):
+        missing.append("CISCO_USER/CISCO_PASS (required when CISCO_RANGES is set)")
     if missing:
         raise RuntimeError(f"Missing required .env variables: {', '.join(missing)}")
 
@@ -65,6 +72,11 @@ SAN_RANGES = DEFAULT_SAN_RANGES
 if os.getenv("SAN_RANGES"):
     SAN_RANGES = [r.strip() for r in os.getenv("SAN_RANGES").split(",") if r.strip()]
 
+# Cisco family is opt-in: empty default means "disabled".
+CISCO_RANGES = []
+if os.getenv("CISCO_RANGES"):
+    CISCO_RANGES = [r.strip() for r in os.getenv("CISCO_RANGES").split(",") if r.strip()]
+
 REDFISH_PORT  = int(os.getenv("REDFISH_PORT", "443"))
 STORAGE_PORT  = int(os.getenv("STORAGE_PORT", "443"))
 SWITCH_PORT   = int(os.getenv("SWITCH_PORT", "22"))
@@ -73,6 +85,8 @@ SCAN_WORKERS  = int(os.getenv("SCAN_WORKERS", "20"))
 SERVER_ROLE   = os.getenv("DEFAULT_ROLE_NAME", "Server")
 STORAGE_ROLE  = os.getenv("DEFAULT_STORAGE_ROLE", "Storage")
 SWITCH_ROLE   = os.getenv("DEFAULT_SWITCH_ROLE", "SAN Switch")
+CISCO_PORT    = int(os.getenv("CISCO_PORT", "22"))
+CISCO_ROLE    = os.getenv("DEFAULT_CISCO_ROLE", "Switch")
 DEFAULT_MFR   = "HPE"
 DEFAULT_SITE  = os.getenv("DEFAULT_SITE_NAME", "")
 OFFLINE_THRESHOLD = int(os.getenv("OFFLINE_THRESHOLD", "2"))
