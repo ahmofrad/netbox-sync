@@ -265,6 +265,31 @@ def test_cisco_inventory_roles_classified(monkeypatch):
     assert ep.created == []
 
 
+# ── Cisco device ensure ──────────────────────────────────────────────────────
+
+def test_ensure_cisco_device_creates_with_custom_fields(monkeypatch):
+    devices_ep = FakeEndpoint()
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(devices=devices_ep))
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda n: 11)
+    monkeypatch.setattr(nbx, "get_or_create_role", lambda n, *a: 12)
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda n: 13)
+    monkeypatch.setattr(nbx, "get_or_create_device_type", lambda *a, **k: 14)
+    monkeypatch.setattr(nbx, "find_device", lambda *a, **k: None)
+
+    dev_id = nbx.ensure_cisco_device({
+        "ip": "192.0.2.65", "serial": "FOC2345X0AB", "model": "C9300-48U",
+        "hostname": "SW1", "manufacturer": "Cisco", "firmware": "16.9.4",
+    })
+    assert len(devices_ep.created) == 1
+    payload = devices_ep.created[0]
+    assert payload["serial"] == "FOC2345X0AB"
+    assert payload["status"] == "active"
+    assert payload["custom_fields"]["cisco_ip"] == "192.0.2.65"
+    assert payload["custom_fields"]["cisco_enabled"] is True
+    assert payload["custom_fields"]["cisco_model"] == "C9300-48U"
+    assert dev_id is not None
+
+
 # ── config validation ────────────────────────────────────────────────────────
 
 REQUIRED_VARS = ["NETBOX_URL", "NETBOX_TOKEN", "REDFISH_USER", "REDFISH_PASS",

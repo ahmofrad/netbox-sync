@@ -9,8 +9,10 @@ import pynetbox
 
 from netbox_sync.config import (NETBOX_URL, NETBOX_TOKEN, _env_bool,
                                 SERVER_ROLE, STORAGE_ROLE, SWITCH_ROLE,
+                                CISCO_ROLE,
                                 DEFAULT_MFR, OFFLINE_THRESHOLD, log)
-from netbox_sync.models import SERVER_MODEL_MAP, STORAGE_MODEL_MAP, SWITCH_MODEL_MAP
+from netbox_sync.models import (SERVER_MODEL_MAP, STORAGE_MODEL_MAP,
+                                SWITCH_MODEL_MAP, CISCO_MODEL_MAP)
 from netbox_sync.utils import (slugify, normalize_model, resolve_site_from_name,
                                _invalid_serial)
 
@@ -246,6 +248,39 @@ def ensure_san_switch_device(probe):
     log("INFO", f"  SAN switch created: {name} (id={new.id})")
     return new.id
 
+def ensure_cisco_device(probe):
+    serial = (probe.get("serial") or "").strip()
+    mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Cisco")
+    role_id = get_or_create_role(CISCO_ROLE, "009688")
+    site_name = resolve_site_from_name(probe.get("hostname") or "")
+    site_id = get_or_create_site(site_name)
+    dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, CISCO_MODEL_MAP)
+    name = _device_name(probe, prefix="cisco")
+    api = get_netbox()
+    dev = find_device(serial, role_name=CISCO_ROLE)
+    if dev is None:
+        cands = list(api.dcim.devices.filter(name=name, site_id=site_id, role_id=role_id))
+        dev = cands[0] if cands else None
+        if dev: log("INFO", f"  Found cisco switch by name+site: {name} (id={dev.id})")
+    payload = {
+        "name": name, "status": "active", "site": site_id,
+        "device_type": dtype_id, "role": role_id,
+        "custom_fields": {
+            "cisco_ip":       probe["ip"],
+            "cisco_enabled":  True,
+            "cisco_firmware": probe.get("firmware"),
+            "cisco_model":    probe.get("model"),
+        },
+        **({"serial": serial} if not _invalid_serial(serial) else {}),
+    }
+    if dev:
+        api.dcim.devices.update([{"id": dev.id, **payload}])
+        log("INFO", f"  Cisco switch updated: {name} (id={dev.id})")
+        return dev.id
+    new = api.dcim.devices.create(payload)
+    log("INFO", f"  Cisco switch created: {name} (id={new.id})")
+    return new.id
+
 def mark_server_offline(dev_id, dev_name):
     try:
         get_netbox().dcim.devices.update([{
@@ -275,6 +310,16 @@ def mark_san_offline(dev_id, dev_name):
         log("WARN", f"  SAN switch marked offline: {dev_name} (id={dev_id})")
     except Exception as e:
         log("ERROR", f"  Could not mark SAN switch offline {dev_name}: {e}")
+
+def mark_cisco_offline(dev_id, dev_name):
+    try:
+        get_netbox().dcim.devices.update([{
+            "id": dev_id, "status": "offline",
+            "custom_fields": {"cisco_enabled": False},
+        }])
+        log("WARN", f"  Cisco switch marked offline: {dev_name} (id={dev_id})")
+    except Exception as e:
+        log("ERROR", f"  Could not mark Cisco switch offline {dev_name}: {e}")
 
 # ── Consecutive-failure tracking (prevents flapping) ─────────────────────────
 # A device must fail to appear in the scan for OFFLINE_THRESHOLD consecutive
