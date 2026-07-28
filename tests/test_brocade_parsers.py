@@ -1,5 +1,5 @@
 """Tests for the Brocade Fabric OS CLI output parsers."""
-import sync_all_to_netbox as mod
+import netbox_sync.collectors.brocade as mod
 
 
 SWITCHSHOW = """switchName:     SW-DC1-01

@@ -12,7 +12,11 @@ from types import SimpleNamespace
 
 import pytest
 
-import sync_all_to_netbox as mod
+import netbox_sync.collectors.brocade as brc
+import netbox_sync.collectors.msa as msa
+import netbox_sync.config as cfg
+import netbox_sync.netbox as nbx
+from netbox_sync import utils
 
 
 # ── In-memory pynetbox fakes ─────────────────────────────────────────────────
@@ -68,9 +72,13 @@ class FakeEndpoint:
 
 @pytest.fixture(autouse=True)
 def _clear_role_cache():
-    mod._INVENTORY_ROLE_CACHE.clear()
+    for cache in (nbx._INVENTORY_ROLE_CACHE, nbx._MANUFACTURER_CACHE,
+                  nbx._ROLE_CACHE, nbx._SITE_CACHE, nbx._DEVICE_TYPE_CACHE):
+        cache.clear()
     yield
-    mod._INVENTORY_ROLE_CACHE.clear()
+    for cache in (nbx._INVENTORY_ROLE_CACHE, nbx._MANUFACTURER_CACHE,
+                  nbx._ROLE_CACHE, nbx._SITE_CACHE, nbx._DEVICE_TYPE_CACHE):
+        cache.clear()
 
 
 def _fake_api(**endpoints):
@@ -92,11 +100,11 @@ def test_sync_inventory_deletes_stale_and_dupes_and_upserts(monkeypatch):
         FakeRecord(4, serial="DUP", device_id=7),
     ]
     ep = FakeEndpoint(existing)
-    monkeypatch.setattr(mod, "get_netbox",
+    monkeypatch.setattr(nbx, "get_netbox",
                         lambda: _fake_api(inventory_items=ep))
-    monkeypatch.setattr(mod, "get_or_create_manufacturer", lambda name: 5)
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda name: 5)
 
-    mod.sync_inventory(7, {"KEEP": _item("KEEP"),
+    nbx.sync_inventory(7, {"KEEP": _item("KEEP"),
                            "DUP": _item("DUP"),
                            "NEW": _item("NEW")})
 
@@ -113,9 +121,9 @@ def test_sync_inventory_deletes_stale_and_dupes_and_upserts(monkeypatch):
 def test_sync_inventory_single_fetch_and_no_per_item_get(monkeypatch):
     """The refactor must not re-fetch the list or .get() per item (N+1)."""
     ep = FakeEndpoint([FakeRecord(1, serial="A", device_id=7)])
-    monkeypatch.setattr(mod, "get_netbox",
+    monkeypatch.setattr(nbx, "get_netbox",
                         lambda: _fake_api(inventory_items=ep))
-    monkeypatch.setattr(mod, "get_or_create_manufacturer", lambda name: 5)
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda name: 5)
 
     filter_calls = []
     orig_filter = ep.filter
@@ -127,7 +135,7 @@ def test_sync_inventory_single_fetch_and_no_per_item_get(monkeypatch):
         raise AssertionError("per-item .get() must not be used")
     ep.get = fail_get
 
-    mod.sync_inventory(7, {"A": _item("A"), "B": _item("B")})
+    nbx.sync_inventory(7, {"A": _item("A"), "B": _item("B")})
     assert len(filter_calls) == 1
 
 
@@ -145,11 +153,11 @@ def _roles_endpoint():
 
 def test_inventory_role_resolved_by_name_and_cached(monkeypatch):
     ep = FakeEndpoint()
-    monkeypatch.setattr(mod, "get_netbox",
+    monkeypatch.setattr(nbx, "get_netbox",
                         lambda: _fake_api(inventory_item_roles=ep))
 
-    rid1 = mod.get_or_create_inventory_role("HDD")
-    rid2 = mod.get_or_create_inventory_role("HDD")
+    rid1 = nbx.get_or_create_inventory_role("HDD")
+    rid2 = nbx.get_or_create_inventory_role("HDD")
 
     assert rid1 == rid2
     assert len(ep.created) == 1
@@ -159,29 +167,61 @@ def test_inventory_role_resolved_by_name_and_cached(monkeypatch):
 
 def test_inventory_role_finds_existing_by_name(monkeypatch):
     ep = _roles_endpoint()
-    monkeypatch.setattr(mod, "get_netbox",
+    monkeypatch.setattr(nbx, "get_netbox",
                         lambda: _fake_api(inventory_item_roles=ep))
-    assert mod.get_or_create_inventory_role("SSD") == 43
+    assert nbx.get_or_create_inventory_role("SSD") == 43
     assert ep.created == []
+
+
+def test_manufacturer_lookup_is_cached(monkeypatch):
+    """Repeated get_or_create_manufacturer calls must not re-hit the API
+    (inventory sync calls it once per item — N+1 without caching)."""
+    ep = FakeEndpoint([FakeRecord(7, name="HPE", slug="hpe")])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(manufacturers=ep))
+    calls = []
+    orig_get = ep.get
+    def counting_get(**kw):
+        calls.append(kw)
+        return orig_get(**kw)
+    ep.get = counting_get
+
+    assert nbx.get_or_create_manufacturer("HPE") == 7
+    assert nbx.get_or_create_manufacturer("HPE") == 7
+    assert len(calls) == 1
+
+
+def test_device_role_lookup_is_cached(monkeypatch):
+    ep = FakeEndpoint([FakeRecord(3, name="Server", slug="server")])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(device_roles=ep))
+    calls = []
+    orig_get = ep.get
+    def counting_get(**kw):
+        calls.append(kw)
+        return orig_get(**kw)
+    ep.get = counting_get
+
+    assert nbx.get_or_create_role("Server") == 3
+    assert nbx.get_or_create_role("Server") == 3
+    assert len(calls) == 1
 
 
 def test_storage_collectors_resolve_roles_by_name(monkeypatch):
     """Collector call sites must use name-resolved role IDs, not hardcoded
     constants (regression guard for the ROLE_* migration)."""
     ep = _roles_endpoint()
-    monkeypatch.setattr(mod, "get_netbox",
+    monkeypatch.setattr(nbx, "get_netbox",
                         lambda: _fake_api(inventory_item_roles=ep))
 
     inv = {}
-    add = mod._make_add_item(inv)
-    mod._collect_disk_storage(
+    add = utils._make_add_item(inv)
+    msa._collect_disk_storage(
         {"serial-number": "D1", "drive-type": "SAS", "size": "1.8TB"}, add)
-    mod._collect_disk_storage(
+    msa._collect_disk_storage(
         {"serial-number": "D2", "drive-type": "SSD", "size": "480GB"}, add)
-    mod._collect_psu_storage({"serial-number": "P1", "location": "1.1"}, add)
-    mod._collect_controller_storage(
+    msa._collect_psu_storage({"serial-number": "P1", "location": "1.1"}, add)
+    msa._collect_controller_storage(
         {"serial-number": "C1", "controller-id": "A"}, add)
-    mod._collect_fru_storage({"serial-number": "F1", "fru-name": "Exp"}, add)
+    msa._collect_fru_storage({"serial-number": "F1", "fru-name": "Exp"}, add)
 
     assert inv["D1"]["role"] == 42   # HDD by name
     assert inv["D2"]["role"] == 43   # SSD by name
@@ -200,7 +240,7 @@ REQUIRED_VARS = ["NETBOX_URL", "NETBOX_TOKEN", "REDFISH_USER", "REDFISH_PASS",
 def test_validate_config_ok_when_all_vars_present(monkeypatch):
     for var in REQUIRED_VARS:
         monkeypatch.setenv(var, "x")
-    mod._validate_config()  # must not raise
+    cfg._validate_config()  # must not raise
 
 
 def test_validate_config_lists_missing_vars(monkeypatch):
@@ -209,25 +249,25 @@ def test_validate_config_lists_missing_vars(monkeypatch):
     monkeypatch.delenv("NETBOX_TOKEN")
     monkeypatch.delenv("SWITCH_PASS")
     with pytest.raises(RuntimeError, match="NETBOX_TOKEN"):
-        mod._validate_config()
+        cfg._validate_config()
     with pytest.raises(RuntimeError, match="SWITCH_PASS"):
-        mod._validate_config()
+        cfg._validate_config()
 
 
 # ── log level filtering ──────────────────────────────────────────────────────
 
 def test_debug_logs_hidden_by_default(capsys, monkeypatch):
-    monkeypatch.setattr(mod, "LOG_LEVEL", "INFO")
-    mod.log("DEBUG", "dbg-hidden")
-    mod.log("INFO", "info-shown")
+    monkeypatch.setattr(cfg, "LOG_LEVEL", "INFO")
+    cfg.log("DEBUG", "dbg-hidden")
+    cfg.log("INFO", "info-shown")
     out = capsys.readouterr().out
     assert "dbg-hidden" not in out
     assert "info-shown" in out
 
 
 def test_debug_logs_shown_when_level_is_debug(capsys, monkeypatch):
-    monkeypatch.setattr(mod, "LOG_LEVEL", "DEBUG")
-    mod.log("DEBUG", "dbg-shown")
+    monkeypatch.setattr(cfg, "LOG_LEVEL", "DEBUG")
+    cfg.log("DEBUG", "dbg-shown")
     assert "dbg-shown" in capsys.readouterr().out
 
 
@@ -240,19 +280,19 @@ class _FakeNetboxAPI:
 
 def test_netbox_tls_verify_defaults_off(monkeypatch):
     fake = _FakeNetboxAPI()
-    monkeypatch.setattr(mod.pynetbox, "api", lambda *a, **k: fake)
+    monkeypatch.setattr(nbx.pynetbox, "api", lambda *a, **k: fake)
     monkeypatch.delenv("NETBOX_VERIFY_TLS", raising=False)
-    monkeypatch.setattr(mod, "nb", None)
-    mod.get_netbox()
+    monkeypatch.setattr(nbx, "nb", None)
+    nbx.get_netbox()
     assert fake.http_session.verify is False
 
 
 def test_netbox_tls_verify_can_be_enabled(monkeypatch):
     fake = _FakeNetboxAPI()
-    monkeypatch.setattr(mod.pynetbox, "api", lambda *a, **k: fake)
+    monkeypatch.setattr(nbx.pynetbox, "api", lambda *a, **k: fake)
     monkeypatch.setenv("NETBOX_VERIFY_TLS", "true")
-    monkeypatch.setattr(mod, "nb", None)
-    mod.get_netbox()
+    monkeypatch.setattr(nbx, "nb", None)
+    nbx.get_netbox()
     assert fake.http_session.verify is True
 
 
@@ -286,18 +326,18 @@ class _FakeSSHClient:
 
 
 def test_ssh_host_key_policy_defaults_to_auto_add(monkeypatch):
-    monkeypatch.setattr(mod.paramiko, "SSHClient", _FakeSSHClient)
+    monkeypatch.setattr(brc.paramiko, "SSHClient", _FakeSSHClient)
     monkeypatch.delenv("SWITCH_STRICT_HOST_KEY", raising=False)
-    mod.BrocadeSwitchSession("192.0.2.1").login()
+    brc.BrocadeSwitchSession("192.0.2.1").login()
     assert isinstance(_FakeSSHClient.instance.policy,
-                      mod.paramiko.AutoAddPolicy)
+                      brc.paramiko.AutoAddPolicy)
     assert _FakeSSHClient.instance.host_keys_loaded is False
 
 
 def test_ssh_host_key_policy_strict_when_enabled(monkeypatch):
-    monkeypatch.setattr(mod.paramiko, "SSHClient", _FakeSSHClient)
+    monkeypatch.setattr(brc.paramiko, "SSHClient", _FakeSSHClient)
     monkeypatch.setenv("SWITCH_STRICT_HOST_KEY", "true")
-    mod.BrocadeSwitchSession("192.0.2.1").login()
+    brc.BrocadeSwitchSession("192.0.2.1").login()
     assert isinstance(_FakeSSHClient.instance.policy,
-                      mod.paramiko.RejectPolicy)
+                      brc.paramiko.RejectPolicy)
     assert _FakeSSHClient.instance.host_keys_loaded is True

@@ -1,9 +1,9 @@
 """Shared pytest setup.
 
 Makes the repo root importable and provides dummy credentials so that
-``import sync_all_to_netbox`` succeeds without a real .env file (the module
-validates credentials at import time). ``setdefault`` never overrides a
-real environment.
+``import netbox_sync`` succeeds without a real .env file (config validates
+credentials only when the entry point runs). ``setdefault`` never overrides
+a real environment.
 """
 import os
 import sys

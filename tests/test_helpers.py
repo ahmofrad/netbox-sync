@@ -1,7 +1,7 @@
 """Tests for generic helpers: slugify, model normalization, serial
 validation, capacity conversion and range expansion."""
-import sync_all_to_netbox as mod
-from models import SERVER_MODEL_MAP
+import netbox_sync.utils as mod
+from netbox_sync.models import SERVER_MODEL_MAP
 
 
 def test_slugify():

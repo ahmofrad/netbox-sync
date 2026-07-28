@@ -2,7 +2,7 @@
 import pytest
 from xml.etree import ElementTree as ET
 
-import sync_all_to_netbox as mod
+import netbox_sync.collectors.msa as mod
 
 
 SAMPLE = """<RESPONSE>

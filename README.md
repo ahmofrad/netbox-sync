@@ -106,8 +106,9 @@ A Python automation tool that automatically discovers **HPE ProLiant servers** (
 
 | File | Purpose |
 |------|---------|
-| `sync_all_to_netbox.py` | Main automation script — scanner, collectors, NetBox sync, scheduler. |
-| `models.py` | Server (`SERVER_MODEL_MAP`), storage (`STORAGE_MODEL_MAP`), and SAN switch (`SWITCH_MODEL_MAP`) model-name normalization maps. Maps vendor strings (e.g. `proliant dl360 gen10`) to canonical NetBox device-type names (e.g. `HPE DL360 G10`). |
+| `sync_all_to_netbox.py` | Thin entry point — validates config and runs the scheduler (`python sync_all_to_netbox.py` works exactly as before). |
+| `netbox_sync/` | The implementation package: `config` (.env/credentials/logging), `utils` (naming helpers, IP tools), `netbox` (NetBox API layer: CRUD, device ensure/offline, inventory sync), `collectors/` (`redfish`, `msa`, `brocade` sessions + inventory collection), `scanner` (parallel IP probing), `sync` (the `run_sync` orchestrator). |
+| `netbox_sync/models.py` | Server (`SERVER_MODEL_MAP`), storage (`STORAGE_MODEL_MAP`), and SAN switch (`SWITCH_MODEL_MAP`) model-name normalization maps. Maps vendor strings (e.g. `proliant dl360 gen10`) to canonical NetBox device-type names (e.g. `HPE DL360 G10`). |
 | `.env.example` | Template for your `.env` file. Copy to `.env` and fill in real values. |
 | `requirements.txt` | Python dependencies (`requests`, `pynetbox`, `schedule`, `python-dotenv`, `paramiko`). |
 | `requirements-dev.txt` | Test dependencies (pytest); includes `requirements.txt`. |
@@ -321,7 +322,7 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 - HPE SN6010B/C, SN6500B/C, SN6700B, SN8600C, SN8700C and equivalent Brocade 300/320/5100/5300/6505/6510/6520/6547/7800/7840/DCX-4S/SX6.
 - Connects via SSH and runs `switchshow`, `version`, `nsshow`, `nscamshow`, `sfpshow`.
 
-See `models.py` for the full model alias maps. Add your own models there.
+See `netbox_sync/models.py` for the full model alias maps. Add your own models there.
 
 ## Inventory items collected
 
@@ -434,8 +435,9 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 
 | فایل | کاربرد |
 |------|--------|
-| `sync_all_to_netbox.py` | اسکریپت اصلی اتوماسیون — شامل اسکنر، collectorها، همگام‌سازی با NetBox و زمان‌بند. |
-| `models.py` | نگاشت‌های نرمال‌سازی نام مدل سرور (`SERVER_MODEL_MAP`)، ذخیره‌سازی (`STORAGE_MODEL_MAP`) و سوئچ SAN (`SWITCH_MODEL_MAP`). رشته‌های سازنده (مانند `proliant dl360 gen10`) را به نام‌های متعارف نوع دستگاه در NetBox (مانند `HPE DL360 G10`) تبدیل می‌کند. |
+| `sync_all_to_netbox.py` | نقطه ورود سبک — اعتبارسنجی پیکربندی و اجرای زمان‌بند (`python sync_all_to_netbox.py` دقیقاً مثل قبل کار می‌کند). |
+| `netbox_sync/` | پکیج پیاده‌سازی: `config` (محیط/اعتبارها/لاگ)، `utils` (توابع نام‌گذاری و ابزارهای IP)، `netbox` (لایه API سِ NetBox: CRUD، ساخت/آفلاین دستگاه، همگام‌سازی inventory)، `collectors/` (sessionها و جمع‌آوری inventory سِ `redfish`، `msa`، `brocade`)، `scanner` (بررسی موازی IP)، `sync` (هماهنگ‌کننده `run_sync`). |
+| `netbox_sync/models.py` | نگاشت‌های نرمال‌سازی نام مدل سرور (`SERVER_MODEL_MAP`)، ذخیره‌سازی (`STORAGE_MODEL_MAP`) و سوئچ SAN (`SWITCH_MODEL_MAP`). رشته‌های سازنده (مانند `proliant dl360 gen10`) را به نام‌های متعارف نوع دستگاه در NetBox (مانند `HPE DL360 G10`) تبدیل می‌کند. |
 | `.env.example` | قالب فایل `.env`. آن را به `.env` کپی کرده و مقادیر واقعی خود را وارد کنید. |
 | `requirements.txt` | وابستگی‌های پایتون (`requests`, `pynetbox`, `schedule`, `python-dotenv`, `paramiko`). |
 | `requirements-dev.txt` | وابستگی‌های تست (pytest)؛ شامل `requirements.txt` نیز می‌شود. |
@@ -648,7 +650,7 @@ python -m pytest tests/
 - HPE SN6010B/C، SN6500B/C، SN6700B، SN8600C، SN8700C و معادل‌های Brocade 300/320/5100/5300/6505/6510/6520/6547/7800/7840/DCX-4S/SX6.
 - اتصال از طریق SSH و اجرای `switchshow`، `version`، `nsshow`، `nscamshow`، `sfpshow`.
 
-برای مشاهده نگاشت کامل نام مدل‌ها به `models.py` مراجعه کنید. می‌توانید مدل‌های جدید را نیز در همان فایل اضافه کنید.
+برای مشاهده نگاشت کامل نام مدل‌ها به `netbox_sync/models.py` مراجعه کنید. می‌توانید مدل‌های جدید را نیز در همان فایل اضافه کنید.
 
 ## آیتم‌های inventory جمع‌آوری‌شده
 

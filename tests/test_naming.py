@@ -1,5 +1,5 @@
 """Tests for inventory item naming helpers (servers + storage)."""
-import sync_all_to_netbox as mod
+import netbox_sync.utils as mod
 
 
 def test_name_cpu_strips_vendor_prefix():

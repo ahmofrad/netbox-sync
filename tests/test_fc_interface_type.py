@@ -4,7 +4,7 @@ Bug history: the original implementation used substring checks in the wrong
 order (``"n1" in s`` before ``"n16" in s``), so Brocade N16 and N128 ports
 were misclassified as 1GFC interfaces in NetBox.
 """
-import sync_all_to_netbox as mod
+import netbox_sync.collectors.brocade as mod
 
 
 def test_n16_maps_to_16gfc_not_1gfc():

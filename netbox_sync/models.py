@@ -1,10 +1,10 @@
 """Device model normalization maps for the NetBox sync tool.
 
 HPE ProLiant server, HPE MSA storage and HPE B-Series (Brocade OEM) SAN
-switch model-name aliases live here so the sync script can stay
+switch model-name aliases live here so the sync collectors can stay
 product-agnostic. Import via:
 
-    from models import SERVER_MODEL_MAP, STORAGE_MODEL_MAP, SWITCH_MODEL_MAP
+    from netbox_sync.models import SERVER_MODEL_MAP, STORAGE_MODEL_MAP, SWITCH_MODEL_MAP
 
 Keys are the raw vendor strings (lowercased) as returned by Redfish
 (servers), the MSA XML API (storage) or the Brocade CLI `switchshow`
