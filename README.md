@@ -2,7 +2,7 @@
 
 > **English** documentation below · مستندات **فارسی** در ادامه
 
-A Python automation tool that automatically discovers **HPE ProLiant servers** (via Redfish/iLO), **HPE MSA storage arrays** (via the XML API), and **Brocade / HPE B-Series SAN switches** (via SSH CLI) on your network, then synchronizes their hardware inventory into [NetBox](https://github.com/netbox-community/netbox) DCIM. It creates, updates, and marks devices offline, and keeps per-component inventory (CPU, RAM, disks, PSUs, NICs, HBAs, controllers, batteries, FRUs, SFP transceivers, FC ports) in sync — running on a daily scheduler.
+A Python automation tool that automatically discovers **HPE ProLiant servers** (via Redfish/iLO), **HPE MSA storage arrays** (via the XML API), **Brocade / HPE B-Series SAN switches** (via SSH CLI), and **Cisco Catalyst switches** (via SSH CLI, with CDP/LLDP cabling) on your network, then synchronizes their hardware inventory into [NetBox](https://github.com/netbox-community/netbox) DCIM. It creates, updates, and marks devices offline, and keeps per-component inventory (CPU, RAM, disks, PSUs, NICs, HBAs, controllers, batteries, FRUs, SFP transceivers, FC ports, switch modules, fans) in sync — running on a daily scheduler.
 
 ---
 
@@ -107,7 +107,8 @@ A Python automation tool that automatically discovers **HPE ProLiant servers** (
 | File | Purpose |
 |------|---------|
 | `sync_all_to_netbox.py` | Thin entry point — validates config and runs the scheduler (`python sync_all_to_netbox.py` works exactly as before). |
-| `netbox_sync/` | The implementation package: `config` (.env/credentials/logging), `utils` (naming helpers, IP tools), `netbox` (NetBox API layer: CRUD, device ensure/offline, inventory sync), `collectors/` (`redfish`, `msa`, `brocade` sessions + inventory collection), `scanner` (parallel IP probing), `sync` (the `run_sync` orchestrator). |
+| `netbox_sync/` | The implementation package: `config` (.env/credentials/logging), `utils` (naming helpers, IP tools), `netbox` (NetBox API layer: CRUD, device ensure/offline, inventory sync), `collectors/` (`redfish`, `msa`, `brocade`, `cisco` sessions + inventory collection), `scanner` (parallel IP probing), `sync` (the `run_sync` orchestrator). |
+| `netbox_sync/collectors/cisco.py` | Cisco Catalyst collector — netmiko SSH, IOS/IOS-XE CLI parsers, CDP/LLDP cable reconciliation. |
 | `netbox_sync/models.py` | Server (`SERVER_MODEL_MAP`), storage (`STORAGE_MODEL_MAP`), and SAN switch (`SWITCH_MODEL_MAP`) model-name normalization maps. Maps vendor strings (e.g. `proliant dl360 gen10`) to canonical NetBox device-type names (e.g. `HPE DL360 G10`). |
 | `.env.example` | Template for your `.env` file. Copy to `.env` and fill in real values. |
 | `requirements.txt` | Python dependencies (`requests`, `pynetbox`, `schedule`, `python-dotenv`, `paramiko`). |
@@ -163,6 +164,11 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `SWITCH_STRICT_HOST_KEY` | ❌ | `false` | Verify switch SSH host keys against the system `known_hosts` (MITM protection). |
 | `SAN_RANGES` | ❌* | example CIDRs | Comma-separated CIDR ranges to scan for SAN switches. IPs already found as server/storage are skipped. |
 | `DEFAULT_SWITCH_ROLE` | ❌ | `SAN Switch` | NetBox device role for SAN switches. |
+| `CISCO_USER` | ❌* | — | SSH username for Cisco switches (required only when `CISCO_RANGES` is set). |
+| `CISCO_PASS` | ❌* | — | SSH password for Cisco switches. |
+| `CISCO_PORT` | ❌ | `22` | SSH port for Cisco switches. |
+| `CISCO_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for Cisco switches. Empty = family disabled. |
+| `DEFAULT_CISCO_ROLE` | ❌ | `Switch` | NetBox device role for Cisco switches. |
 
 > *The shipped defaults in `sync_all_to_netbox.py` are **documentation-only** placeholder CIDRs (`192.0.2.0/27` = TEST-NET). Set `BMC_RANGES` and `STORAGE_RANGES` in `.env` to your real ranges.
 
@@ -263,7 +269,17 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 | `san_switch_model` | Text | Model |
 | `san_switch_port_count` | Integer | Port count |
 
-> The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` (NetBox custom-field filter syntax).
+**For Cisco Catalyst switches:**
+
+| Custom field | Type | Label |
+|--------------|------|-------|
+| `cisco_ip` | Text | Cisco switch IP |
+| `cisco_enabled` | Boolean | Cisco switch enabled |
+| `cisco_firmware` | Text | IOS version |
+| `cisco_model` | Text | Model |
+| `cisco_port_count` | Integer | Port count |
+
+> The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` (NetBox custom-field filter syntax).
 
 ### 3. Device roles & sites
 
@@ -322,6 +338,11 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 - HPE SN6010B/C, SN6500B/C, SN6700B, SN8600C, SN8700C and equivalent Brocade 300/320/5100/5300/6505/6510/6520/6547/7800/7840/DCX-4S/SX6.
 - Connects via SSH and runs `switchshow`, `version`, `nsshow`, `nscamshow`, `sfpshow`.
 
+**LAN switches (Cisco Catalyst, IOS / IOS-XE, SSH via netmiko):**
+- Catalyst 2960X / 3650 / 3850 / 9200 / 9300 families (classic IOS and IOS-XE dialects).
+- Connects via SSH and runs `show version`, `show inventory`, `show interfaces status`, `show cdp neighbors detail` (with `show lldp neighbors detail` as fallback).
+- The Cisco family is **opt-in**: it only activates when `CISCO_RANGES` is set.
+
 See `netbox_sync/models.py` for the full model alias maps. Add your own models there.
 
 ## Inventory items collected
@@ -364,9 +385,16 @@ Each discovered device is matched to an existing NetBox device by **serial numbe
 
 For storage, the secondary lookup also avoids clashing with a server that has the same name (it checks the `bmc_ip` custom field is absent).
 
+## CDP/LLDP cabling (Cisco)
+
+For each discovered Cisco switch, the script reads `show cdp neighbors detail` (falling back to `show lldp neighbors detail`) and creates **cables** in NetBox between the switch's interfaces and the resolved neighbor interfaces:
+
+- A cable is only created when **both ends resolve**: the neighbor's hostname (domain-stripped) must match a NetBox device **and** the remote interface must exist on it. Anything else is skipped with a DEBUG log — notably Cisco↔server links, because server NICs are inventory *items* in this tool, not interfaces.
+- Sync-created cables carry a `netbox-sync:` prefix in their description. Only **marked** cables are ever refreshed or deleted (stale ones disappear when the neighbor data no longer reports them). **Manually documented cables are never modified or deleted.**
+
 ## Offline detection
 
-After each sync, the script queries NetBox for all devices where `redfish_enabled=True` (servers), `storage_enabled=True` (storage), or `san_switch_enabled=True` (SAN switches). If a device's stored BMC/storage/SAN IP was **not** seen in the current scan, a miss counter is incremented; only after `OFFLINE_THRESHOLD` **consecutive misses** (default 2) is it marked `status=offline` and its `*_enabled` flag set to `false` — this prevents transient slowness from causing false offline markings. The device is **not** deleted — the next successful scan flips it back to `active` and resets the counter.
+After each sync, the script queries NetBox for all devices where `redfish_enabled=True` (servers), `storage_enabled=True` (storage), `san_switch_enabled=True` (SAN switches), or `cisco_enabled=True` (Cisco switches). If a device's stored BMC/storage/SAN IP was **not** seen in the current scan, a miss counter is incremented; only after `OFFLINE_THRESHOLD` **consecutive misses** (default 2) is it marked `status=offline` and its `*_enabled` flag set to `false` — this prevents transient slowness from causing false offline markings. The device is **not** deleted — the next successful scan flips it back to `active` and resets the counter.
 
 ---
 
@@ -374,9 +402,11 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 
 ## این برنامه چه می‌کند
 
-1. **بازه‌های IP** که شما تعریف کرده‌اید (به‌صورت CIDR) را برای سه نوع دستگاه اسکن می‌کند:
+1. **بازه‌های IP** که شما تعریف کرده‌اید (به‌صورت CIDR) را برای چهار نوع دستگاه اسکن می‌کند:
    - **سرورهای HPE ProLiant** — از طریق API سِ Redfish روی iLO/BMC.
    - **آرایه‌های ذخیره‌سازی HPE MSA** — از طریق XML API اختصاصی MSA.
+   - **سوئیچ‌های Brocade / HPE B-Series SAN** — از طریق CLI سِ SSH‏ (Fabric OS).
+   - **سوئیچ‌های Cisco Catalyst** — از طریق CLI سِ SSH، به‌همراه کابل‌کشی CDP/LLDP.
 2. برای هر سرور یا ذخیره‌سازی کشف‌شده، یک **دستگاه (device)** در NetBox **ایجاد یا به‌روزرسانی** می‌کند؛ اطلاعاتی نظیر سازنده، نوع دستگاه، نقش، سایت، شماره سریال و فیلدهای سفارشی (IP بورد BMC، نسخه فریم‌ور، خلاصه CPU/RAM/دیسک، وضعیت سلامت و …).
 3. **انventory دقیق سخت‌افزاری** هر دستگاه (CPU، ماژول‌های RAM، دیسک‌ها، پاورها، کارت‌های شبکه، HBA، کنترلرها، باتری‌ها و FRU) را جمع‌آوری می‌کند و هر قطعه را به‌عنوان یک **inventory item** با کلید شماره سریال در NetBox همگام می‌سازد.
 4. **آیتم‌های قدیمی inventory** که دیگر توسط دستگاه گزارش نمی‌شوند را حذف می‌کند.
@@ -436,7 +466,8 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 | فایل | کاربرد |
 |------|--------|
 | `sync_all_to_netbox.py` | نقطه ورود سبک — اعتبارسنجی پیکربندی و اجرای زمان‌بند (`python sync_all_to_netbox.py` دقیقاً مثل قبل کار می‌کند). |
-| `netbox_sync/` | پکیج پیاده‌سازی: `config` (محیط/اعتبارها/لاگ)، `utils` (توابع نام‌گذاری و ابزارهای IP)، `netbox` (لایه API سِ NetBox: CRUD، ساخت/آفلاین دستگاه، همگام‌سازی inventory)، `collectors/` (sessionها و جمع‌آوری inventory سِ `redfish`، `msa`، `brocade`)، `scanner` (بررسی موازی IP)، `sync` (هماهنگ‌کننده `run_sync`). |
+| `netbox_sync/` | پکیج پیاده‌سازی: `config` (محیط/اعتبارها/لاگ)، `utils` (توابع نام‌گذاری و ابزارهای IP)، `netbox` (لایه API سِ NetBox: CRUD، ساخت/آفلاین دستگاه، همگام‌سازی inventory)، `collectors/` (sessionها و جمع‌آوری inventory سِ `redfish`، `msa`، `brocade`، `cisco`)، `scanner` (بررسی موازی IP)، `sync` (هماهنگ‌کننده `run_sync`). |
+| `netbox_sync/collectors/cisco.py` | کلکتور Cisco Catalyst — اتصال SSH با netmiko، پارسرهای CLI سِ IOS/IOS-XE، همگام‌سازی کابل‌های CDP/LLDP. |
 | `netbox_sync/models.py` | نگاشت‌های نرمال‌سازی نام مدل سرور (`SERVER_MODEL_MAP`)، ذخیره‌سازی (`STORAGE_MODEL_MAP`) و سوئچ SAN (`SWITCH_MODEL_MAP`). رشته‌های سازنده (مانند `proliant dl360 gen10`) را به نام‌های متعارف نوع دستگاه در NetBox (مانند `HPE DL360 G10`) تبدیل می‌کند. |
 | `.env.example` | قالب فایل `.env`. آن را به `.env` کپی کرده و مقادیر واقعی خود را وارد کنید. |
 | `requirements.txt` | وابستگی‌های پایتون (`requests`, `pynetbox`, `schedule`, `python-dotenv`, `paramiko`). |
@@ -491,6 +522,11 @@ pip install -r requirements.txt
 | `SWITCH_STRICT_HOST_KEY` | ❌ | `false` | بررسی host key سِ SSH سوئیچ‌ها بر اساس `known_hosts` سیستم (محافظت در برابر MITM). |
 | `SAN_RANGES` | ❌* | CIDR نمونه | بازه‌های CIDR جداشده با کاما برای اسکن سوئچ‌های SAN. IP‌هایی که قبلاً به‌عنوان سرور/ذخیره‌سازی یافت شده‌اند نادیده گرفته می‌شوند. |
 | `DEFAULT_SWITCH_ROLE` | ❌ | `SAN Switch` | نقش دستگاه در NetBox برای سوئچ‌های SAN. |
+| `CISCO_USER` | ❌* | — | نام کاربری SSH برای سوئیچ‌های سیسکو (فقط وقتی `CISCO_RANGES` تنظیم شده الزامی است). |
+| `CISCO_PASS` | ❌* | — | رمز عبور SSH برای سوئیچ‌های سیسکو. |
+| `CISCO_PORT` | ❌ | `22` | پورت SSH برای سوئیچ‌های سیسکو. |
+| `CISCO_RANGES` | ❌ | *(خالی)* | بازه‌های CIDR جداشده با کاما برای سوئیچ‌های سیسکو. خالی = خانواده غیرفعال. |
+| `DEFAULT_CISCO_ROLE` | ❌ | `Switch` | نقش دستگاه در NetBox برای سوئیچ‌های سیسکو. |
 
 > *پیش‌فرض‌های موجود در `sync_all_to_netbox.py` صرفاً CIDR‌های **نمونه/تست** هستند (`192.0.2.0/27` = TEST-NET). حتماً بازه‌های واقعی خود را در `.env` تنظیم کنید.
 
@@ -591,7 +627,17 @@ DEFAULT_SWITCH_ROLE=SAN Switch
 | `san_switch_model` | Text | مدل |
 | `san_switch_port_count` | Integer | تعداد پورت‌ها |
 
-> حلقه تشخیص آفلاین، دستگاه‌ها را با فیلتر `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` فیلتر می‌کند (سینتکس فیلتر custom field در NetBox).
+**برای سوئیچ‌های Cisco Catalyst:**
+
+| فیلد سفارشی | نوع | برچسب |
+|--------------|------|-------|
+| `cisco_ip` | Text | IP سوئیچ سیسکو |
+| `cisco_enabled` | Boolean | سوئیچ سیسکو فعال |
+| `cisco_firmware` | Text | نسخه IOS |
+| `cisco_model` | Text | مدل |
+| `cisco_port_count` | Integer | تعداد پورت‌ها |
+
+> حلقه تشخیص آفلاین، دستگاه‌ها را با فیلتر `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` فیلتر می‌کند (سینتکس فیلتر custom field در NetBox).
 
 ### ۳. نقش‌ها و سایت‌های دستگاه
 
@@ -650,6 +696,11 @@ python -m pytest tests/
 - HPE SN6010B/C، SN6500B/C، SN6700B، SN8600C، SN8700C و معادل‌های Brocade 300/320/5100/5300/6505/6510/6520/6547/7800/7840/DCX-4S/SX6.
 - اتصال از طریق SSH و اجرای `switchshow`، `version`، `nsshow`، `nscamshow`، `sfpshow`.
 
+**سوئیچ‌های LAN (Cisco Catalyst، IOS / IOS-XE، SSH از طریق netmiko):**
+- خانواده‌های Catalyst 2960X / 3650 / 3850 / 9200 / 9300 (هر دو گویش IOS کلاسیک و IOS-XE).
+- اتصال از طریق SSH و اجرای `show version`، `show inventory`، `show interfaces status`، `show cdp neighbors detail` (با `show lldp neighbors detail` به‌عنوان جایگزین).
+- خانواده سیسکو **اختیاری** است: فقط وقتی `CISCO_RANGES` تنظیم شود فعال می‌شود.
+
 برای مشاهده نگاشت کامل نام مدل‌ها به `netbox_sync/models.py` مراجعه کنید. می‌توانید مدل‌های جدید را نیز در همان فایل اضافه کنید.
 
 ## آیتم‌های inventory جمع‌آوری‌شده
@@ -692,6 +743,13 @@ python -m pytest tests/
 
 در مورد ذخیره‌سازی، جستجوی ثانویه همچنین از تداخل با سروری هم‌نام جلوگیری می‌کند (با بررسی نبود فیلد سفارشی `bmc_ip`).
 
+## کابل‌کشی CDP/LLDP (سیسکو)
+
+برای هر سوئیچ سیسکو کشف‌شده، اسکریپت خروجی `show cdp neighbors detail` را می‌خواند (و در صورت خالی بودن، از `show lldp neighbors detail` استفاده می‌کند) و **کابل‌هایی** در NetBox بین رابط‌های سوئیچ و رابط‌های همسایه شناسایی‌شده ایجاد می‌کند:
+
+- کابل فقط وقتی ساخته می‌شود که **هر دو سر لینک شناسایی شوند**: hostname همسایه (بدون پسوند دامنه) باید با یک دستگاه NetBox مطابقت کند **و** رابط راه‌دور روی آن وجود داشته باشد. در غیر این صورت با لاگ DEBUG رد می‌شود — به‌ویژه لینک‌های سیسکو↔سرور، چون کارت‌های شبکه سرور در این ابزار inventory item هستند، نه interface.
+- کابل‌های ساخته‌شده توسط همگام‌سازی پیشوند `netbox-sync:` در description دارند. فقط کابل‌های **علامت‌دار** به‌روزرسانی یا حذف می‌شوند (موارد قدیمی وقتی همسایه دیگر گزارش نشود پاک می‌شوند). **کابل‌های دستی هرگز تغییر یا حذف نمی‌شوند.**
+
 ## تشخیص آفلاین
 
-پس از هر همگام‌سازی، اسکریپت تمام دستگاه‌هایی که `redfish_enabled=True` (سرورها)، `storage_enabled=True` (ذخیره‌سازی) یا `san_switch_enabled=True` (سوئیچ‌های SAN) دارند را از NetBox استعلام می‌کند. اگر IP ذخیره‌شده BMC/ذخیره‌سازی/SAN دستگاه در اسکن فعلی **دیده نشده باشد**، یک شمارنده غیبت افزایش می‌یابد؛ تنها پس از `OFFLINE_THRESHOLD` **غیبت متوالی** (پیش‌فرض ۲) دستگاه با `status=offline` و فلگ `*_enabled=false` علامت‌گذاری می‌شود — این کار از علامت‌گذاری اشتباه آفلاین به‌دلیل کندی موقتی جلوگیری می‌کند. دستگاه **حذف نمی‌شود** — اسکن موفق بعدی آن را به `active` بازمی‌گرداند و شمارنده را صفر می‌کند.
+پس از هر همگام‌سازی، اسکریپت تمام دستگاه‌هایی که `redfish_enabled=True` (سرورها)، `storage_enabled=True` (ذخیره‌سازی)، `san_switch_enabled=True` (سوئیچ‌های SAN) یا `cisco_enabled=True` (سوئیچ‌های سیسکو) دارند را از NetBox استعلام می‌کند. اگر IP ذخیره‌شده BMC/ذخیره‌سازی/SAN دستگاه در اسکن فعلی **دیده نشده باشد**، یک شمارنده غیبت افزایش می‌یابد؛ تنها پس از `OFFLINE_THRESHOLD` **غیبت متوالی** (پیش‌فرض ۲) دستگاه با `status=offline` و فلگ `*_enabled=false` علامت‌گذاری می‌شود — این کار از علامت‌گذاری اشتباه آفلاین به‌دلیل کندی موقتی جلوگیری می‌کند. دستگاه **حذف نمی‌شود** — اسکن موفق بعدی آن را به `active` بازمی‌گرداند و شمارنده را صفر می‌کند.
