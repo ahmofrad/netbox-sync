@@ -290,6 +290,36 @@ def test_ensure_cisco_device_creates_with_custom_fields(monkeypatch):
     assert dev_id is not None
 
 
+# ── Cisco interface sync ─────────────────────────────────────────────────────
+
+def test_sync_cisco_interfaces_update_create_delete(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    ifaces_ep = FakeEndpoint([
+        FakeRecord(1, name="Gi1/0/1", device_id=7),
+        FakeRecord(2, name="Gi1/0/9", device_id=7),   # stale -> deleted
+    ])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(interfaces=ifaces_ep))
+
+    ports = [
+        {"port": "Gi1/0/1", "name": "Uplink", "status": "connected",
+         "vlan": "trunk", "duplex": "full", "speed": "1000",
+         "type": "1000BaseSX SFP"},
+        {"port": "Gi1/0/2", "name": "", "status": "notconnect",
+         "vlan": "1", "duplex": "auto", "speed": "auto",
+         "type": "10/100/1000BaseTX"},
+    ]
+    cisco.sync_cisco_interfaces(7, ports)
+
+    assert {u["id"] for u in ifaces_ep.updated} == {1}
+    assert ifaces_ep.updated[0]["type"] == "1000base-x-sfp"
+    assert ifaces_ep.updated[0]["enabled"] is True
+    assert len(ifaces_ep.created) == 1
+    assert ifaces_ep.created[0]["name"] == "Gi1/0/2"
+    assert ifaces_ep.created[0]["type"] == "other"
+    assert ifaces_ep.created[0]["enabled"] is False
+    assert ifaces_ep.deleted_ids == [2]
+
+
 # ── config validation ────────────────────────────────────────────────────────
 
 REQUIRED_VARS = ["NETBOX_URL", "NETBOX_TOKEN", "REDFISH_USER", "REDFISH_PASS",

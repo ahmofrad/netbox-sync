@@ -6,9 +6,9 @@ import time
 
 from netmiko import ConnectHandler
 
+from netbox_sync import netbox
 from netbox_sync.config import (CISCO_USER, CISCO_PASS, CISCO_PORT, log)
 from netbox_sync.models import CISCO_MODEL_MAP
-from netbox_sync.netbox import get_netbox, get_or_create_inventory_role
 from netbox_sync.utils import (normalize_model, _invalid_serial,
                                _make_add_item, is_port_open)
 
@@ -268,7 +268,7 @@ def _inventory_item_from_row(row, add_item):
         part_number=row.get("pid") or None,
         serial=serial,
         description=f"Name={row.get('name')} Descr={row.get('descr')} VID={row.get('vid')}",
-        role_id=get_or_create_inventory_role(role),
+        role_id=netbox.get_or_create_inventory_role(role),
     )
 
 def cisco_collect_inventory(ip):
@@ -311,3 +311,42 @@ def cisco_collect_inventory(ip):
                 "neighbors": neighbors, "inventory": inventory}
     finally:
         sess.logout()
+
+# ── interfaces ───────────────────────────────────────────────────────────────
+
+def sync_cisco_interfaces(dev_id, ports):
+    """Create/update NetBox interfaces per switchport; delete stale ones.
+    Description carries status/vlan/duplex/speed + the port's description."""
+    api = netbox.get_netbox()
+    existing = {}
+    for iface in list(api.dcim.interfaces.filter(device_id=dev_id)):
+        existing[str(iface.name)] = iface
+
+    seen = set()
+    for p in ports:
+        name = p["port"]
+        seen.add(name)
+        desc_parts = [f"status={p.get('status')}", f"vlan={p.get('vlan')}",
+                      f"duplex={p.get('duplex')}", f"speed={p.get('speed')}"]
+        if p.get("name"):
+            desc_parts.append(p["name"])
+        payload = {
+            "device":     dev_id,
+            "name":       name,
+            "type":       _eth_interface_type(p.get("speed"), p.get("type")),
+            "enabled":    p.get("status", "").lower() == "connected",
+            "description": " | ".join(desc_parts)[:200],
+            "mgmt_only":  False,
+        }
+        if name in existing:
+            api.dcim.interfaces.update([{"id": existing[name].id, **payload}])
+        else:
+            try:
+                api.dcim.interfaces.create(payload)
+            except Exception as e:
+                log("WARN", f"  Could not create interface {name}: {e}")
+
+    for name, iface in existing.items():
+        if name not in seen:
+            try: iface.delete()
+            except Exception: pass
