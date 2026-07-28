@@ -109,7 +109,9 @@ A Python automation tool that automatically discovers **HPE ProLiant servers** (
 | `sync_all_to_netbox.py` | Main automation script — scanner, collectors, NetBox sync, scheduler. |
 | `models.py` | Server (`SERVER_MODEL_MAP`), storage (`STORAGE_MODEL_MAP`), and SAN switch (`SWITCH_MODEL_MAP`) model-name normalization maps. Maps vendor strings (e.g. `proliant dl360 gen10`) to canonical NetBox device-type names (e.g. `HPE DL360 G10`). |
 | `.env.example` | Template for your `.env` file. Copy to `.env` and fill in real values. |
-| `requirements` | Python dependencies (`requests`, `pynetbox`, `schedule`, `python-dotenv`, `paramiko`). |
+| `requirements.txt` | Python dependencies (`requests`, `pynetbox`, `schedule`, `python-dotenv`, `paramiko`). |
+| `requirements-dev.txt` | Test dependencies (pytest); includes `requirements.txt`. |
+| `tests/` | pytest suite for the CLI parsers, naming helpers and NetBox sync logic — runs entirely on in-memory fakes, no hardware needed. |
 | `.gitignore` | Ignores `.env`, `__pycache__/`, venvs, and any personal working folders. |
 
 ## Requirements
@@ -126,7 +128,7 @@ A Python automation tool that automatically discovers **HPE ProLiant servers** (
 
 Install dependencies:
 ```bash
-pip install -r requirements
+pip install -r requirements.txt
 ```
 
 ## Configuration (`.env`)
@@ -137,6 +139,7 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 |----------|:--------:|---------|-------------|
 | `NETBOX_URL` | ✅ | — | Base URL of your NetBox instance (e.g. `https://netbox.example.com`). |
 | `NETBOX_TOKEN` | ✅ | — | NetBox API token (read/write). |
+| `NETBOX_VERIFY_TLS` | ❌ | `false` | Verify NetBox's TLS certificate. Keep `false` for self-signed certs. |
 | `REDFISH_USER` | ✅ | — | BMC (iLO) username for Redfish login. |
 | `REDFISH_PASS` | ✅ | — | BMC (iLO) password. |
 | `REDFISH_PORT` | ❌ | `443` | TCP port for Redfish on the BMC. |
@@ -148,12 +151,15 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `STORAGE_RANGES` | ❌* | example CIDRs | Comma-separated CIDR ranges to scan for storage. IPs already found as servers are skipped. |
 | `SITE_KEYWORD_MAP` | ❌ | — | Comma-separated `keyword:SiteName` pairs. A device whose hostname contains the keyword (case-insensitive) is assigned that site. e.g. `dc1:Datacenter1,hq:HQ`. |
 | `SCAN_WORKERS` | ❌ | `20` | Thread-pool size for parallel IP scanning. |
+| `OFFLINE_THRESHOLD` | ❌ | `2` | Consecutive scans a device must miss before it is marked offline (anti-flapping). |
+| `LOG_LEVEL` | ❌ | `INFO` | Log verbosity: `DEBUG`, `INFO`, `WARN`, `ERROR`. |
 | `DEFAULT_SITE_NAME` | ❌ | `Default` | Fallback site name when no keyword matches. |
 | `DEFAULT_ROLE_NAME` | ❌ | `Server` | NetBox device role for servers. |
 | `DEFAULT_STORAGE_ROLE` | ❌ | `Storage` | NetBox device role for storage arrays. |
 | `SWITCH_USER` | ✅ | -- | SSH username for Brocade SAN switches. |
 | `SWITCH_PASS` | ✅ | -- | SSH password for Brocade SAN switches. |
 | `SWITCH_PORT` | ❌ | `22` | SSH port for SAN switch CLI. |
+| `SWITCH_STRICT_HOST_KEY` | ❌ | `false` | Verify switch SSH host keys against the system `known_hosts` (MITM protection). |
 | `SAN_RANGES` | ❌* | example CIDRs | Comma-separated CIDR ranges to scan for SAN switches. IPs already found as server/storage are skipped. |
 | `DEFAULT_SWITCH_ROLE` | ❌ | `SAN Switch` | NetBox device role for SAN switches. |
 
@@ -195,22 +201,23 @@ DEFAULT_SWITCH_ROLE=SAN Switch
 
 ### 1. Inventory item roles
 
-The script assigns inventory-item **roles** by **hardcoded ID**. Ensure these roles exist in NetBox (`/dcim/inventory-item-roles/`) with these IDs (create them in this order, or adjust the `ROLE_*` constants at the top of the script):
+Inventory-item **roles** are resolved **by name** and **auto-created** on first use (then cached), so no manual setup is required. If you prefer to pre-create them (`/dcim/inventory-item-roles/`), the names must match exactly:
 
-| ID | Role name | Used for |
-|----|-----------|----------|
-| 1  | HDD       | Hard disk drives |
-| 2  | SSD       | Solid-state drives |
-| 3  | CPU       | Processors |
-| 4  | Memory    | RAM modules |
-| 5  | NIC       | Network adapters |
-| 6  | PSU       | Power supplies |
-| 7  | Controller| RAID / storage controllers |
-| 8  | HBA       | Host bus adapters / FC |
-| 9  | Battery   | Smart storage batteries |
-| 10 | SAS Exp   | SAS expanders / FRUs |
-| 11 | SFP       | SFP transceivers (SAN switches) |
-| 12 | FC Port   | Fibre Channel ports (SAN switches) |
+| Role name | Used for |
+|-----------|----------|
+| HDD | Hard disk drives |
+| SSD | Solid-state drives |
+| CPU | Processors |
+| Memory | RAM modules |
+| NIC | Network adapters |
+| PSU | Power supplies |
+| Controller | RAID / storage controllers |
+| HBA | Host bus adapters / FC |
+| Battery | Smart storage batteries |
+| SAS Exp | SAS expanders / FRUs |
+| SFP | SFP transceivers (SAN switches) |
+
+> Upgrading from an older version that used hardcoded role IDs (1–12)? As long as your existing roles carry these names, they are found and reused — nothing breaks. Role IDs are DB-sequence-dependent and are no longer referenced anywhere.
 
 ### 2. Custom fields
 
@@ -261,27 +268,18 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 
 `Server`, `Storage`, and `SAN Switch` device roles, `HPE` / `Brocade` manufacturers, and sites are **auto-created** if missing. You may also pre-create them.
 
-### 4. Inventory item roles (SAN switches)
-
-In addition to the server/storage roles (1–10), the SAN switch collector writes inventory items with these roles:
-
-| ID | Name | Used for |
-|----|------|----------|
-| 11 | SFP | SFP transceivers |
-| 12 | FC Port | Fibre Channel ports (reserved) |
-
 ## Running
 
 ```bash
 cp .env.example .env   # then edit with your real values
-pip install -r requirements
+pip install -r requirements.txt
 python sync_all_to_netbox.py
 ```
 
 The script:
 1. Runs an **immediate** sync on startup.
 2. Schedules daily runs at **00:00** and **12:00**.
-3. Logs every action to stdout with timestamps and log levels (`INFO` / `WARN` / `ERROR`).
+3. Logs every action to stdout with timestamps and log levels (`DEBUG` / `INFO` / `WARN` / `ERROR`; controlled via `LOG_LEVEL`).
 
 ```
 [2026-06-30 00:00:01] [INFO] Scheduler started — runs at 00:00 and 12:00 daily.
@@ -297,7 +295,16 @@ Press `Ctrl+C` to stop the scheduler.
 
 ### Run as a service (optional)
 
-For production, run under systemd, a Windows service, or a container so it survives reboots.
+For production, run under systemd, a Windows service, or a container so it survives reboots. **Run exactly one instance** — the anti-flapping counters live in process memory, and multiple instances would fight over the same NetBox objects.
+
+### Running tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/
+```
+
+The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the NetBox reconciliation logic (stale/duplicate cleanup, update-vs-create) against in-memory fakes — no hardware or NetBox instance required.
 
 ## Supported hardware
 
@@ -358,7 +365,7 @@ For storage, the secondary lookup also avoids clashing with a server that has th
 
 ## Offline detection
 
-After each sync, the script queries NetBox for all devices where `redfish_enabled=True` (servers), `storage_enabled=True` (storage), or `san_switch_enabled=True` (SAN switches). If a device's stored BMC/storage/SAN IP was **not** seen in the current scan, it is marked `status=offline` and its `*_enabled` flag is set to `false`. It is **not** deleted — the next successful scan flips it back to `active`.
+After each sync, the script queries NetBox for all devices where `redfish_enabled=True` (servers), `storage_enabled=True` (storage), or `san_switch_enabled=True` (SAN switches). If a device's stored BMC/storage/SAN IP was **not** seen in the current scan, a miss counter is incremented; only after `OFFLINE_THRESHOLD` **consecutive misses** (default 2) is it marked `status=offline` and its `*_enabled` flag set to `false` — this prevents transient slowness from causing false offline markings. The device is **not** deleted — the next successful scan flips it back to `active` and resets the counter.
 
 ---
 
@@ -430,7 +437,9 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 | `sync_all_to_netbox.py` | اسکریپت اصلی اتوماسیون — شامل اسکنر، collectorها، همگام‌سازی با NetBox و زمان‌بند. |
 | `models.py` | نگاشت‌های نرمال‌سازی نام مدل سرور (`SERVER_MODEL_MAP`)، ذخیره‌سازی (`STORAGE_MODEL_MAP`) و سوئچ SAN (`SWITCH_MODEL_MAP`). رشته‌های سازنده (مانند `proliant dl360 gen10`) را به نام‌های متعارف نوع دستگاه در NetBox (مانند `HPE DL360 G10`) تبدیل می‌کند. |
 | `.env.example` | قالب فایل `.env`. آن را به `.env` کپی کرده و مقادیر واقعی خود را وارد کنید. |
-| `requirements` | وابستگی‌های پایتون (`requests`, `pynetbox`, `schedule`, `python-dotenv`, `paramiko`). |
+| `requirements.txt` | وابستگی‌های پایتون (`requests`, `pynetbox`, `schedule`, `python-dotenv`, `paramiko`). |
+| `requirements-dev.txt` | وابستگی‌های تست (pytest)؛ شامل `requirements.txt` نیز می‌شود. |
+| `tests/` | مجموعه تست pytest برای پارسرهای CLI، توابع نام‌گذاری و منطق همگام‌سازی NetBox — کاملاً با fakeهای درون‌حافظه‌ای اجرا می‌شود و به سخت‌افزار نیاز ندارد. |
 | `.gitignore` | فایل‌های `.env`، `__pycache__/`، venv و پوشه‌های کاری شخصی را نادیده می‌گیرد. |
 
 ## پیش‌نیازها
@@ -446,7 +455,7 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 
 نصب وابستگی‌ها:
 ```bash
-pip install -r requirements
+pip install -r requirements.txt
 ```
 
 ## پیکربندی (`.env`)
@@ -457,6 +466,7 @@ pip install -r requirements
 |--------|:------:|---------|-------|
 | `NETBOX_URL` | ✅ | — | آدرس پایه NetBox شما (مانند `https://netbox.example.com`). |
 | `NETBOX_TOKEN` | ✅ | — | API token سِ NetBox (با دسترسی خواندن/نوشتن). |
+| `NETBOX_VERIFY_TLS` | ❌ | `false` | بررسی گواهی TLS سِ NetBox. برای گواهی‌های self-signed روی `false` باقی بماند. |
 | `REDFISH_USER` | ✅ | — | نام کاربری BMC (iLO) برای ورود به Redfish. |
 | `REDFISH_PASS` | ✅ | — | رمز عبور BMC (iLO). |
 | `REDFISH_PORT` | ❌ | `443` | پورت TCP سِ Redfish روی BMC. |
@@ -468,12 +478,15 @@ pip install -r requirements
 | `STORAGE_RANGES` | ❌* | CIDR نمونه | بازه‌های CIDR جدا‌شده با کاما برای اسکن ذخیره‌سازی. IPهایی که قبلاً به‌عنوان سرور یافت شده‌اند نادیده گرفته می‌شوند. |
 | `SITE_KEYWORD_MAP` | ❌ | — | جفت‌های `keyword:SiteName` جدا‌شده با کاما. دستگاهی که hostname آن شامل کلیدواژه (بدون حساسیت به حروف بزرگ/کوچک) باشد، به آن سایت اختصاص می‌یابد. مثال: `dc1:Datacenter1,hq:HQ`. |
 | `SCAN_WORKERS` | ❌ | `20` | اندازه thread pool برای اسکن موازی IP. |
+| `OFFLINE_THRESHOLD` | ❌ | `2` | تعداد اسکن‌های متوالی که دستگاه باید غایب باشد تا آفلاین علامت بخورد (ضد نوسان). |
+| `LOG_LEVEL` | ❌ | `INFO` | میزان جزئیات لاگ: `DEBUG`، `INFO`، `WARN`، `ERROR`. |
 | `DEFAULT_SITE_NAME` | ❌ | `Default` | نام سایت پیش‌فرض در صورت عدم تطابق هیچ کلیدواژه‌ای. |
 | `DEFAULT_ROLE_NAME` | ❌ | `Server` | نقش دستگاه در NetBox برای سرورها. |
 | `DEFAULT_STORAGE_ROLE` | ❌ | `Storage` | نقش دستگاه در NetBox برای ذخیره‌سازی. |
 | `SWITCH_USER` | ✅ | -- | نام کاربری SSH برای سوئچ‌های Brocade SAN. |
 | `SWITCH_PASS` | ✅ | -- | رمز عبور SSH برای سوئچ‌های Brocade SAN. |
 | `SWITCH_PORT` | ❌ | `22` | پورت SSH برای CLI سوئچ SAN. |
+| `SWITCH_STRICT_HOST_KEY` | ❌ | `false` | بررسی host key سِ SSH سوئیچ‌ها بر اساس `known_hosts` سیستم (محافظت در برابر MITM). |
 | `SAN_RANGES` | ❌* | CIDR نمونه | بازه‌های CIDR جداشده با کاما برای اسکن سوئچ‌های SAN. IP‌هایی که قبلاً به‌عنوان سرور/ذخیره‌سازی یافت شده‌اند نادیده گرفته می‌شوند. |
 | `DEFAULT_SWITCH_ROLE` | ❌ | `SAN Switch` | نقش دستگاه در NetBox برای سوئچ‌های SAN. |
 
@@ -515,22 +528,23 @@ DEFAULT_SWITCH_ROLE=SAN Switch
 
 ### ۱. نقش‌های inventory item
 
-اسکریپت نقش‌های inventory item را با **ID ثابت** اختصاص می‌دهد. مطمئن شوید این نقش‌ها در NetBox (`/dcim/inventory-item-roles/`) با همین IDها وجود داشته باشند (به‌ترتیب زیر ایجاد کنید، یا ثابت‌های `ROLE_*` را در ابتدای اسکریپت اصلاح کنید):
+نقش‌های inventory item **بر اساس نام** شناسایی شده و در اولین استفاده **به‌صورت خودکار ساخته** می‌شوند (سپس کش می‌گردند)، بنابراین نیازی به تنظیم دستی نیست. اگر ترجیح می‌دهید آن‌ها را از قبل بسازید (`/dcim/inventory-item-roles/`)، نام‌ها باید دقیقاً مطابق این جدول باشند:
 
-| ID | نام نقش | کاربرد |
-|----|--------|--------|
-| 1  | HDD | هارددیسک |
-| 2  | SSD | دیسک جامد (SSD) |
-| 3  | CPU | پردازنده |
-| 4  | Memory | ماژول RAM |
-| 5  | NIC | کارت شبکه |
-| 6  | PSU | منبع تغذیه |
-| 7  | Controller | کنترلر RAID / ذخیره‌سازی |
-| 8  | HBA | هاست باس آداپتور / FC |
-| 9  | Battery | باتری Smart Storage |
-| 10 | SAS Exp | اکسپندر SAS / FRU |
-| 11 | SFP | ترانسسیور SFP (سوئیچ SAN) |
-| 12 | FC Port | پورت Fibre Channel (سوئیچ SAN) |
+| نام نقش | کاربرد |
+|--------|--------|
+| HDD | هارددیسک |
+| SSD | دیسک جامد (SSD) |
+| CPU | پردازنده |
+| Memory | ماژول RAM |
+| NIC | کارت شبکه |
+| PSU | منبع تغذیه |
+| Controller | کنترلر RAID / ذخیره‌سازی |
+| HBA | هاست باس آداپتور / FC |
+| Battery | باتری Smart Storage |
+| SAS Exp | اکسپندر SAS / FRU |
+| SFP | ترانسسیور SFP (سوئیچ SAN) |
+
+> اگر از نسخه‌ای قدیمی‌تر که از ID ثابت (۱ تا ۱۲) استفاده می‌کرد ارتقا می‌دهید: تا وقتی نقش‌های فعلی شما همین نام‌ها را دارند، شناسایی و مجدداً استفاده می‌شوند — هیچ چیز نمی‌شکند. ID نقش‌ها به ترتیب ساخت در دیتابیس بستگی دارد و دیگر هیچ‌جای کد به آن‌ها ارجاع داده نمی‌شود.
 
 ### ۲. فیلدهای سفارشی
 
@@ -581,27 +595,18 @@ DEFAULT_SWITCH_ROLE=SAN Switch
 
 نقش‌های `Server`، `Storage` و `SAN Switch`، سازندگان `HPE` / `Brocade` و سایت‌ها **به‌طور خودکار** ساخته می‌شوند اگر از قبل وجود نداشته باشند. البته می‌توانید آن‌ها را پیش از اجرا نیز دستی بسازید.
 
-### ۴. نقش‌های inventory item (سوئیچ‌های SAN)
-
-علاوه بر نقش‌های سرور/ذخیره‌سازی (۱ تا ۱۰)، کلکتور سوئیچ SAN آیتم‌های inventory را با این نقش‌ها ثبت می‌کند:
-
-| ID | نام نقش | کاربرد |
-|----|--------|--------|
-| 11 | SFP | ترانسسیورهای SFP |
-| 12 | FC Port | پورت‌های Fibre Channel (رزرو شده) |
-
 ## اجرای برنامه
 
 ```bash
 cp .env.example .env   # سپس با مقادیر واقعی ویرایش کنید
-pip install -r requirements
+pip install -r requirements.txt
 python sync_all_to_netbox.py
 ```
 
 اسکریپت:
 1. بلافاصله پس از راه‌اندازی، یک همگام‌سازی **اولیه** انجام می‌دهد.
 2. اجرای روزانه را در **۰۰:۰۰** و **۱۲:۰۰** زمان‌بندی می‌کند.
-3. هر اقدام را با timestamp و سطح لاگ (`INFO` / `WARN` / `ERROR`) در stdout ثبت می‌کند.
+3. هر اقدام را با timestamp و سطح لاگ (`DEBUG` / `INFO` / `WARN` / `ERROR`؛ با `LOG_LEVEL` قابل تنظیم) در stdout ثبت می‌کند.
 
 ```
 [2026-06-30 00:00:01] [INFO] Scheduler started — runs at 00:00 and 12:00 daily.
@@ -617,7 +622,16 @@ python sync_all_to_netbox.py
 
 ### اجرا به‌عنوان سرویس (اختیاری)
 
-برای محیط عملیاتی، توصیه می‌شود اسکریپت را زیر systemd، به‌صورت سرویس ویندوز یا درون کانتینر اجرا کنید تا پس از ریبوت نیز فعال بماند.
+برای محیط عملیاتی، توصیه می‌شود اسکریپت را زیر systemd، به‌صورت سرویس ویندوز یا درون کانتینر اجرا کنید تا پس از ریبوت نیز فعال بماند. **فقط یک نمونه** از اسکریپت را اجرا کنید — شمارندههای ضدنوسان در حافظه پروسه نگه‌داری می‌شوند و چند نمونه هم‌زمان روی همان اشیای NetBox با هم تداخل می‌کنند.
+
+### اجرای تست‌ها
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/
+```
+
+این مجموعه، پارسرهای CLI سِ Brocade، پردازش XML سِ MSA، نام‌گذاری آیتم‌ها و منطق همگام‌سازی NetBox (پاکسازی موارد قدیمی/تکراری، به‌روزرسانی در برابر ساخت جدید) را با fakeهای درون‌حافظه‌ای تست می‌کند — بدون نیاز به سخت‌افزار یا نمونه NetBox.
 
 ## سخت‌افزارهای پشتیبانی‌شده
 
@@ -678,4 +692,4 @@ python sync_all_to_netbox.py
 
 ## تشخیص آفلاین
 
-پس از هر همگام‌سازی، اسکریپت تمام دستگاه‌هایی که `redfish_enabled=True` (سرورها)، `storage_enabled=True` (ذخیره‌سازی) یا `san_switch_enabled=True` (سوئیچ‌های SAN) دارند را از NetBox استعلام می‌کند. اگر IP ذخیره‌شده BMC/ذخیره‌سازی/SAN دستگاه در اسکن فعلی **دیده نشده باشد**، وضعیت آن به `status=offline` و فلگ `*_enabled` آن به `false` تغییر می‌کند. دستگاه **حذف نمی‌شود** — اسکن موفق بعدی آن را مجدداً به `active` بازمی‌گرداند.
+پس از هر همگام‌سازی، اسکریپت تمام دستگاه‌هایی که `redfish_enabled=True` (سرورها)، `storage_enabled=True` (ذخیره‌سازی) یا `san_switch_enabled=True` (سوئیچ‌های SAN) دارند را از NetBox استعلام می‌کند. اگر IP ذخیره‌شده BMC/ذخیره‌سازی/SAN دستگاه در اسکن فعلی **دیده نشده باشد**، یک شمارنده غیبت افزایش می‌یابد؛ تنها پس از `OFFLINE_THRESHOLD` **غیبت متوالی** (پیش‌فرض ۲) دستگاه با `status=offline` و فلگ `*_enabled=false` علامت‌گذاری می‌شود — این کار از علامت‌گذاری اشتباه آفلاین به‌دلیل کندی موقتی جلوگیری می‌کند. دستگاه **حذف نمی‌شود** — اسکن موفق بعدی آن را به `active` بازمی‌گرداند و شمارنده را صفر می‌کند.

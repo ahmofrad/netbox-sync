@@ -3,8 +3,8 @@
 sync_all_to_netbox.py
 Merged automation: scans IP ranges for iLO/Redfish BMCs (servers),
 HPE storage arrays, and HPE B-Series (Brocade OEM) SAN switches,
-auto-creates/updates/removes devices, interfaces and inventory in
-NetBox. Runs at 00:00 and 12:00 daily.
+auto-creates/updates devices, interfaces and inventory in NetBox,
+and marks unreachable devices offline. Runs at 00:00 and 12:00 daily.
 """
 import hashlib
 import os
@@ -42,23 +42,31 @@ STORAGE_PASS = os.getenv("STORAGE_PASS")
 SWITCH_USER = os.getenv("SWITCH_USER")
 SWITCH_PASS = os.getenv("SWITCH_PASS")
 
-if not NETBOX_URL or not NETBOX_TOKEN:
-    raise RuntimeError("NETBOX_URL/NETBOX_TOKEN missing in .env")
-if not REDFISH_USER or not REDFISH_PASS:
-    raise RuntimeError("REDFISH_USER/REDFISH_PASS missing in .env")
-if not STORAGE_USER or not STORAGE_PASS:
-    raise RuntimeError("STORAGE_USER/STORAGE_PASS missing in .env")
-if not SWITCH_USER or not SWITCH_PASS:
-    raise RuntimeError("SWITCH_USER/SWITCH_PASS missing in .env")
+REQUIRED_ENV_VARS = ("NETBOX_URL", "NETBOX_TOKEN",
+                     "REDFISH_USER", "REDFISH_PASS",
+                     "STORAGE_USER", "STORAGE_PASS",
+                     "SWITCH_USER", "SWITCH_PASS")
+
+def _validate_config():
+    """Fail fast at startup if required .env variables are missing.
+    Kept out of module scope so the module stays importable for tests."""
+    missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
+    if missing:
+        raise RuntimeError(f"Missing required .env variables: {', '.join(missing)}")
 
 nb = None
+
+def _env_bool(name, default=False):
+    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
 
 def get_netbox():
     global nb
     if nb is not None:
         return nb
     nb = pynetbox.api(NETBOX_URL, token=NETBOX_TOKEN)
-    nb.http_session.verify = False
+    # TLS verification for NetBox is opt-in (NETBOX_VERIFY_TLS=true) since
+    # many internal NetBox installs use self-signed certs.
+    nb.http_session.verify = _env_bool("NETBOX_VERIFY_TLS", False)
     return nb
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -100,20 +108,10 @@ DEFAULT_MFR   = "HPE"
 DEFAULT_SITE  = os.getenv("DEFAULT_SITE_NAME", "")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# inventory item role IDs (from NetBox)
+# inventory item roles — resolved by NAME via get_or_create_inventory_role().
+# Role IDs are DB-sequence-dependent and NOT portable between NetBox
+# instances, so nothing here may hardcode them.
 # ═══════════════════════════════════════════════════════════════════════════════
-ROLE_HDD        = 1
-ROLE_SSD        = 2
-ROLE_CPU        = 3
-ROLE_MEMORY     = 4
-ROLE_NIC        = 5
-ROLE_PSU        = 6
-ROLE_CONTROLLER = 7
-ROLE_HBA        = 8
-ROLE_BATTERY    = 9
-ROLE_SAS_EXP    = 10
-ROLE_SFP        = 11
-ROLE_FC_PORT    = 12
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # site keyword mapping
@@ -139,7 +137,12 @@ SITE_UNKNOWN = DEFAULT_SITE or "Unknown"
 # ═══════════════════════════════════════════════════════════════════════════════
 # helpers
 # ═══════════════════════════════════════════════════════════════════════════════
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+_LOG_LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
+
 def log(level, msg):
+    if _LOG_LEVELS.get(level, 20) < _LOG_LEVELS.get(LOG_LEVEL, 20):
+        return
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level}] {msg}")
 
 def slugify(s):
@@ -1017,7 +1020,7 @@ def rf_collect_inventory(host):
                     part_number=None,
                     serial=_pick(p, ["SerialNumber"]),
                     description=f"Model={p.get('Model')} Cores={p.get('TotalCores')} Threads={p.get('TotalThreads')}",
-                    role_id=ROLE_CPU)
+                    role_id=get_or_create_inventory_role("CPU"))
             cpu_sockets = cpu_sockets or (sockets or None)
             cpu_cores   = cpu_cores   or (cores   or None)
             cpu_threads = cpu_threads or (threads or None)
@@ -1046,7 +1049,7 @@ def rf_collect_inventory(host):
                     serial=_pick(mm, ["SerialNumber","SerialNumberString"]),
                     description=f"Model={mm.get('Model')} CapacityMiB={mm.get('CapacityMiB')} "
                                 f"SpeedMHz={mm.get('OperatingSpeedMhz')} Type={mm.get('MemoryDeviceType')}",
-                    role_id=ROLE_MEMORY)
+                    role_id=get_or_create_inventory_role("Memory"))
             if ram_gib is None and total_mib:
                 ram_gib = int(round(total_mib / 1024))
 
@@ -1089,14 +1092,15 @@ def rf_collect_inventory(host):
                         serial=_pick(ctrl, ["SerialNumber"]),
                         description=f"Model={_pick(ctrl,['Model','ProductName','Name'])} "
                                     f"Firmware={_pick(ctrl,['FirmwareVersion','Version'])}",
-                        role_id=ROLE_CONTROLLER)
+                        role_id=get_or_create_inventory_role("Controller"))
                 for d in (stor.get("Drives") or []):
                     drv = rf.get(d["@odata.id"])
                     if not isinstance(drv, dict): continue
                     if (drv.get("Status") or {}).get("State") == "Absent": continue
                     cap = _capacity_to_bytes(drv)
                     if cap: disk_total_bytes += cap
-                    role_id = ROLE_SSD if is_ssd(drv) else ROLE_HDD
+                    role_id = get_or_create_inventory_role("SSD") if is_ssd(drv) \
+                          else get_or_create_inventory_role("HDD")
                     add_item(
                         name=name_disk(drv),
                         manufacturer=drv.get("Manufacturer"),
@@ -1130,7 +1134,7 @@ def rf_collect_inventory(host):
                             serial=_pick(ctrl, ["SerialNumber"]),
                             description=f"Model={_pick(ctrl,['Model','ProductName','Name'])} "
                                         f"Firmware={_pick(ctrl,['FirmwareVersion','Version'])}",
-                            role_id=ROLE_CONTROLLER)
+                            role_id=get_or_create_inventory_role("Controller"))
                         pd_info = ctrl.get("PhysicalDrives") or (ctrl.get("Links") or {}).get("PhysicalDrives") or {}
                         if isinstance(pd_info, dict):
                             pu = pd_info.get("@odata.id") or pd_info.get("href")
@@ -1143,7 +1147,8 @@ def rf_collect_inventory(host):
                             drv = rf.get(u)
                             cap = _capacity_to_bytes(drv)
                             if cap: disk_total_bytes += cap
-                            role_id = ROLE_SSD if is_ssd(drv) else ROLE_HDD
+                            role_id = get_or_create_inventory_role("SSD") \
+                                      if is_ssd(drv) else get_or_create_inventory_role("HDD")
                             add_item(
                                 name=name_disk(drv),
                                 manufacturer=drv.get("Manufacturer"),
@@ -1174,7 +1179,7 @@ def rf_collect_inventory(host):
                             description=f"Model={_pick(psu,['Model','Name'])} "
                                         f"LineInputVoltage={psu.get('LineInputVoltage')} "
                                         f"PowerCapacityW={psu.get('PowerCapacityWatts')}",
-                            role_id=ROLE_PSU)
+                            role_id=get_or_create_inventory_role("PSU"))
         except Exception: pass
 
         # Battery Gen9
@@ -1190,7 +1195,7 @@ def rf_collect_inventory(host):
                 description=f"Model={bat.get('ProductName')} "
                             f"FirmwareVersion={bat.get('FirmwareVersion')} "
                             f"Condition={bat.get('Condition')}",
-                role_id=ROLE_BATTERY)
+                role_id=get_or_create_inventory_role("Battery"))
 
         # Battery Gen10
         try:
@@ -1210,7 +1215,7 @@ def rf_collect_inventory(host):
                                     f"FirmwareVersion={bat.get('FirmwareVersion')} "
                                     f"MaximumCapWatts={bat.get('MaximumCapWatts')} "
                                     f"ChargeLevel={bat.get('ChargeLevelPercent')}%",
-                        role_id=ROLE_BATTERY)
+                        role_id=get_or_create_inventory_role("Battery"))
         except Exception: pass
 
         # Network Adapters
@@ -1253,7 +1258,7 @@ def rf_collect_inventory(host):
                         part_number=adapter.get("PartNumber"),
                         serial=serial,
                         description=f"Model={aname} FW={fw} MACs={macs}",
-                        role_id=ROLE_NIC)
+                        role_id=get_or_create_inventory_role("NIC"))
                 except Exception: pass
         except Exception: pass
 
@@ -1280,8 +1285,9 @@ def rf_collect_inventory(host):
                         serial = dev.get("SerialNumber") if isinstance(dev, dict) else None
                         if not serial: continue
                         dname = dev.get("ProductName") or dev.get("Name") or "PCIe"
-                        role_id = ROLE_HBA if any(k in dname for k in ("HBA","FC","Fibre")) \
-                                  else ROLE_NIC
+                        role_id = get_or_create_inventory_role("HBA") \
+                                  if any(k in dname for k in ("HBA","FC","Fibre")) \
+                                  else get_or_create_inventory_role("NIC")
                         add_item(
                             name=dname[:64],
                             manufacturer=dev.get("Manufacturer") or sys.get("Manufacturer"),
@@ -1345,7 +1351,7 @@ def rf_collect_inventory(host):
                     serial=pseudo_serial,
                     description=f"Model={name_str} Slot={device_location} "
                                 f"FW={fw_version} (pseudo-serial: no serial via iLO4)",
-                    role_id=ROLE_HBA)
+                    role_id=get_or_create_inventory_role("HBA"))
         except Exception: pass
 
         disk_total_gib = gib_from_bytes(disk_total_bytes) if disk_total_bytes else None
@@ -1452,9 +1458,9 @@ def storage_collect_inventory(ip):
                     log("INFO", f"    disk command 'disks' succeeded on {ip}: {len(disk_rows_full)} rows")
                     if disk_rows_full:
                         bts = set(r.get("basetype") for r in disk_rows_full)
-                        log("INFO", f"    [DEBUG] disks: {len(disk_rows_full)} rows, basetypes={bts}")
+                        log("DEBUG", f"    disks: {len(disk_rows_full)} rows, basetypes={bts}")
                         sample = disk_rows_full[0]
-                        log("INFO", f"    [DEBUG] disks sample keys: {list(sample.keys())}")
+                        log("DEBUG", f"    disks sample keys: {list(sample.keys())}")
                 except Exception as exc:
                     msg = str(exc)
                     if "Rates may vary" in msg or "STORAGE_RATE_LIMIT" in msg:
@@ -1479,9 +1485,9 @@ def storage_collect_inventory(ip):
                         log("INFO", f"    disk command 'disk-statistics' succeeded on {ip}: {len(disk_rows_stats)} rows")
                         if disk_rows_stats:
                             bts = set(r.get("basetype") for r in disk_rows_stats)
-                            log("INFO", f"    [DEBUG] disk-statistics: {len(disk_rows_stats)} rows, basetypes={bts}")
+                            log("DEBUG", f"    disk-statistics: {len(disk_rows_stats)} rows, basetypes={bts}")
                             sample = disk_rows_stats[0]
-                            log("INFO", f"    [DEBUG] disk-statistics sample keys: {list(sample.keys())}")
+                            log("DEBUG", f"    disk-statistics sample keys: {list(sample.keys())}")
                         break
                     except Exception as exc:
                         msg = str(exc)
@@ -1667,11 +1673,12 @@ def _collect_disk_storage(row, add_item):
 
     # Use inferred-ssd flag if present (from disk-group name matching)
     if row.get("inferred-ssd") is True:
-        role_id = ROLE_SSD
+        role_id = get_or_create_inventory_role("SSD")
     elif row.get("inferred-ssd") is False:
-        role_id = ROLE_HDD
+        role_id = get_or_create_inventory_role("HDD")
     else:
-        role_id = ROLE_SSD if is_ssd_storage(row) else ROLE_HDD
+        role_id = get_or_create_inventory_role("SSD") \
+                  if is_ssd_storage(row) else get_or_create_inventory_role("HDD")
 
     # Location / slot
     location = (row.get("location") or row.get("slot")
@@ -1730,7 +1737,7 @@ def _collect_controller_storage(row, add_item):
         serial=serial,
         description=f"Controller={row.get('controller-id')} IP={row.get('ip-address')} "
                     f"FW={row.get('sc-firmware') or row.get('firmware-version')} Health={row.get('health')}",
-        role_id=ROLE_CONTROLLER,
+        role_id=get_or_create_inventory_role("Controller"),
     )
     return 0
 
@@ -1742,7 +1749,7 @@ def _collect_psu_storage(row, add_item):
         part_number=row.get("part-number") or row.get("model"),
         serial=serial,
         description=f"Location={row.get('location')} Health={row.get('health')} Status={row.get('status')}",
-        role_id=ROLE_PSU,
+        role_id=get_or_create_inventory_role("PSU"),
     )
     return 0
 
@@ -1756,7 +1763,7 @@ def _collect_fru_storage(row, add_item):
         part_number=part,
         serial=serial,
         description=f"Location={row.get('location')} Health={row.get('health')}",
-        role_id=ROLE_SAS_EXP,
+        role_id=get_or_create_inventory_role("SAS Exp"),
     )
     return 0
 
@@ -1779,7 +1786,12 @@ class BrocadeSwitchSession:
 
     def login(self):
         self.client = paramiko.SSHClient()
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        if _env_bool("SWITCH_STRICT_HOST_KEY", False):
+            # Verify switch host keys against the system known_hosts
+            self.client.load_system_host_keys()
+            self.client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        else:
+            self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         self.client.connect(
             hostname=self.ip, port=self.port,
             username=SWITCH_USER, password=SWITCH_PASS,
@@ -1832,7 +1844,7 @@ class BrocadeSwitchSession:
             if s == command.strip():
                 continue
             # Drop trailing prompt: "admin@switch:>" or "switch>"
-            if re.match(r'^[\w.-]+@[\w.-]+[>:]\s*$', s) or re.match(r'^[\w.-]+[>:]\s*$', s):
+            if re.match(r'^[\w.-]+@[\w.-]+[>:]+\s*$', s) or re.match(r'^[\w.-]+[>:]\s*$', s):
                 continue
             lines.append(ln)
         return "\n".join(lines).strip()
@@ -1921,8 +1933,10 @@ def _parse_sfpshow(text):
     rows = []
     lines = text.splitlines()
 
-    # Detect compact format: any line starts with "Port <n>:"
-    compact = any(re.match(r'^\s*Port\s+\d+\s*:', ln) for ln in lines)
+    # Detect compact format: a "Port <n>: <data>" line with content after
+    # the colon. Detailed-format blocks have bare "Port <n>:" headers (no
+    # trailing content), so they must not be treated as compact.
+    compact = any(re.match(r'^\s*Port\s+\d+\s*:\s*\S', ln) for ln in lines)
 
     if compact:
         for ln in lines:
@@ -2182,30 +2196,30 @@ def mark_san_offline(dev_id, dev_name):
     except Exception as e:
         log("ERROR", f"  Could not mark SAN switch offline {dev_name}: {e}")
 
+# Brocade speed token -> NetBox interface type choice string.
+# Matched on the numeric part so "N16"/"16G"/"16" all map the same way.
+_FC_SPEED_TYPES = {
+    1:   "1gfc-sfp",
+    2:   "2gfc-sfp",
+    4:   "4gfc-sfp",
+    8:   "8gfc-sfpp",
+    16:  "16gfc-sfpp",
+    32:  "32gfc-sfp28",
+    64:  "64gfc-qsfpp",
+    128: "128gfc-qsfp28",
+}
+
 def _fc_interface_type(speed):
     """Map a Brocade port speed string to a NetBox interface type choice.
 
     NetBox interface `type` is a choice string (not an ID), e.g.
-    '8gfc-sfp+', '16gfc-sfp+', '32gfc-sfp+', 'other'. Returns 'other'
+    '8gfc-sfpp', '16gfc-sfpp', '32gfc-sfp28', 'other'. Returns 'other'
     if the speed is unknown or the port is offline."""
-    s = (speed or "").lower()
-    if "n1" in s or s.startswith("1g") or s == "1":
-        return "1gfc-sfp"
-    if "n2" in s or s.startswith("2g") or s == "2":
-        return "2gfc-sfp"
-    if "n4" in s or s.startswith("4g") or s == "4":
-        return "4gfc-sfp"
-    if "n8" in s or s.startswith("8g") or s == "8":
-        return "8gfc-sfpp"
-    if "n16" in s or s.startswith("16g") or s == "16":
-        return "16gfc-sfpp"
-    if "n32" in s or s.startswith("32g") or s == "32":
-        return "32gfc-sfp28"
-    if "n64" in s or s.startswith("64g") or s == "64":
-        return "64gfc-qsfpp"
-    if "n128" in s or s.startswith("128g") or s == "128":
-        return "128gfc-qsfp28"
-    return "other"
+    s = (speed or "").lower().strip()
+    m = re.match(r'^n?(\d+)', s)   # "N16" -> 16, "16G" -> 16, "16" -> 16
+    if not m:
+        return "other"
+    return _FC_SPEED_TYPES.get(int(m.group(1)), "other")
 
 def sync_san_interfaces(dev_id, ports, nameserver):
     """Create/update NetBox interfaces for each FC port on the switch.
@@ -2264,18 +2278,28 @@ def sync_san_interfaces(dev_id, ports, nameserver):
 # ═══════════════════════════════════════════════════════════════════════════════
 def sync_inventory(dev_id, new_inventory):
     api = get_netbox()
+    # Single fetch — group existing items by serial
     by_serial = {}
-    for item in list(api.dcim.inventory_items.filter(device_id=dev_id)):
+    for item in api.dcim.inventory_items.filter(device_id=dev_id):
         s = str(item.serial or "").strip()
         if s: by_serial.setdefault(s, []).append(item)
+
+    # Delete duplicate entries for the same serial outright; the canonical
+    # item is recreated below from the freshly collected inventory.
     for s, items in by_serial.items():
         if len(items) > 1:
             for item in items: item.delete()
+            by_serial[s] = []
 
+    # Delete items the device no longer reports
     new_serials = set(new_inventory.keys())
-    for item in list(api.dcim.inventory_items.filter(device_id=dev_id)):
-        if item.serial and item.serial not in new_serials:
-            item.delete()
+    for s, items in by_serial.items():
+        if items and s not in new_serials:
+            for item in items: item.delete()
+            by_serial[s] = []
+
+    # What remains are live single items whose serial is still reported
+    live = {s: items[0] for s, items in by_serial.items() if items}
 
     for serial, item in new_inventory.items():
         mfr_id = get_or_create_manufacturer(item.get("manufacturer"))
@@ -2288,9 +2312,8 @@ def sync_inventory(dev_id, new_inventory):
             "description": item.get("description") or "",
             **({"role": item["role"]} if item.get("role") else {}),
         }
-        existing = api.dcim.inventory_items.get(device_id=dev_id, serial=serial)
-        if existing:
-            api.dcim.inventory_items.update([{"id": existing.id, **payload}])
+        if serial in live:
+            api.dcim.inventory_items.update([{"id": live[serial].id, **payload}])
         else:
             api.dcim.inventory_items.create(payload)
 
@@ -2499,6 +2522,7 @@ def run_sync():
 # ═══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     try:
+        _validate_config()
         schedule.every().day.at("00:00").do(run_sync)
         schedule.every().day.at("12:00").do(run_sync)
         log("INFO", "Scheduler started — runs at 00:00 and 12:00 daily.")
