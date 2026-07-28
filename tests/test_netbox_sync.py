@@ -148,6 +148,9 @@ def _roles_endpoint():
         FakeRecord(44, name="PSU", slug="psu"),
         FakeRecord(45, name="Controller", slug="controller"),
         FakeRecord(46, name="SAS Exp", slug="sas-exp"),
+        FakeRecord(47, name="SFP", slug="sfp"),
+        FakeRecord(48, name="Fan", slug="fan"),
+        FakeRecord(49, name="Module", slug="module"),
     ])
 
 
@@ -229,6 +232,37 @@ def test_storage_collectors_resolve_roles_by_name(monkeypatch):
     assert inv["C1"]["role"] == 45   # Controller by name
     assert inv["F1"]["role"] == 46   # SAS Exp by name
     assert ep.created == []          # all resolved, none created
+
+
+# ── Cisco inventory role classification ──────────────────────────────────────
+
+def test_cisco_inventory_roles_classified(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    ep = _roles_endpoint()
+    monkeypatch.setattr(nbx, "get_netbox",
+                        lambda: _fake_api(inventory_item_roles=ep))
+
+    inv = {}
+    add = utils._make_add_item(inv)
+    cisco._inventory_item_from_row(
+        {"name": "Power Supply Module 0", "descr": "350W AC Power Supply",
+         "pid": "PWR-C1-350WAC", "vid": "V01", "sn": "LIT23456789"}, add)
+    cisco._inventory_item_from_row(
+        {"name": "Fan Tray 0", "descr": "Fan Tray",
+         "pid": "C9300-FAN-1", "vid": "V01", "sn": "FAN123456"}, add)
+    cisco._inventory_item_from_row(
+        {"name": "GigabitEthernet1/1/1", "descr": "1000BaseSX SFP",
+         "pid": "GLC-SX-MMD", "vid": "V01", "sn": "FNS12345678"}, add)
+    cisco._inventory_item_from_row(
+        {"name": "Switch 1", "descr": "C9300-48U",
+         "pid": "C9300-48U", "vid": "V02", "sn": "FOC2345X0AB"}, add)
+
+    assert inv["LIT23456789"]["role"] == 44   # PSU
+    assert inv["FAN123456"]["role"] == 48     # Fan
+    assert inv["FNS12345678"]["role"] == 47   # SFP
+    assert inv["FOC2345X0AB"]["role"] == 49   # Module
+    assert inv["LIT23456789"]["part_number"] == "PWR-C1-350WAC"
+    assert ep.created == []
 
 
 # ── config validation ────────────────────────────────────────────────────────

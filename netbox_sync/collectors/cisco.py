@@ -181,3 +181,133 @@ def _eth_interface_type(speed, type_str=None):
     if s == "40g":   return "40gbase-x-qsfpp"
     if s == "100g":  return "100gbase-x-qsfp28"
     return "other"
+
+# ── session (netmiko) ────────────────────────────────────────────────────────
+
+class CiscoSwitchSession:
+    """Thin netmiko wrapper for Catalyst IOS/IOS-XE. netmiko owns prompt
+    detection, paging (`terminal length 0`) and privilege handling."""
+
+    def __init__(self, ip, port=None, timeout=20):
+        self.ip = ip
+        self.port = port or CISCO_PORT
+        self.timeout = timeout
+        self.conn = None
+
+    def login(self):
+        self.conn = ConnectHandler(
+            device_type="cisco_ios",
+            host=self.ip, port=self.port,
+            username=CISCO_USER, password=CISCO_PASS,
+            conn_timeout=self.timeout, auth_timeout=self.timeout,
+            banner_timeout=self.timeout,
+        )
+
+    def run(self, command):
+        if not self.conn:
+            raise RuntimeError("SSH session not open")
+        return self.conn.send_command(command, read_timeout=self.timeout)
+
+    def logout(self):
+        try:
+            if self.conn:
+                self.conn.disconnect()
+        except Exception: pass
+        self.conn = None
+
+# ── probe + inventory collection ─────────────────────────────────────────────
+
+def probe_cisco_switch(ip, retries=2, retry_delay=3):
+    for attempt in range(1, retries + 1):
+        if not is_port_open(ip, CISCO_PORT):
+            if attempt < retries: time.sleep(retry_delay); continue
+            return None
+        sess = CiscoSwitchSession(ip)
+        try:
+            sess.login()
+            try:
+                info = _parse_show_version(sess.run("show version"))
+                if not (info.get("serial") or info.get("model")):
+                    raise RuntimeError("show version yielded no serial/model")
+                model = (normalize_model(info.get("model"), CISCO_MODEL_MAP)
+                         or info.get("model"))
+                return {
+                    "ip":           ip,
+                    "host":         f"{ip}:{CISCO_PORT}",
+                    "serial":       info.get("serial"),
+                    "model":        model,
+                    "hostname":     (info.get("hostname")
+                                     or f"cisco-{ip.replace('.', '-')}"),
+                    "manufacturer": "Cisco",
+                    "firmware":     info.get("ios_version"),
+                }
+            finally:
+                sess.logout()
+        except Exception:
+            if attempt < retries: time.sleep(retry_delay); continue
+            return None
+    return None
+
+def _inventory_item_from_row(row, add_item):
+    """Classify a `show inventory` row into PSU/Fan/SFP/Module and add it."""
+    serial = (row.get("sn") or "").strip()
+    if _invalid_serial(serial):
+        return
+    label = f"{row.get('name', '')} {row.get('descr', '')}".lower()
+    if "power supply" in label:
+        role = "PSU"
+    elif "fan" in label:
+        role = "Fan"
+    elif "sfp" in label or "transceiver" in label or "gbic" in label:
+        role = "SFP"
+    else:
+        role = "Module"
+    add_item(
+        name=str(row.get("descr") or row.get("name") or "Module")[:64],
+        manufacturer="Cisco",
+        part_number=row.get("pid") or None,
+        serial=serial,
+        description=f"Name={row.get('name')} Descr={row.get('descr')} VID={row.get('vid')}",
+        role_id=get_or_create_inventory_role(role),
+    )
+
+def cisco_collect_inventory(ip):
+    """Full inventory pull: identity, inventory rows, ports, CDP/LLDP neighbors."""
+    sess = CiscoSwitchSession(ip)
+    sess.login()
+    try:
+        ver = _parse_show_version(sess.run("show version"))
+        inv_rows = _parse_show_inventory(sess.run("show inventory"))
+        ports = _parse_interfaces_status(sess.run("show interfaces status"))
+        log("INFO", f"  cisco show: {len(inv_rows)} inventory rows, {len(ports)} ports")
+
+        try:
+            neighbors = _parse_cdp_detail(sess.run("show cdp neighbors detail"))
+            log("INFO", f"  cdp neighbors: {len(neighbors)}")
+        except Exception as exc:
+            neighbors = []
+            log("WARN", f"  show cdp neighbors detail failed: {exc}")
+        if not neighbors:
+            try:
+                neighbors = _parse_lldp_detail(sess.run("show lldp neighbors detail"))
+                log("INFO", f"  lldp neighbors: {len(neighbors)}")
+            except Exception as exc:
+                log("WARN", f"  show lldp neighbors detail failed: {exc}")
+
+        inventory = {}
+        add_item = _make_add_item(inventory)
+        for row in inv_rows:
+            _inventory_item_from_row(row, add_item)
+
+        summary = {
+            "serial":    ver.get("serial"),
+            "model":     (normalize_model(ver.get("model"), CISCO_MODEL_MAP)
+                          or ver.get("model")),
+            "firmware":  ver.get("ios_version"),
+            "hostname":  (ver.get("hostname") or "").strip(),
+            "port_count": len(ports),
+        }
+        return {"summary": summary, "ports": ports,
+                "neighbors": neighbors, "inventory": inventory}
+    finally:
+        sess.logout()
