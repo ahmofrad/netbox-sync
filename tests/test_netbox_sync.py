@@ -320,6 +320,92 @@ def test_sync_cisco_interfaces_update_create_delete(monkeypatch):
     assert ifaces_ep.deleted_ids == [2]
 
 
+# ── Cisco CDP cable sync ─────────────────────────────────────────────────────
+
+def _cisco_cable_api(local_ifaces, peer_dev, peer_ifaces, cables):
+    return _fake_api(
+        devices=FakeEndpoint([peer_dev] if peer_dev else []),
+        interfaces=FakeEndpoint(local_ifaces + peer_ifaces),
+        cables=FakeEndpoint(cables),
+    )
+
+_PEER = FakeRecord(5, name="SW2")
+_LOCAL_IFACE = FakeRecord(11, name="Gi1/0/1", device_id=7)
+_PEER_IFACE = FakeRecord(55, name="Gi1/0/24", device_id=5)
+_NEIGHBORS = [{"device_id": "SW2", "platform": "", "ip": None,
+               "local_intf": "GigabitEthernet1/0/1",
+               "remote_intf": "GigabitEthernet1/0/24"}]
+
+
+def test_cdp_cable_created_when_both_ends_resolve(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    api = _cisco_cable_api([_LOCAL_IFACE], _PEER, [_PEER_IFACE], [])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sync_cdp_cables(7, _NEIGHBORS)
+
+    assert len(api.dcim.cables.created) == 1
+    payload = api.dcim.cables.created[0]
+    assert payload["a_terminations"] == [
+        {"object_type": "dcim.interface", "object_id": 11}]
+    assert payload["b_terminations"] == [
+        {"object_type": "dcim.interface", "object_id": 55}]
+    assert payload["description"].startswith(cisco.CABLE_MARKER)
+
+
+def test_cdp_cable_dedupes_existing_marked(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    marked = FakeRecord(9, device_id=7, description="netbox-sync: cdp old",
+                        a_terminations=[{"object_type": "dcim.interface", "object_id": 11}],
+                        b_terminations=[{"object_type": "dcim.interface", "object_id": 55}])
+    api = _cisco_cable_api([_LOCAL_IFACE], _PEER, [_PEER_IFACE], [marked])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sync_cdp_cables(7, _NEIGHBORS)
+
+    assert api.dcim.cables.created == []          # no duplicate
+    assert {u["id"] for u in api.dcim.cables.updated} == {9}
+    assert api.dcim.cables.deleted_ids == []      # seen -> kept
+
+
+def test_cdp_cable_skips_unresolvable_neighbor(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    api = _cisco_cable_api([_LOCAL_IFACE], None, [], [])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sync_cdp_cables(7, [{"device_id": "UNKNOWN", "platform": "",
+                               "ip": None, "local_intf": "GigabitEthernet1/0/1",
+                               "remote_intf": "Gi0/1"}])
+    assert api.dcim.cables.created == []
+
+
+def test_cdp_cable_preserves_unmarked_and_conflicts(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    manual = FakeRecord(8, device_id=7, description="manual doc",
+                        a_terminations=[{"object_type": "dcim.interface", "object_id": 11}],
+                        b_terminations=[{"object_type": "dcim.interface", "object_id": 55}])
+    api = _cisco_cable_api([_LOCAL_IFACE], _PEER, [_PEER_IFACE], [manual])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sync_cdp_cables(7, _NEIGHBORS)
+
+    assert api.dcim.cables.created == []        # conflict -> no create
+    assert api.dcim.cables.deleted_ids == []    # manual cable preserved
+
+
+def test_cdp_cable_deletes_stale_marked(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    stale = FakeRecord(9, device_id=7, description="netbox-sync: cdp old",
+                       a_terminations=[{"object_type": "dcim.interface", "object_id": 11}],
+                       b_terminations=[{"object_type": "dcim.interface", "object_id": 55}])
+    api = _cisco_cable_api([_LOCAL_IFACE], _PEER, [_PEER_IFACE], [stale])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sync_cdp_cables(7, [])   # nothing seen this run
+
+    assert api.dcim.cables.deleted_ids == [9]
+
+
 # ── config validation ────────────────────────────────────────────────────────
 
 REQUIRED_VARS = ["NETBOX_URL", "NETBOX_TOKEN", "REDFISH_USER", "REDFISH_PASS",

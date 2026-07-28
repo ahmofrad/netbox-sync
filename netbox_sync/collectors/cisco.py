@@ -350,3 +350,95 @@ def sync_cisco_interfaces(dev_id, ports):
         if name not in seen:
             try: iface.delete()
             except Exception: pass
+
+# ── CDP/LLDP cable reconciliation ────────────────────────────────────────────
+
+# Ownership marker: only cables whose description starts with this prefix are
+# managed (refreshed/deleted) by the sync. Manual cabling is never touched.
+CABLE_MARKER = "netbox-sync:"
+
+def _cable_iface_ids(cable):
+    for t in (getattr(cable, "a_terminations", None) or []) + \
+             (getattr(cable, "b_terminations", None) or []):
+        oid = t.get("object_id") if isinstance(t, dict) else None
+        if oid is not None:
+            yield oid
+
+def sync_cdp_cables(dev_id, neighbors):
+    """Reconcile NetBox cables for one switch from CDP/LLDP neighbor data.
+
+    Both ends must resolve to existing NetBox interfaces; anything else is
+    skipped (DEBUG). Only marker-owned cables are managed."""
+    api = netbox.get_netbox()
+    local_ifaces = {str(i.name): i
+                    for i in api.dcim.interfaces.filter(device_id=dev_id)}
+    existing_cables = list(api.dcim.cables.filter(device_id=dev_id))
+    marked = [c for c in existing_cables
+              if (c.description or "").startswith(CABLE_MARKER)]
+    unmarked = [c for c in existing_cables
+                if not (c.description or "").startswith(CABLE_MARKER)]
+
+    marked_by_iface = {}
+    for c in marked:
+        for oid in _cable_iface_ids(c):
+            marked_by_iface.setdefault(oid, c)
+
+    peer_dev_cache = {}
+    seen_cable_ids = set()
+
+    for n in neighbors:
+        local = local_ifaces.get(_short_intf(n.get("local_intf")))
+        if not local:
+            log("DEBUG", f"  cdp: local iface {n.get('local_intf')} not found, skipping")
+            continue
+        peer_name = _normalize_cdp_id(n.get("device_id"))
+        if not peer_name:
+            continue
+        if peer_name not in peer_dev_cache:
+            try:
+                peer_dev_cache[peer_name] = api.dcim.devices.get(name=peer_name)
+            except Exception:
+                peer_dev_cache[peer_name] = None
+        peer_dev = peer_dev_cache[peer_name]
+        if not peer_dev:
+            log("DEBUG", f"  cdp: neighbor {peer_name} not in NetBox, skipping")
+            continue
+        peer_iface = api.dcim.interfaces.get(
+            device_id=peer_dev.id, name=_short_intf(n.get("remote_intf")))
+        if not peer_iface:
+            log("DEBUG", f"  cdp: iface {n.get('remote_intf')} not found on "
+                        f"{peer_name}, skipping")
+            continue
+
+        desc = (f"{CABLE_MARKER} cdp {local.name} <-> "
+                f"{peer_name} {peer_iface.name}")
+        existing = marked_by_iface.get(local.id) or marked_by_iface.get(peer_iface.id)
+        if existing:
+            seen_cable_ids.add(existing.id)
+            api.dcim.cables.update([{"id": existing.id, "description": desc}])
+            continue
+        if any(local.id in _cable_iface_ids(c) or peer_iface.id in _cable_iface_ids(c)
+               for c in unmarked):
+            log("DEBUG", f"  cdp: manual cable exists on {local.name} or "
+                        f"{peer_iface.name}, leaving untouched")
+            continue
+        try:
+            cable = api.dcim.cables.create({
+                "a_terminations": [{"object_type": "dcim.interface",
+                                    "object_id": local.id}],
+                "b_terminations": [{"object_type": "dcim.interface",
+                                    "object_id": peer_iface.id}],
+                "description": desc,
+            })
+            seen_cable_ids.add(cable.id)
+            log("INFO", f"  cdp: cabled {local.name} <-> {peer_name} {peer_iface.name}")
+        except Exception as exc:
+            log("WARN", f"  cdp: could not create cable {local.name} "
+                        f"<-> {peer_name} {peer_iface.name}: {exc}")
+
+    for c in marked:
+        if c.id not in seen_cable_ids:
+            try:
+                c.delete()
+                log("INFO", f"  cdp: removed stale cable id={c.id}")
+            except Exception: pass
