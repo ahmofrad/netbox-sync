@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
+# Cron-safe fallback: dotenv's upward search normally finds the repo .env
+# from any cwd, but make it explicit if NETBOX_URL is still missing.
+if not os.getenv("NETBOX_URL"):
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
 
 # ── credentials ──────────────────────────────────────────────────────────────
 NETBOX_URL   = os.getenv("NETBOX_URL")
