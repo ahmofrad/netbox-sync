@@ -353,6 +353,19 @@ def cisco_collect_inventory(ip):
             except Exception as exc:
                 log("WARN", f"  show lldp neighbors detail failed: {exc}")
 
+        try:
+            vlans = _parse_vlan_brief(sess.run("show vlan brief"))
+            log("INFO", f"  vlans: {len(vlans)}")
+        except Exception as exc:
+            vlans = []
+            log("WARN", f"  show vlan brief failed: {exc}")
+        try:
+            trunks = _parse_interfaces_trunk(sess.run("show interfaces trunk"))
+            log("INFO", f"  trunks: {len(trunks)}")
+        except Exception as exc:
+            trunks = []
+            log("WARN", f"  show interfaces trunk failed: {exc}")
+
         inventory = {}
         add_item = _make_add_item(inventory)
         for row in inv_rows:
@@ -367,7 +380,8 @@ def cisco_collect_inventory(ip):
             "port_count": len(ports),
         }
         return {"summary": summary, "ports": ports,
-                "neighbors": neighbors, "inventory": inventory}
+                "neighbors": neighbors, "inventory": inventory,
+                "vlans": vlans, "trunks": trunks}
     finally:
         sess.logout()
 

@@ -3,6 +3,9 @@ sync inventory, sync SAN interfaces, then mark unreachable devices offline."""
 from netbox_sync.collectors.brocade import san_collect_inventory, sync_san_interfaces
 from netbox_sync.collectors.cisco import (cisco_collect_inventory,
                                           sync_cisco_interfaces,
+                                          sync_cisco_vlans,
+                                          sync_interface_vlans,
+                                          sweep_stale_vlans,
                                           sync_cdp_cables)
 from netbox_sync.collectors.msa import storage_collect_inventory
 from netbox_sync.collectors.redfish import rf_collect_inventory
@@ -190,6 +193,7 @@ def run_sync():
 
     # ── Process Cisco switches ────────────────────────────────────────────────
     live_cisco_ips = {h["ip"] for h in found["cisco_switches"]}
+    site_vlan_seen = {}
     for probe in found["cisco_switches"]:
         ip = probe["ip"]
         log("INFO", f"Processing CISCO {ip}  ({probe.get('model')} / {probe.get('serial')})")
@@ -213,6 +217,8 @@ def run_sync():
         summary = data["summary"]
         ports = data["ports"]
         neighbors = data["neighbors"]
+        vlans = data["vlans"]
+        trunks = data["trunks"]
         inv = data["inventory"]
 
         try:
@@ -232,11 +238,35 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  Cisco switch update failed for {ip}: {e}")
 
+        site_id = None
+        try:
+            dev_rec = api.dcim.devices.get(id=dev_id)
+            site_id = getattr(getattr(dev_rec, "site", None), "id", None)
+        except Exception:
+            site_id = None
+
+        vid_map = {}
+        if site_id:
+            try:
+                vid_map = sync_cisco_vlans(site_id, probe.get("hostname") or "", vlans)
+                site_vlan_seen.setdefault(site_id, set()).update(vid_map.keys())
+            except Exception as e:
+                log("WARN", f"  VLAN sync failed for {ip}: {e}")
+        else:
+            log("WARN", f"  no site on device for {ip} — skipping VLAN sync")
+
         try:
             sync_cisco_interfaces(dev_id, ports)
             log("INFO", f"  [OK] Cisco {ip} — {len(ports)} interfaces synced")
         except Exception as e:
             log("ERROR", f"  Cisco interface sync failed for {ip}: {e}")
+
+        if vid_map:
+            try:
+                sync_interface_vlans(dev_id, ports, trunks, vid_map)
+                log("INFO", f"  [OK] Cisco {ip} — VLAN linkage synced")
+            except Exception as e:
+                log("ERROR", f"  Cisco VLAN linkage failed for {ip}: {e}")
 
         try:
             sync_inventory(dev_id, inv)
@@ -249,6 +279,13 @@ def run_sync():
             log("INFO", f"  [OK] Cisco {ip} — {len(neighbors)} neighbors processed")
         except Exception as e:
             log("ERROR", f"  Cisco cable sync failed for {ip}: {e}")
+
+    # ── Sweep stale marker-owned VLANs per site ───────────────────────────────
+    for site_id, seen in site_vlan_seen.items():
+        try:
+            sweep_stale_vlans(site_id, seen)
+        except Exception as e:
+            log("ERROR", f"  VLAN sweep failed for site {site_id}: {e}")
 
     # ── Mark unreachable devices offline ─────────────────────────────────────
     # A device must be missing from OFFLINE_THRESHOLD consecutive scans before

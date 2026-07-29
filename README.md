@@ -342,7 +342,7 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 
 **LAN switches (Cisco Catalyst, IOS / IOS-XE, SSH via netmiko):**
 - Catalyst 2960X / 3650 / 3850 / 9200 / 9300 families (classic IOS and IOS-XE dialects).
-- Connects via SSH and runs `show version`, `show inventory`, `show interfaces status`, `show cdp neighbors detail` (with `show lldp neighbors detail` as fallback).
+- Connects via SSH and runs `show version`, `show inventory`, `show interfaces status`, `show vlan brief`, `show interfaces trunk`, `show cdp neighbors detail` (with `show lldp neighbors detail` as fallback).
 - The Cisco family is **opt-in**: it only activates when `CISCO_RANGES` is set.
 
 See `netbox_sync/models.py` for the full model alias maps. Add your own models there.
@@ -393,6 +393,10 @@ For each discovered Cisco switch, the script reads `show cdp neighbors detail` (
 
 - A cable is only created when **both ends resolve**: the neighbor's hostname (domain-stripped) must match a NetBox device **and** the remote interface must exist on it. Anything else is skipped with a DEBUG log — notably Cisco↔server links, because server NICs are inventory *items* in this tool, not interfaces.
 - Sync-created cables carry a `netbox-sync:` prefix in their description. Only **marked** cables are ever refreshed or deleted (stale ones disappear when the neighbor data no longer reports them). **Manually documented cables are never modified or deleted.**
+
+## VLAN sync (Cisco)
+
+VLANs from `show vlan brief` are created/updated in IPAM **per site** (uniqueness per `(site, vid)`; marker `netbox-sync:` in the description), switch interfaces get their VLAN linkage (`access` + untagged VLAN, `tagged`/`tagged-all` + native VLAN from `show interfaces trunk`), and marked VLANs no longer reported by **any** switch at a site are deleted after each run. Manual VLANs are never modified or deleted.
 
 ## Offline detection
 
@@ -702,7 +706,7 @@ python -m pytest tests/
 
 **سوئیچ‌های LAN (Cisco Catalyst، IOS / IOS-XE، SSH از طریق netmiko):**
 - خانواده‌های Catalyst 2960X / 3650 / 3850 / 9200 / 9300 (هر دو گویش IOS کلاسیک و IOS-XE).
-- اتصال از طریق SSH و اجرای `show version`، `show inventory`، `show interfaces status`، `show cdp neighbors detail` (با `show lldp neighbors detail` به‌عنوان جایگزین).
+- اتصال از طریق SSH و اجرای `show version`، `show inventory`، `show interfaces status`، `show vlan brief`، `show interfaces trunk`، `show cdp neighbors detail` (با `show lldp neighbors detail` به‌عنوان جایگزین).
 - خانواده سیسکو **اختیاری** است: فقط وقتی `CISCO_RANGES` تنظیم شود فعال می‌شود.
 
 برای مشاهده نگاشت کامل نام مدل‌ها به `netbox_sync/models.py` مراجعه کنید. می‌توانید مدل‌های جدید را نیز در همان فایل اضافه کنید.
@@ -753,6 +757,10 @@ python -m pytest tests/
 
 - کابل فقط وقتی ساخته می‌شود که **هر دو سر لینک شناسایی شوند**: hostname همسایه (بدون پسوند دامنه) باید با یک دستگاه NetBox مطابقت کند **و** رابط راه‌دور روی آن وجود داشته باشد. در غیر این صورت با لاگ DEBUG رد می‌شود — به‌ویژه لینک‌های سیسکو↔سرور، چون کارت‌های شبکه سرور در این ابزار inventory item هستند، نه interface.
 - کابل‌های ساخته‌شده توسط همگام‌سازی پیشوند `netbox-sync:` در description دارند. فقط کابل‌های **علامت‌دار** به‌روزرسانی یا حذف می‌شوند (موارد قدیمی وقتی همسایه دیگر گزارش نشود پاک می‌شوند). **کابل‌های دستی هرگز تغییر یا حذف نمی‌شوند.**
+
+## همگام‌سازی VLAN (سیسکو)
+
+VLANهای `show vlan brief` به‌صورت **per-site** در IPAM ساخته/به‌روزرسانی می‌شوند (یکتایی به‌ازای `(site, vid)`؛ علامت `netbox-sync:` در description)، رابط‌های سوئیچ اتصال VLAN خود را دریافت می‌کنند (`access` با untagged VLAN، `tagged`/`tagged-all` با native VLAN از `show interfaces trunk`)، و VLANهای علامت‌داری که دیگر **هیچ** سوئیچی در آن سایت گزارش نکند پس از هر اجرا حذف می‌شوند. VLANهای دستی هرگز تغییر یا حذف نمی‌شوند.
 
 ## تشخیص آفلاین
 
