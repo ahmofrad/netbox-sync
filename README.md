@@ -396,7 +396,7 @@ For each discovered Cisco switch, the script reads `show cdp neighbors detail` (
 
 ## VLAN sync (Cisco)
 
-VLANs from `show vlan brief` are created/updated in IPAM **per site** (uniqueness per `(site, vid)`; marker `netbox-sync:` in the description), switch interfaces get their VLAN linkage (`access` + untagged VLAN, `tagged`/`tagged-all` + native VLAN from `show interfaces trunk`), and marked VLANs no longer reported by **any** switch at a site are deleted after each run. Manual VLANs are never modified or deleted.
+VLANs from `show vlan brief` are created/updated in IPAM grouped by **broadcast domain**: each switch's VTP domain (`show vtp status`; per-switch fallback when the domain is empty) maps to a site-scoped **VLAN group** named `BD1`, `BD2`… (stable across runs — the VTP key lives in the group description). Overlapping VLAN IDs at one site coexist in different groups. Interfaces get their VLAN linkage (access untagged, trunk native + tagged) as before. Marker-owned (`netbox-sync:`) VLANs no longer reported by any switch in the group are deleted after each run; manual VLANs/groups are never modified or deleted.
 
 ## Offline detection
 
@@ -760,7 +760,7 @@ python -m pytest tests/
 
 ## همگام‌سازی VLAN (سیسکو)
 
-VLANهای `show vlan brief` به‌صورت **per-site** در IPAM ساخته/به‌روزرسانی می‌شوند (یکتایی به‌ازای `(site, vid)`؛ علامت `netbox-sync:` در description)، رابط‌های سوئیچ اتصال VLAN خود را دریافت می‌کنند (`access` با untagged VLAN، `tagged`/`tagged-all` با native VLAN از `show interfaces trunk`)، و VLANهای علامت‌داری که دیگر **هیچ** سوئیچی در آن سایت گزارش نکند پس از هر اجرا حذف می‌شوند. VLANهای دستی هرگز تغییر یا حذف نمی‌شوند.
+VLANهای `show vlan brief` بر اساس **دامنه broadcast** در IPAM گروه‌بندی می‌شوند: دامنه VTP هر سوئیچ (`show vtp status`؛ در صورت خالی بودن، به‌صورت per-switch) به یک **VLAN group** با نام `BD1`، `BD2`… نگاشت می‌شود (پایدار بین اجراها — کلید VTP در description گروه نگه‌داری می‌شود). VLANهای با ID هم‌پوشان در یک سایت در گروه‌های جداگانه کنار هم قرار می‌گیرند. اتصال VLAN رابط‌ها (untagged در access، native + tagged در trunk) مانند قبل انجام می‌شود. VLANهای علامت‌دار (`netbox-sync:`) که دیگر هیچ سوئیچی در گروه گزارش نکند پس از هر اجرا حذف می‌شوند؛ VLANها/گروه‌های دستی هرگز تغییر یا حذف نمی‌شوند.
 
 ## تشخیص آفلاین
 

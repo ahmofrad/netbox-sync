@@ -3,9 +3,11 @@ sync inventory, sync SAN interfaces, then mark unreachable devices offline."""
 from netbox_sync.collectors.brocade import san_collect_inventory, sync_san_interfaces
 from netbox_sync.collectors.cisco import (cisco_collect_inventory,
                                           sync_cisco_interfaces,
+                                          ensure_vlan_group,
                                           sync_cisco_vlans,
                                           sync_interface_vlans,
                                           sweep_stale_vlans,
+                                          sweep_legacy_site_vlans,
                                           sync_cdp_cables)
 from netbox_sync.collectors.msa import storage_collect_inventory
 from netbox_sync.collectors.redfish import rf_collect_inventory
@@ -193,7 +195,8 @@ def run_sync():
 
     # ── Process Cisco switches ────────────────────────────────────────────────
     live_cisco_ips = {h["ip"] for h in found["cisco_switches"]}
-    site_vlan_seen = {}
+    group_vlan_seen = {}
+    legacy_sites = set()
     for probe in found["cisco_switches"]:
         ip = probe["ip"]
         log("INFO", f"Processing CISCO {ip}  ({probe.get('model')} / {probe.get('serial')})")
@@ -219,6 +222,7 @@ def run_sync():
         neighbors = data["neighbors"]
         vlans = data["vlans"]
         trunks = data["trunks"]
+        vtp = data["vtp"]
         inv = data["inventory"]
 
         try:
@@ -248,8 +252,11 @@ def run_sync():
         vid_map = {}
         if site_id:
             try:
-                vid_map = sync_cisco_vlans(site_id, probe.get("hostname") or "", vlans)
-                site_vlan_seen.setdefault(site_id, set()).update(vid_map.keys())
+                key = (vtp.get("domain") or probe.get("hostname") or ip)
+                group_id = ensure_vlan_group(site_id, key)
+                vid_map = sync_cisco_vlans(group_id, probe.get("hostname") or "", vlans)
+                group_vlan_seen.setdefault(group_id, set()).update(vid_map.keys())
+                legacy_sites.add(site_id)
             except Exception as e:
                 log("WARN", f"  VLAN sync failed for {ip}: {e}")
         else:
@@ -280,12 +287,17 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  Cisco cable sync failed for {ip}: {e}")
 
-    # ── Sweep stale marker-owned VLANs per site ───────────────────────────────
-    for site_id, seen in site_vlan_seen.items():
+    # ── Sweep stale marker-owned VLANs per group + legacy site VLANs ─────────
+    for group_id, seen in group_vlan_seen.items():
         try:
-            sweep_stale_vlans(site_id, seen)
+            sweep_stale_vlans(group_id, seen)
         except Exception as e:
-            log("ERROR", f"  VLAN sweep failed for site {site_id}: {e}")
+            log("ERROR", f"  VLAN sweep failed for group {group_id}: {e}")
+    for site_id in legacy_sites:
+        try:
+            sweep_legacy_site_vlans(site_id)
+        except Exception as e:
+            log("ERROR", f"  legacy VLAN sweep failed for site {site_id}: {e}")
 
     # ── Mark unreachable devices offline ─────────────────────────────────────
     # A device must be missing from OFFLINE_THRESHOLD consecutive scans before
