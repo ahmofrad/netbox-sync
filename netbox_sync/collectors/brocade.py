@@ -440,6 +440,7 @@ def sync_san_interfaces(dev_id, ports, nameserver):
             if wwn: port_wwns.setdefault(idx, []).append(wwn)
 
     seen = set()
+    updates, creates = [], []
     for p in ports:
         name = f"FC {p['port']}"
         seen.add(name)
@@ -458,12 +459,17 @@ def sync_san_interfaces(dev_id, ports, nameserver):
             "mgmt_only":  False,
         }
         if name in existing:
-            api.dcim.interfaces.update([{"id": existing[name].id, **payload}])
+            updates.append({"id": existing[name].id, **payload})
         else:
-            try:
-                api.dcim.interfaces.create(payload)
-            except Exception as e:
-                log("WARN", f"  Could not create interface {name}: {e}")
+            creates.append(payload)
+    # Bulk write: one HTTP call per operation regardless of port count
+    if updates:
+        api.dcim.interfaces.update(updates)
+    if creates:
+        try:
+            api.dcim.interfaces.create(creates)
+        except Exception as e:
+            log("WARN", f"  Could not create interfaces: {e}")
 
     # Remove interfaces that no longer exist on the switch
     for name, iface in existing.items():

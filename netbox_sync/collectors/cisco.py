@@ -302,7 +302,9 @@ class CiscoSwitchSession:
 
 def probe_cisco_switch(ip, retries=2, retry_delay=3):
     for attempt in range(1, retries + 1):
-        if not is_port_open(ip, CISCO_PORT):
+        # One quick port check is enough for dead IPs (a dead host fails
+        # fast and definitively); OFFLINE_THRESHOLD covers transient drops.
+        if not is_port_open(ip, CISCO_PORT, timeout=3, retries=1):
             if attempt < retries: time.sleep(retry_delay); continue
             return None
         sess = CiscoSwitchSession(ip)
@@ -427,6 +429,7 @@ def sync_cisco_interfaces(dev_id, ports):
         existing[str(iface.name)] = iface
 
     seen = set()
+    updates, creates = [], []
     for p in ports:
         name = p["port"]
         seen.add(name)
@@ -443,12 +446,17 @@ def sync_cisco_interfaces(dev_id, ports):
             "mgmt_only":  False,
         }
         if name in existing:
-            api.dcim.interfaces.update([{"id": existing[name].id, **payload}])
+            updates.append({"id": existing[name].id, **payload})
         else:
-            try:
-                api.dcim.interfaces.create(payload)
-            except Exception as e:
-                log("WARN", f"  Could not create interface {name}: {e}")
+            creates.append(payload)
+    # Bulk write: one HTTP call per operation regardless of port count
+    if updates:
+        api.dcim.interfaces.update(updates)
+    if creates:
+        try:
+            api.dcim.interfaces.create(creates)
+        except Exception as e:
+            log("WARN", f"  Could not create interfaces: {e}")
 
     for name, iface in existing.items():
         if name not in seen:
@@ -489,24 +497,31 @@ def ensure_vlan_group(site_id, key):
 
 def sync_cisco_vlans(group_id, hostname, vlans):
     """Get-or-create each VLAN in IPAM for the VLAN group; refresh
-    marker-owned records. Returns {vid: netbox_id} for interface linkage."""
+    marker-owned records. Returns {vid: netbox_id} for interface linkage.
+    One list fetch per group (no per-VLAN GETs); bulk update."""
     api = netbox.get_netbox()
+    by_vid = {v.vid: v for v in api.ipam.vlans.filter(group_id=group_id)}
     vid_map = {}
+    update_batch = []
     for v in vlans:
         vid = v["vid"]
         payload = {"vid": vid, "name": v.get("name") or f"VLAN{vid:04d}",
                    "status": "active",
                    "description": f"{VLAN_MARKER} last seen {hostname}"}
-        existing = api.ipam.vlans.get(vid=vid, group_id=group_id)
+        existing = by_vid.get(vid)
         if existing:
             if (existing.description or "").startswith(VLAN_MARKER):
-                api.ipam.vlans.update([{"id": existing.id, **payload}])
+                update_batch.append({"id": existing.id, **payload})
             vid_map[vid] = existing.id
             continue
         try:
-            vid_map[vid] = api.ipam.vlans.create({**payload, "group": group_id}).id
+            rec = api.ipam.vlans.create({**payload, "group": group_id})
+            vid_map[vid] = rec.id
+            by_vid[vid] = rec
         except Exception as exc:
             log("WARN", f"  vlan {vid}: create failed on {hostname}: {exc}")
+    if update_batch:
+        api.ipam.vlans.update(update_batch)
     return vid_map
 
 def sync_interface_vlans(dev_id, ports, trunks, vid_map):
@@ -516,6 +531,7 @@ def sync_interface_vlans(dev_id, ports, trunks, vid_map):
     by_name = {str(i.name): i
                for i in api.dcim.interfaces.filter(device_id=dev_id)}
     trunk_by_port = {t["port"]: t for t in trunks}
+    updates = []
     for p in ports:
         iface = by_name.get(p["port"])
         if not iface: continue
@@ -540,7 +556,9 @@ def sync_interface_vlans(dev_id, ports, trunks, vid_map):
             payload = {"id": iface.id, "mode": "access",
                        "untagged_vlan": vid_map[int(vlan_col)]}
         if payload:
-            api.dcim.interfaces.update([payload])
+            updates.append(payload)
+    if updates:
+        api.dcim.interfaces.update(updates)   # one bulk PATCH for all ports
 
 def sweep_stale_vlans(group_id, seen_vids):
     """Delete marker-owned VLANs in the group that no processed switch

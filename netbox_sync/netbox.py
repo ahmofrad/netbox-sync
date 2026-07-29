@@ -436,6 +436,8 @@ def sync_inventory(dev_id, new_inventory):
     # What remains are live single items whose serial is still reported
     live = {s: items[0] for s, items in by_serial.items() if items}
 
+    # Bulk write: one HTTP call per operation regardless of item count
+    updates, creates = [], []
     for serial, item in new_inventory.items():
         mfr_id = get_or_create_manufacturer(item.get("manufacturer"))
         payload = {
@@ -448,6 +450,10 @@ def sync_inventory(dev_id, new_inventory):
             **({"role": item["role"]} if item.get("role") else {}),
         }
         if serial in live:
-            api.dcim.inventory_items.update([{"id": live[serial].id, **payload}])
+            updates.append({"id": live[serial].id, **payload})
         else:
-            api.dcim.inventory_items.create(payload)
+            creates.append(payload)
+    if updates:
+        api.dcim.inventory_items.update(updates)
+    if creates:
+        api.dcim.inventory_items.create(creates)

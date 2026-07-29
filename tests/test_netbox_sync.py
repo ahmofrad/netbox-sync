@@ -45,6 +45,8 @@ class FakeEndpoint:
         self.created = []
         self.updated = []
         self.deleted_ids = []
+        self.create_calls = 0   # invocation counts — proves bulk usage
+        self.update_calls = 0
         self._next_id = 9000
 
     def _alive(self):
@@ -59,13 +61,19 @@ class FakeEndpoint:
         return matches[0] if matches else None
 
     def create(self, payload):
-        self.created.append(payload)
-        rec = FakeRecord(self._next_id, endpoint=self, **payload)
-        self._next_id += 1
-        self.items.append(rec)
-        return rec
+        self.create_calls += 1
+        payloads = payload if isinstance(payload, list) else [payload]
+        self.created.extend(payloads)
+        records = []
+        for p in payloads:
+            rec = FakeRecord(self._next_id, endpoint=self, **p)
+            self._next_id += 1
+            self.items.append(rec)
+            records.append(rec)
+        return records if isinstance(payload, list) else records[0]
 
     def update(self, payload_list):
+        self.update_calls += 1
         self.updated.extend(payload_list)
         return True
 
@@ -318,6 +326,42 @@ def test_sync_cisco_interfaces_update_create_delete(monkeypatch):
     assert ifaces_ep.created[0]["type"] == "other"
     assert ifaces_ep.created[0]["enabled"] is False
     assert ifaces_ep.deleted_ids == [2]
+    # bulk: one HTTP call per operation, not one per interface
+    assert ifaces_ep.update_calls == 1
+    assert ifaces_ep.create_calls == 1
+
+
+def test_interface_and_vlan_syncs_are_bulk(monkeypatch):
+    """Performance guard: N items must sync in O(1) HTTP calls, not O(N)."""
+    import netbox_sync.collectors.cisco as cisco
+    ifaces_ep = FakeEndpoint([
+        FakeRecord(i, name=f"Gi1/0/{i}", device_id=7) for i in range(1, 8)
+    ])
+    api = SimpleNamespace(
+        dcim=SimpleNamespace(interfaces=ifaces_ep),
+        ipam=SimpleNamespace(vlans=FakeEndpoint()))
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    ports = [{"port": f"Gi1/0/{i}", "name": "", "status": "connected",
+              "vlan": "10", "duplex": "full", "speed": "1000",
+              "type": "10/100/1000BaseTX"} for i in range(1, 8)]
+    cisco.sync_cisco_interfaces(7, ports)
+    assert ifaces_ep.update_calls == 1          # 7 interfaces, 1 bulk PATCH
+
+    cisco.sync_interface_vlans(7, ports, [], {10: 110})
+    assert ifaces_ep.update_calls == 2          # +1 more bulk PATCH for all VLANs
+
+
+def test_inventory_sync_is_bulk(monkeypatch):
+    ep = FakeEndpoint([FakeRecord(1, serial="A", device_id=7)])
+    monkeypatch.setattr(nbx, "get_netbox",
+                        lambda: _fake_api(inventory_items=ep))
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda name: 5)
+
+    nbx.sync_inventory(7, {"A": _item("A"), "B": _item("B"), "C": _item("C")})
+    assert ep.update_calls == 1                 # 1 update (A) in one call
+    assert ep.create_calls == 1                 # 2 creates (B, C) in one call
+    assert len(ep.created) == 2
 
 
 # ── Cisco CDP cable sync ─────────────────────────────────────────────────────
