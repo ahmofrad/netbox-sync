@@ -13,7 +13,7 @@ from netbox_sync.config import (NETBOX_URL, NETBOX_TOKEN, _env_bool,
                                 DEFAULT_MFR, OFFLINE_THRESHOLD, log)
 from netbox_sync.models import (SERVER_MODEL_MAP, STORAGE_MODEL_MAP,
                                 SWITCH_MODEL_MAP, CISCO_MODEL_MAP)
-from netbox_sync.utils import (slugify, normalize_model, resolve_site_from_name,
+from netbox_sync.utils import (slugify, normalize_model, resolve_site,
                                _invalid_serial)
 
 nb = None
@@ -150,7 +150,7 @@ def ensure_server_device(probe):
     serial = (probe.get("serial") or "").strip()
     mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "HPE")
     role_id = get_or_create_role(SERVER_ROLE)
-    site_name = resolve_site_from_name(probe.get("hostname") or "")
+    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
     site_id = get_or_create_site(site_name)
     dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, SERVER_MODEL_MAP)
     name = _device_name(probe)
@@ -183,7 +183,7 @@ def ensure_storage_device(probe):
     serial = (probe.get("serial") or "").strip()
     mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or DEFAULT_MFR)
     role_id = get_or_create_role(STORAGE_ROLE, "2196f3")
-    site_name = resolve_site_from_name(probe.get("hostname") or "")
+    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
     site_id = get_or_create_site(site_name)
     dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, STORAGE_MODEL_MAP)
     name = _device_name(probe, prefix="storage")
@@ -218,7 +218,7 @@ def ensure_san_switch_device(probe):
     serial = (probe.get("serial") or "").strip()
     mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Brocade")
     role_id = get_or_create_role(SWITCH_ROLE, "f44336")
-    site_name = resolve_site_from_name(probe.get("hostname") or "")
+    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
     site_id = get_or_create_site(site_name)
     dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, SWITCH_MODEL_MAP)
     name = _device_name(probe, prefix="san")
@@ -252,7 +252,7 @@ def ensure_cisco_device(probe):
     serial = (probe.get("serial") or "").strip()
     mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Cisco")
     role_id = get_or_create_role(CISCO_ROLE, "009688")
-    site_name = resolve_site_from_name(probe.get("hostname") or "")
+    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
     site_id = get_or_create_site(site_name)
     dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, CISCO_MODEL_MAP)
     name = _device_name(probe, prefix="cisco")

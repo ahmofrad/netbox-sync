@@ -65,3 +65,41 @@ def test_add_inventory_item_skips_invalid_and_duplicate_serials():
     assert list(inv.keys()) == ["S1"]
     assert inv["S1"]["name"] == "CPU"
     assert inv["S1"]["role"] == 3
+
+
+# ── site resolution ──────────────────────────────────────────────────────────
+
+def _site_map(monkeypatch, entries):
+    import ipaddress
+    monkeypatch.setattr(
+        mod, "SITE_IP_MAP",
+        [(ipaddress.ip_network(c), s) for c, s in entries])
+
+
+def test_resolve_site_ip_match_beats_keyword(monkeypatch):
+    _site_map(monkeypatch, [("172.31.0.0/16", "HQ")])
+    monkeypatch.setattr(mod, "SITE_KEYWORD_MAP", [("sw", "KeywordSite")])
+    assert mod.resolve_site("sw-01", "172.31.5.10") == "HQ"
+
+
+def test_resolve_site_longest_prefix_wins(monkeypatch):
+    # list arrives pre-sorted from config (most specific first)
+    _site_map(monkeypatch, [("172.31.1.0/24", "Branch"),
+                            ("172.31.0.0/16", "HQ")])
+    assert mod.resolve_site("x", "172.31.1.55") == "Branch"
+    assert mod.resolve_site("x", "172.31.9.55") == "HQ"
+
+
+def test_resolve_site_falls_back_to_keyword_then_unknown(monkeypatch):
+    _site_map(monkeypatch, [("10.0.0.0/8", "Other")])
+    monkeypatch.setattr(mod, "SITE_KEYWORD_MAP", [("dc1", "Datacenter1")])
+    monkeypatch.setattr(mod, "SITE_UNKNOWN", "Default")
+    assert mod.resolve_site("srv-dc1-01", "172.31.1.55") == "Datacenter1"
+    assert mod.resolve_site("srv-01", "172.31.1.55") == "Default"
+
+
+def test_resolve_site_tolerates_bad_ip(monkeypatch):
+    _site_map(monkeypatch, [("172.31.0.0/16", "HQ")])
+    monkeypatch.setattr(mod, "SITE_UNKNOWN", "Default")
+    assert mod.resolve_site("x", "not-an-ip") == "Default"
+    assert mod.resolve_site("x", None) == "Default"

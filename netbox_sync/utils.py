@@ -5,7 +5,7 @@ import re
 import socket
 import time
 
-from netbox_sync.config import SITE_KEYWORD_MAP, SITE_UNKNOWN
+from netbox_sync.config import SITE_KEYWORD_MAP, SITE_UNKNOWN, SITE_IP_MAP
 
 # ── generic helpers ──────────────────────────────────────────────────────────
 def slugify(s):
@@ -15,8 +15,22 @@ def normalize_model(model, model_map):
     if not model: return None
     return model_map.get(model.strip().lower(), model.strip())
 
-def resolve_site_from_name(server_name):
-    name_lower = (server_name or "").lower()
+def resolve_site(hostname, ip):
+    """Site resolution: IP-range map first (longest-prefix-match — the list
+    is pre-sorted most-specific-first), then hostname keyword, then
+    SITE_UNKNOWN."""
+    try:
+        addr = ipaddress.ip_address(str(ip).strip())
+    except (ValueError, AttributeError):
+        addr = None
+    if addr is not None:
+        for net, site in SITE_IP_MAP:
+            try:
+                if addr in net:
+                    return site
+            except TypeError:
+                continue   # mixed IPv4/IPv6 entry — not a match
+    name_lower = (hostname or "").lower()
     for keyword, site in SITE_KEYWORD_MAP:
         if keyword in name_lower:
             return site
