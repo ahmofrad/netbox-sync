@@ -5,10 +5,11 @@ import time
 
 import paramiko
 
+from netbox_sync import netbox
 from netbox_sync.config import (SWITCH_USER, SWITCH_PASS, SWITCH_PORT,
                                 _env_bool, log)
 from netbox_sync.models import SWITCH_MODEL_MAP
-from netbox_sync.netbox import get_netbox, get_or_create_inventory_role
+from netbox_sync.netbox import get_or_create_inventory_role
 from netbox_sync.utils import (normalize_model, _invalid_serial,
                                _make_add_item, is_port_open)
 
@@ -422,7 +423,7 @@ def _fc_interface_type(speed):
 def sync_san_interfaces(dev_id, ports, nameserver):
     """Create/update NetBox interfaces for each FC port on the switch.
     Connected device WWN (from nameserver) is stored in interface description."""
-    api = get_netbox()
+    api = netbox.get_netbox()
     existing = {}
     for iface in list(api.dcim.interfaces.filter(device_id=dev_id)):
         existing[str(iface.name)] = iface
@@ -467,5 +468,7 @@ def sync_san_interfaces(dev_id, ports, nameserver):
     # Remove interfaces that no longer exist on the switch
     for name, iface in existing.items():
         if name not in seen:
+            if getattr(iface, "mgmt_only", False):
+                continue   # never delete management interfaces
             try: iface.delete()
             except Exception: pass

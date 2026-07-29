@@ -147,14 +147,28 @@ def _sanitize_dns_name(hostname):
     h = re.sub(r'[^a-z0-9.-]', '', (hostname or "").lower())[:63]
     return h or None
 
+MGMT_IFACE_NAME = "mgmt"
+
+def _get_or_create_mgmt_iface(api, dev_id):
+    iface = api.dcim.interfaces.get(device_id=dev_id, name=MGMT_IFACE_NAME)
+    if iface:
+        return iface
+    return api.dcim.interfaces.create({
+        "device": dev_id, "name": MGMT_IFACE_NAME, "type": "virtual",
+        "enabled": True, "mgmt_only": True,
+        "description": "netbox-sync: management interface",
+    })
+
 def ensure_primary_ip(dev_id, ip, hostname=None):
-    """Create/update the management IP in IPAM and set it as the device's
-    primary IPv4. Existing IPAM records are reused unchanged (any mask);
-    new ones get the scan-range-derived prefix length."""
+    """Create/update the management IP in IPAM, assign it to the device's
+    mgmt interface, and set it as primary IPv4. NetBox REJECTS primary_ip4
+    unless the IP is assigned to an interface on the same device — hence
+    the synthetic mgmt interface. Existing IPAM records are reused unchanged
+    (any mask); an IP already assigned to ANOTHER device is left alone."""
     api = get_netbox()
     existing = list(api.ipam.ip_addresses.filter(address=str(ip)))
     if existing:
-        ip_id = existing[0].id
+        ip_rec = existing[0]
     else:
         payload = {
             "address": f"{ip}/{_mgmt_prefixlen(ip)}",
@@ -164,7 +178,30 @@ def ensure_primary_ip(dev_id, ip, hostname=None):
         dns = _sanitize_dns_name(hostname)
         if dns:
             payload["dns_name"] = dns
-        ip_id = api.ipam.ip_addresses.create(payload).id
+        ip_rec = api.ipam.ip_addresses.create(payload)
+    ip_id = ip_rec.id
+
+    assigned_iface = getattr(ip_rec, "assigned_object_id", None)
+    if getattr(ip_rec, "assigned_object_type", None) == "dcim.interface" \
+            and assigned_iface:
+        iface = api.dcim.interfaces.get(id=assigned_iface)
+        iface_dev = None
+        if iface is not None:
+            d = getattr(iface, "device", None)
+            iface_dev = getattr(d, "id", None) if d is not None \
+                        else getattr(iface, "device_id", None)
+        if iface_dev != dev_id:
+            log("WARN", f"  primary IPv4 {ip} is assigned to another device — "
+                        f"leaving device id={dev_id} unchanged")
+            return ip_id
+    else:
+        iface = _get_or_create_mgmt_iface(api, dev_id)
+        api.ipam.ip_addresses.update([{
+            "id": ip_id,
+            "assigned_object_type": "dcim.interface",
+            "assigned_object_id": iface.id,
+        }])
+
     dev = api.dcim.devices.get(id=dev_id)
     current = getattr(getattr(dev, "primary_ip4", None), "id", None) if dev else None
     if current != ip_id:

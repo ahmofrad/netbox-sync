@@ -348,6 +348,8 @@ def sync_cisco_interfaces(dev_id, ports):
 
     for name, iface in existing.items():
         if name not in seen:
+            if getattr(iface, "mgmt_only", False):
+                continue   # never delete management interfaces
             try: iface.delete()
             except Exception: pass
 

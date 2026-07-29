@@ -594,15 +594,19 @@ def test_mgmt_prefixlen_from_ranges(monkeypatch):
     assert utils._mgmt_prefixlen("junk") == 32        # invalid tolerated
 
 
-def _ipam_api(ip_items, device_record):
+def _ipam_api(ip_items, device_record, iface_items=None):
     # api.ipam is a separate pynetbox app from api.dcim — model both
     return SimpleNamespace(
         dcim=SimpleNamespace(
-            devices=FakeEndpoint([device_record] if device_record else [])),
+            devices=FakeEndpoint([device_record] if device_record else []),
+            interfaces=FakeEndpoint(iface_items or [])),
         ipam=SimpleNamespace(ip_addresses=FakeEndpoint(ip_items)))
 
 
-def test_primary_ip_created_with_range_mask(monkeypatch):
+def test_primary_ip_created_assigned_and_set(monkeypatch):
+    """Full flow: IPAM record created with range mask, a mgmt_only interface
+    is created, the IP is ASSIGNED to it (NetBox requires assignment before
+    primary_ip4 is accepted), then primary_ip4 is set."""
     monkeypatch.setattr(utils, "BMC_RANGES", [])
     monkeypatch.setattr(utils, "STORAGE_RANGES", [])
     monkeypatch.setattr(utils, "SAN_RANGES", [])
@@ -617,29 +621,91 @@ def test_primary_ip_created_with_range_mask(monkeypatch):
     assert created["address"] == "172.31.1.103/24"
     assert created["dns_name"] == "f10-sw-w-02"
     assert created["description"] == "netbox-sync: mgmt"
-    assert created["status"] == "active"
+
+    # mgmt interface created on the device
+    assert len(api.dcim.interfaces.created) == 1
+    iface = api.dcim.interfaces.created[0]
+    assert iface["device"] == 7
+    assert iface["type"] == "virtual"
+    assert iface["mgmt_only"] is True
+
+    # IP assigned to that interface, then device primary set
+    iface_id = api.dcim.interfaces.items[-1].id
+    assert {"id": ip_id, "assigned_object_type": "dcim.interface",
+            "assigned_object_id": iface_id} in api.ipam.ip_addresses.updated
     assert {u["id"] for u in api.dcim.devices.updated} == {7}
     assert api.dcim.devices.updated[0]["primary_ip4"] == ip_id
 
 
-def test_primary_ip_reuses_existing(monkeypatch):
+def test_primary_ip_reuses_existing_and_mgmt_iface(monkeypatch):
     dev = FakeRecord(7, name="SW1", primary_ip4=None)
-    existing_ip = FakeRecord(50, address="172.31.1.103")
-    api = _ipam_api([existing_ip], dev)
+    existing_ip = FakeRecord(50, address="172.31.1.103",
+                             assigned_object_type=None, assigned_object_id=None)
+    mgmt_iface = FakeRecord(60, name="mgmt", device_id=7, mgmt_only=True)
+    api = _ipam_api([existing_ip], dev, [mgmt_iface])
     monkeypatch.setattr(nbx, "get_netbox", lambda: api)
 
     ip_id = nbx.ensure_primary_ip(7, "172.31.1.103", "SW1")
 
     assert ip_id == 50
-    assert api.ipam.ip_addresses.created == []   # reused, no new record
+    assert api.ipam.ip_addresses.created == []      # reused IP record
+    assert api.dcim.interfaces.created == []        # reused mgmt interface
+    assert api.ipam.ip_addresses.updated[0]["assigned_object_id"] == 60
+
+
+def test_primary_ip_skipped_when_assigned_to_other_device(monkeypatch):
+    dev = FakeRecord(7, name="SW1", primary_ip4=None)
+    foreign_iface = FakeRecord(99, name="Gi0/1", device_id=42)
+    taken_ip = FakeRecord(50, address="172.31.1.103",
+                          assigned_object_type="dcim.interface",
+                          assigned_object_id=99)
+    api = _ipam_api([taken_ip], dev, [])
+    api.dcim.interfaces.items.append(foreign_iface)
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    nbx.ensure_primary_ip(7, "172.31.1.103", "SW1")
+
+    # never hijack an IP assigned to another device
+    assert api.dcim.devices.updated == []
+    assert api.ipam.ip_addresses.updated == []
 
 
 def test_primary_ip_no_write_when_already_correct(monkeypatch):
     dev = FakeRecord(7, name="SW1", primary_ip4=FakeRecord(50))
-    existing_ip = FakeRecord(50, address="172.31.1.103")
-    api = _ipam_api([existing_ip], dev)
+    own_iface = FakeRecord(60, name="mgmt", device_id=7, mgmt_only=True)
+    own_ip = FakeRecord(50, address="172.31.1.103",
+                        assigned_object_type="dcim.interface",
+                        assigned_object_id=60)
+    api = _ipam_api([own_ip], dev, [own_iface])
     monkeypatch.setattr(nbx, "get_netbox", lambda: api)
 
     nbx.ensure_primary_ip(7, "172.31.1.103", "SW1")
 
     assert api.dcim.devices.updated == []
+    assert api.ipam.ip_addresses.updated == []
+
+
+def test_interface_syncs_preserve_mgmt_interfaces(monkeypatch):
+    """The synthetic mgmt interface must survive the stale-interface cleanup
+    in both Cisco and SAN interface syncs."""
+    import netbox_sync.collectors.brocade as brocade_mod
+    import netbox_sync.collectors.cisco as cisco_mod
+    for mod, sync_fn, port in (
+            (cisco_mod, cisco_mod.sync_cisco_interfaces,
+             {"port": "Gi1/0/1", "name": "", "status": "connected",
+              "vlan": "1", "duplex": "full", "speed": "1000", "type": "10/100/1000BaseTX"}),
+            (brocade_mod, brocade_mod.sync_san_interfaces,
+             {"index": 0, "port": 0, "address": "010000", "media": "id",
+              "speed": "N16", "state": "Online", "proto": "FC", "comment": ""})):
+        ifaces_ep = FakeEndpoint([
+            FakeRecord(1, name="mgmt", device_id=7, mgmt_only=True),
+            FakeRecord(2, name="stale-iface", device_id=7, mgmt_only=False),
+        ])
+        monkeypatch.setattr(nbx, "get_netbox",
+                            lambda: _fake_api(interfaces=ifaces_ep))
+        if sync_fn is cisco_mod.sync_cisco_interfaces:
+            sync_fn(7, [port])
+        else:
+            sync_fn(7, [port], [])
+        assert 1 not in ifaces_ep.deleted_ids   # mgmt preserved
+        assert 2 in ifaces_ep.deleted_ids       # stale removed
