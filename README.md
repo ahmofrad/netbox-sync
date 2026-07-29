@@ -151,7 +151,8 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `STORAGE_AUTH_HASH` | ❌ | `sha256` | Hash algorithm for MSA credential hash (`sha256` or `md5`). Falls back automatically if one fails. |
 | `BMC_RANGES` | ❌* | example CIDRs | Comma-separated CIDR ranges to scan for servers. |
 | `STORAGE_RANGES` | ❌* | example CIDRs | Comma-separated CIDR ranges to scan for storage. IPs already found as servers are skipped. |
-| `SITE_KEYWORD_MAP` | ❌ | — | Comma-separated `keyword:SiteName` pairs. A device whose hostname contains the keyword (case-insensitive) is assigned that site. e.g. `dc1:Datacenter1,hq:HQ`. |
+| `SITE_KEYWORD_MAP` | ❌ | — | Comma-separated `keyword:SiteName` pairs — used as fallback when no `SITE_IP_MAP` range matches. A device whose hostname contains the keyword (case-insensitive) is assigned that site. e.g. `dc1:Datacenter1,hq:HQ`. |
+| `SITE_IP_MAP` | ❌ | — | Comma-separated `cidr:SiteName` pairs. A device whose IP falls inside the CIDR is assigned that site; **longest prefix wins**. Checked **before** `SITE_KEYWORD_MAP`. e.g. `172.31.0.0/16:HQ,172.31.1.0/24:Branch`. |
 | `SCAN_WORKERS` | ❌ | `20` | Thread-pool size for parallel IP scanning. |
 | `OFFLINE_THRESHOLD` | ❌ | `2` | Consecutive scans a device must miss before it is marked offline (anti-flapping). |
 | `LOG_LEVEL` | ❌ | `INFO` | Log verbosity: `DEBUG`, `INFO`, `WARN`, `ERROR`. |
@@ -509,7 +510,8 @@ pip install -r requirements.txt
 | `STORAGE_AUTH_HASH` | ❌ | `sha256` | الگوریتم hash برای اعتبار MSA (`sha256` یا `md5`). در صورت شکست، گزینه جایگزین به‌طور خودکار امتحان می‌شود. |
 | `BMC_RANGES` | ❌* | CIDR نمونه | بازه‌های CIDR جدا‌شده با کاما برای اسکن سرورها. |
 | `STORAGE_RANGES` | ❌* | CIDR نمونه | بازه‌های CIDR جدا‌شده با کاما برای اسکن ذخیره‌سازی. IPهایی که قبلاً به‌عنوان سرور یافت شده‌اند نادیده گرفته می‌شوند. |
-| `SITE_KEYWORD_MAP` | ❌ | — | جفت‌های `keyword:SiteName` جدا‌شده با کاما. دستگاهی که hostname آن شامل کلیدواژه (بدون حساسیت به حروف بزرگ/کوچک) باشد، به آن سایت اختصاص می‌یابد. مثال: `dc1:Datacenter1,hq:HQ`. |
+| `SITE_KEYWORD_MAP` | ❌ | — | جفت‌های `keyword:SiteName` جداشده با کاما — وقتی استفاده می‌شود که هیچ بازه‌ای در `SITE_IP_MAP` مطابقت نداشته باشد. دستگاهی که hostname آن شامل کلیدواژه (بدون حساسیت به حروف بزرگ/کوچک) باشد، به آن سایت اختصاص می‌یابد. مثال: `dc1:Datacenter1,hq:HQ`. |
+| `SITE_IP_MAP` | ❌ | — | جفت‌های `cidr:SiteName` جداشده با کاما. دستگاهی که IP آن داخل CIDR باشد به آن سایت اختصاص می‌یابد؛ **طولانی‌ترین پیشوند برنده است**. **قبل از** `SITE_KEYWORD_MAP` بررسی می‌شود. مثال: `172.31.0.0/16:HQ,172.31.1.0/24:Branch`. |
 | `SCAN_WORKERS` | ❌ | `20` | اندازه thread pool برای اسکن موازی IP. |
 | `OFFLINE_THRESHOLD` | ❌ | `2` | تعداد اسکن‌های متوالی که دستگاه باید غایب باشد تا آفلاین علامت بخورد (ضد نوسان). |
 | `LOG_LEVEL` | ❌ | `INFO` | میزان جزئیات لاگ: `DEBUG`، `INFO`، `WARN`، `ERROR`. |
