@@ -46,8 +46,9 @@ A Python automation tool that automatically discovers **HPE ProLiant servers** (
 2. **Creates or updates** a NetBox **device** for each discovered server/storage/SAN-switch unit, including manufacturer, device type, role, site, serial, and custom fields (BMC IP, firmware, CPU/RAM/disk summaries, health…).
 3. **Collects detailed hardware inventory** from each device (CPUs, RAM modules, disks, PSUs, NICs, HBAs, controllers, batteries, FRUs, SFP transceivers, FC ports) and syncs each component as a NetBox **inventory item** keyed by serial number.
 4. **Removes stale inventory items** that are no longer reported by the device.
-5. **Marks devices offline** in NetBox when they stop responding to the scan.
-6. **Runs automatically** on a schedule (default: 00:00 and 12:00 daily) plus an immediate run on startup.
+5. **Records each device's management IP** in IPAM (mask derived from the scan range, `/32` fallback; marker description `netbox-sync: mgmt`) and sets it as the device's **primary IPv4** in NetBox.
+6. **Marks devices offline** in NetBox when they stop responding to the scan.
+7. **Runs automatically** on a schedule (default: 00:00 and 12:00 daily) plus an immediate run on startup.
 
 ## How it works (architecture)
 
@@ -411,8 +412,9 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 2. برای هر سرور یا ذخیره‌سازی کشف‌شده، یک **دستگاه (device)** در NetBox **ایجاد یا به‌روزرسانی** می‌کند؛ اطلاعاتی نظیر سازنده، نوع دستگاه، نقش، سایت، شماره سریال و فیلدهای سفارشی (IP بورد BMC، نسخه فریم‌ور، خلاصه CPU/RAM/دیسک، وضعیت سلامت و …).
 3. **انventory دقیق سخت‌افزاری** هر دستگاه (CPU، ماژول‌های RAM، دیسک‌ها، پاورها، کارت‌های شبکه، HBA، کنترلرها، باتری‌ها و FRU) را جمع‌آوری می‌کند و هر قطعه را به‌عنوان یک **inventory item** با کلید شماره سریال در NetBox همگام می‌سازد.
 4. **آیتم‌های قدیمی inventory** که دیگر توسط دستگاه گزارش نمی‌شوند را حذف می‌کند.
-5. **دستگاه‌هایی که دیگر پاسخگو نیستند** را در NetBox به‌صورت آفلاین (offline) علامت‌گذاری می‌کند.
-6. **به‌صورت خودکار و بر اساس زمان‌بندی** اجرا می‌شود (پیش‌فرض: هر روز ساعت ۰۰:۰۰ و ۱۲:۰۰)، به‌علاوه یک اجرای بلافاصله پس از راه‌اندازی.
+5. **IP مدیریتی هر دستگاه** در IPAM ثبت می‌شود (ماسک از روی بازه اسکن، با پیش‌فرض `/32`؛ توضیح علامت‌دار `netbox-sync: mgmt`) و به‌عنوان **primary IPv4** دستگاه در NetBox تنظیم می‌گردد.
+6. **دستگاه‌هایی که دیگر پاسخگو نیستند** را در NetBox به‌صورت آفلاین (offline) علامت‌گذاری می‌کند.
+7. **به‌صورت خودکار و بر اساس زمان‌بندی** اجرا می‌شود (پیش‌فرض: هر روز ساعت ۰۰:۰۰ و ۱۲:۰۰)، به‌علاوه یک اجرای بلافاصله پس از راه‌اندازی.
 
 ## نحوه کارکرد (معماری)
 

@@ -10,7 +10,7 @@ from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
                                 CISCO_RANGES)
 from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_storage_device, ensure_san_switch_device,
-                                ensure_cisco_device,
+                                ensure_cisco_device, ensure_primary_ip,
                                 mark_server_offline, mark_storage_offline,
                                 mark_san_offline, mark_cisco_offline,
                                 _check_offline,
@@ -37,6 +37,11 @@ def run_sync():
             dev_id = ensure_server_device(probe)
         except Exception as e:
             log("ERROR", f"  ensure_server_device failed for {ip}: {e}"); continue
+
+        try:
+            ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"))
+        except Exception as e:
+            log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
 
         try:
             data = rf_collect_inventory(host)
@@ -88,6 +93,11 @@ def run_sync():
             log("ERROR", f"  ensure_storage_device failed for {ip}: {e}"); continue
 
         try:
+            ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"))
+        except Exception as e:
+            log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
+
+        try:
             data = storage_collect_inventory(ip)
         except KeyboardInterrupt: raise
         except Exception as e:
@@ -131,6 +141,11 @@ def run_sync():
             dev_id = ensure_san_switch_device(probe)
         except Exception as e:
             log("ERROR", f"  ensure_san_switch_device failed for {ip}: {e}"); continue
+
+        try:
+            ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"))
+        except Exception as e:
+            log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
 
         try:
             data = san_collect_inventory(ip)
@@ -183,6 +198,11 @@ def run_sync():
             dev_id = ensure_cisco_device(probe)
         except Exception as e:
             log("ERROR", f"  ensure_cisco_device failed for {ip}: {e}"); continue
+
+        try:
+            ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"))
+        except Exception as e:
+            log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
 
         try:
             data = cisco_collect_inventory(ip)
