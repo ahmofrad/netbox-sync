@@ -463,9 +463,33 @@ def sync_cisco_interfaces(dev_id, ports):
 # updated/deleted by the sync. Manual VLANs are never modified.
 VLAN_MARKER = "netbox-sync:"
 
-def sync_cisco_vlans(site_id, hostname, vlans):
-    """Get-or-create each VLAN in IPAM for the site; refresh marker-owned
-    records. Returns {vid: netbox_id} for interface linkage."""
+# Group identity lives in the description ("netbox-sync: vtp=<key>") so BD
+# numbering stays stable across runs; the display name is just BD1, BD2...
+VLAN_GROUP_MARKER = "netbox-sync: vtp="
+
+def ensure_vlan_group(site_id, key):
+    """Find or create the marker-owned VLAN group for (site, key).
+    New groups are named BD<n> = max BD number among marked groups + 1."""
+    api = netbox.get_netbox()
+    want_desc = f"{VLAN_GROUP_MARKER}{key}"
+    max_bd = 0
+    for g in api.ipam.vlan_groups.filter(scope_type="dcim.site", scope_id=site_id):
+        desc = g.description or ""
+        if not desc.startswith(VLAN_GROUP_MARKER):
+            continue
+        if desc == want_desc:
+            return g.id
+        m = re.match(r'^BD(\d+)$', g.name or "")
+        if m:
+            max_bd = max(max_bd, int(m.group(1)))
+    n = max_bd + 1
+    return api.ipam.vlan_groups.create({
+        "name": f"BD{n}", "slug": f"bd{n}", "description": want_desc,
+        "scope_type": "dcim.site", "scope_id": site_id}).id
+
+def sync_cisco_vlans(group_id, hostname, vlans):
+    """Get-or-create each VLAN in IPAM for the VLAN group; refresh
+    marker-owned records. Returns {vid: netbox_id} for interface linkage."""
     api = netbox.get_netbox()
     vid_map = {}
     for v in vlans:
@@ -473,14 +497,14 @@ def sync_cisco_vlans(site_id, hostname, vlans):
         payload = {"vid": vid, "name": v.get("name") or f"VLAN{vid:04d}",
                    "status": "active",
                    "description": f"{VLAN_MARKER} last seen {hostname}"}
-        existing = api.ipam.vlans.get(vid=vid, site_id=site_id)
+        existing = api.ipam.vlans.get(vid=vid, group_id=group_id)
         if existing:
             if (existing.description or "").startswith(VLAN_MARKER):
                 api.ipam.vlans.update([{"id": existing.id, **payload}])
             vid_map[vid] = existing.id
             continue
         try:
-            vid_map[vid] = api.ipam.vlans.create({**payload, "site": site_id}).id
+            vid_map[vid] = api.ipam.vlans.create({**payload, "group": group_id}).id
         except Exception as exc:
             log("WARN", f"  vlan {vid}: create failed on {hostname}: {exc}")
     return vid_map
@@ -518,19 +542,35 @@ def sync_interface_vlans(dev_id, ports, trunks, vid_map):
         if payload:
             api.dcim.interfaces.update([payload])
 
-def sweep_stale_vlans(site_id, seen_vids):
-    """Delete marker-owned VLANs at the site that no processed switch
+def sweep_stale_vlans(group_id, seen_vids):
+    """Delete marker-owned VLANs in the group that no processed switch
     reported this run. Manual (unmarked) VLANs are never touched."""
     api = netbox.get_netbox()
-    for vlan in list(api.ipam.vlans.filter(site_id=site_id)):
+    for vlan in list(api.ipam.vlans.filter(group_id=group_id)):
         if not (vlan.description or "").startswith(VLAN_MARKER):
             continue
         if vlan.vid not in seen_vids:
             try:
                 vlan.delete()
-                log("INFO", f"  vlan {vlan.vid} (site {site_id}) deleted — no longer seen")
+                log("INFO", f"  vlan {vlan.vid} (group {group_id}) deleted — no longer seen")
             except Exception as exc:
                 log("WARN", f"  could not delete stale vlan {vlan.vid}: {exc}")
+
+def sweep_legacy_site_vlans(site_id):
+    """Migration cleanup: delete marker-owned SITE-scoped (group-less)
+    VLANs — superseded by VLAN groups. Only called for sites with
+    processed switches this run."""
+    api = netbox.get_netbox()
+    for vlan in list(api.ipam.vlans.filter(site_id=site_id)):
+        if not (vlan.description or "").startswith(VLAN_MARKER):
+            continue
+        if getattr(vlan, "group", None):
+            continue   # group-scoped VLANs are handled by the group sweep
+        try:
+            vlan.delete()
+            log("INFO", f"  legacy site vlan {vlan.vid} (site {site_id}) deleted — moved to VLAN group")
+        except Exception as exc:
+            log("WARN", f"  could not delete legacy vlan {vlan.vid}: {exc}")
 
 # ── CDP/LLDP cable reconciliation ────────────────────────────────────────────
 

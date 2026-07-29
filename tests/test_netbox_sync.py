@@ -687,20 +687,21 @@ def test_primary_ip_no_write_when_already_correct(monkeypatch):
 
 # ── Cisco VLAN sync ──────────────────────────────────────────────────────────
 
-def _vlan_api(vlan_items):
+def _vlan_api(vlan_items, group_items=None):
     return SimpleNamespace(
         dcim=SimpleNamespace(interfaces=FakeEndpoint()),
-        ipam=SimpleNamespace(vlans=FakeEndpoint(vlan_items)))
+        ipam=SimpleNamespace(vlans=FakeEndpoint(vlan_items),
+                             vlan_groups=FakeEndpoint(group_items or [])))
 
 
 def test_sync_cisco_vlans_create_update_and_manual_reuse(monkeypatch):
     import netbox_sync.collectors.cisco as cisco
-    marked = FakeRecord(50, vid=10, site_id=3, description="netbox-sync: last seen OLD")
-    manual = FakeRecord(51, vid=20, site_id=3, description="manual vlan")
+    marked = FakeRecord(50, vid=10, group_id=8, description="netbox-sync: last seen OLD")
+    manual = FakeRecord(51, vid=20, group_id=8, description="manual vlan")
     api = _vlan_api([marked, manual])
     monkeypatch.setattr(nbx, "get_netbox", lambda: api)
 
-    vid_map = cisco.sync_cisco_vlans(3, "SW1", [
+    vid_map = cisco.sync_cisco_vlans(8, "SW1", [
         {"vid": 10, "name": "USERS", "status": "active"},
         {"vid": 20, "name": "SERVERS", "status": "active"},
         {"vid": 30, "name": "GUEST", "status": "active"},
@@ -708,11 +709,11 @@ def test_sync_cisco_vlans_create_update_and_manual_reuse(monkeypatch):
 
     assert vid_map[10] == 50
     assert vid_map[20] == 51
-    # marked existing -> updated; manual -> untouched; new -> created with site
+    # marked existing -> updated; manual -> untouched; new -> created with group
     assert {u["id"] for u in api.ipam.vlans.updated} == {50}
     assert len(api.ipam.vlans.created) == 1
     assert api.ipam.vlans.created[0]["vid"] == 30
-    assert api.ipam.vlans.created[0]["site"] == 3
+    assert api.ipam.vlans.created[0]["group"] == 8
     assert api.ipam.vlans.created[0]["description"].startswith(cisco.VLAN_MARKER)
     assert vid_map[30] is not None
 
@@ -761,15 +762,57 @@ def test_sync_interface_vlans_access_trunk_and_tagged_all(monkeypatch):
 
 def test_sweep_stale_vlans(monkeypatch):
     import netbox_sync.collectors.cisco as cisco
-    seen = FakeRecord(50, vid=10, site_id=3, description="netbox-sync: last seen SW1")
-    stale = FakeRecord(51, vid=20, site_id=3, description="netbox-sync: last seen SW1")
-    manual = FakeRecord(52, vid=30, site_id=3, description="manual vlan")
+    seen = FakeRecord(50, vid=10, group_id=8, description="netbox-sync: last seen SW1")
+    stale = FakeRecord(51, vid=20, group_id=8, description="netbox-sync: last seen SW1")
+    manual = FakeRecord(52, vid=30, group_id=8, description="manual vlan")
     api = _vlan_api([seen, stale, manual])
     monkeypatch.setattr(nbx, "get_netbox", lambda: api)
 
-    cisco.sweep_stale_vlans(3, {10, 40})
+    cisco.sweep_stale_vlans(8, {10, 40})
 
     assert api.ipam.vlans.deleted_ids == [51]
+
+
+def test_ensure_vlan_group_reuses_by_key_and_names_next_bd(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    g1 = FakeRecord(60, name="BD1", description="netbox-sync: vtp=snapp",
+                    scope_type="dcim.site", scope_id=3)
+    g2 = FakeRecord(61, name="BD3", description="netbox-sync: vtp=other",
+                    scope_type="dcim.site", scope_id=3)
+    manual = FakeRecord(62, name="BD2", description="manual group",
+                        scope_type="dcim.site", scope_id=3)
+    api = _vlan_api([], [g1, g2, manual])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    # existing key -> reused, nothing created
+    assert cisco.ensure_vlan_group(3, "snapp") == 60
+    assert api.ipam.vlan_groups.created == []
+
+    # new key -> created with next FREE BD number among marked groups (BD3+1)
+    gid = cisco.ensure_vlan_group(3, "campus-b")
+    created = api.ipam.vlan_groups.created[0]
+    assert created["name"] == "BD4"
+    assert created["slug"] == "bd4"
+    assert created["description"] == "netbox-sync: vtp=campus-b"
+    assert created["scope_type"] == "dcim.site"
+    assert created["scope_id"] == 3
+    assert gid is not None
+
+
+def test_sweep_legacy_site_vlans(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    legacy = FakeRecord(50, vid=10, site_id=3, group=None,
+                        description="netbox-sync: last seen SW1")
+    grouped = FakeRecord(51, vid=10, site_id=None, group=8,
+                         description="netbox-sync: last seen SW1")
+    manual = FakeRecord(52, vid=20, site_id=3, group=None,
+                        description="manual vlan")
+    api = _vlan_api([legacy, grouped, manual])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sweep_legacy_site_vlans(3)
+
+    assert api.ipam.vlans.deleted_ids == [50]   # only the group-less marked one
 
 
 def test_interface_syncs_preserve_mgmt_interfaces(monkeypatch):
