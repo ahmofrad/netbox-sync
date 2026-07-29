@@ -48,7 +48,7 @@ A Python automation tool that automatically discovers **HPE ProLiant servers** (
 4. **Removes stale inventory items** that are no longer reported by the device.
 5. **Records each device's management IP** in IPAM (mask derived from the scan range, `/32` fallback; marker description `netbox-sync: mgmt`) and sets it as the device's **primary IPv4** in NetBox. Since NetBox requires the primary IP to be assigned to the device, a synthetic `mgmt` interface (`virtual`, `mgmt_only`) is created to hold the assignment — it is never deleted by interface syncs.
 6. **Marks devices offline** in NetBox when they stop responding to the scan.
-7. **Runs automatically** on a schedule (default: 00:00 and 12:00 daily) plus an immediate run on startup.
+7. **Runs one full sync per invocation** and exits (cron-friendly exit codes + lock file) — you schedule it (cron, systemd timer, Task Scheduler).
 
 ## How it works (architecture)
 
@@ -112,7 +112,7 @@ A Python automation tool that automatically discovers **HPE ProLiant servers** (
 | `netbox_sync/collectors/cisco.py` | Cisco Catalyst collector — netmiko SSH, IOS/IOS-XE CLI parsers, CDP/LLDP cable reconciliation. |
 | `netbox_sync/models.py` | Server (`SERVER_MODEL_MAP`), storage (`STORAGE_MODEL_MAP`), and SAN switch (`SWITCH_MODEL_MAP`) model-name normalization maps. Maps vendor strings (e.g. `proliant dl360 gen10`) to canonical NetBox device-type names (e.g. `HPE DL360 G10`). |
 | `.env.example` | Template for your `.env` file. Copy to `.env` and fill in real values. |
-| `requirements.txt` | Python dependencies (`requests`, `pynetbox`, `schedule`, `python-dotenv`, `paramiko`). |
+| `requirements.txt` | Python dependencies (`requests`, `pynetbox`, `python-dotenv`, `paramiko`, `netmiko`). |
 | `requirements-dev.txt` | Test dependencies (pytest); includes `requirements.txt`. |
 | `tests/` | pytest suite for the CLI parsers, naming helpers and NetBox sync logic — runs entirely on in-memory fakes, no hardware needed. |
 | `.gitignore` | Ignores `.env`, `__pycache__/`, venvs, and any personal working folders. |
@@ -295,26 +295,28 @@ pip install -r requirements.txt
 python sync_all_to_netbox.py
 ```
 
-The script:
-1. Runs an **immediate** sync on startup.
-2. Schedules daily runs at **00:00** and **12:00**.
-3. Logs every action to stdout with timestamps and log levels (`DEBUG` / `INFO` / `WARN` / `ERROR`; controlled via `LOG_LEVEL`).
+Each invocation performs **one full sync and exits**: exit code `0` on success, `1` on error, `130` on Ctrl+C. A lock file (`netbox-sync.lock` in the repo root) prevents overlapping instances; a lock older than 24 h is treated as stale (crash recovery) and replaced.
 
 ```
-[2026-06-30 00:00:01] [INFO] Scheduler started — runs at 00:00 and 12:00 daily.
-[2026-06-30 00:00:01] [INFO] Running initial unified sync now ...
-[2026-06-30 00:00:01] [INFO] ============================================================
-[2026-06-30 00:00:01] [INFO] Unified sync started (servers + storage + SAN switches)
-[2026-06-30 00:00:02] [INFO] Scanning 62 IPs across 2 BMC ranges ...
-[2026-06-30 00:00:15] [INFO]   + SERVER 192.0.2.5  HPE DL360 G10  s/n=XXXXXXX
+[2026-07-29 00:00:01] [INFO] ============================================================
+[2026-07-29 00:00:01] [INFO] Unified sync started (servers + storage + SAN + Cisco switches)
+[2026-07-29 00:00:01] [INFO] ============================================================
+[2026-07-29 00:00:01] [INFO] BMC ranges empty — skipping server scan.
+[2026-07-29 00:00:01] [INFO] Scanning 1 IPs for Cisco switches (SSH) ...
+[2026-07-29 00:00:02] [INFO]   + CISCO 192.0.2.65  C9200L-48T-4X  s/n=XXXXXXX
 ...
 ```
 
-Press `Ctrl+C` to stop the scheduler (during an active scan it may take up to ~20 seconds for in-flight probes to finish; pending probes are cancelled immediately).
+Press `Ctrl+C` to abort a running sync (during an active scan it may take up to ~20 seconds for in-flight probes to finish; pending probes are cancelled immediately).
 
-### Run as a service (optional)
+### Schedule with cron (recommended)
 
-For production, run under systemd, a Windows service, or a container so it survives reboots. **Run exactly one instance** — the anti-flapping counters live in process memory, and multiple instances would fight over the same NetBox objects.
+```cron
+# twice daily (00:00 and 12:00), logs appended to a file
+0 0,12 * * * /opt/netbox-sync/.venv/bin/python /opt/netbox-sync/sync_all_to_netbox.py >> /var/log/netbox-sync.log 2>&1
+```
+
+A systemd timer or Windows Task Scheduler works just as well — anything that runs the command periodically. The script finds its `.env` next to the repo regardless of the working directory.
 
 ### Running tests
 
@@ -418,7 +420,7 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 4. **آیتم‌های قدیمی inventory** که دیگر توسط دستگاه گزارش نمی‌شوند را حذف می‌کند.
 5. **IP مدیریتی هر دستگاه** در IPAM ثبت می‌شود (ماسک از روی بازه اسکن، با پیش‌فرض `/32`؛ توضیح علامت‌دار `netbox-sync: mgmt`) و به‌عنوان **primary IPv4** دستگاه در NetBox تنظیم می‌گردد. از آنجا که NetBox می‌خواهد IP اصلی به خود دستگاه تخصیص داده شده باشد، یک رابط ساختگی `mgmt` (نوع `virtual` و `mgmt_only`) برای نگه‌داشتن این تخصیص ساخته می‌شود — این رابط هرگز توسط همگام‌سازی رابط‌ها حذف نمی‌شود.
 6. **دستگاه‌هایی که دیگر پاسخگو نیستند** را در NetBox به‌صورت آفلاین (offline) علامت‌گذاری می‌کند.
-7. **به‌صورت خودکار و بر اساس زمان‌بندی** اجرا می‌شود (پیش‌فرض: هر روز ساعت ۰۰:۰۰ و ۱۲:۰۰)، به‌علاوه یک اجرای بلافاصله پس از راه‌اندازی.
+7. **هر اجرا یک همگام‌سازی کامل** انجام می‌دهد و خارج می‌شود (کد خروجی سازگار با cron + فایل قفل) — زمان‌بندی را خودتان انجام می‌دهید (cron، systemd timer، Task Scheduler).
 
 ## نحوه کارکرد (معماری)
 
@@ -477,7 +479,7 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 | `netbox_sync/collectors/cisco.py` | کلکتور Cisco Catalyst — اتصال SSH با netmiko، پارسرهای CLI سِ IOS/IOS-XE، همگام‌سازی کابل‌های CDP/LLDP. |
 | `netbox_sync/models.py` | نگاشت‌های نرمال‌سازی نام مدل سرور (`SERVER_MODEL_MAP`)، ذخیره‌سازی (`STORAGE_MODEL_MAP`) و سوئچ SAN (`SWITCH_MODEL_MAP`). رشته‌های سازنده (مانند `proliant dl360 gen10`) را به نام‌های متعارف نوع دستگاه در NetBox (مانند `HPE DL360 G10`) تبدیل می‌کند. |
 | `.env.example` | قالب فایل `.env`. آن را به `.env` کپی کرده و مقادیر واقعی خود را وارد کنید. |
-| `requirements.txt` | وابستگی‌های پایتون (`requests`, `pynetbox`, `schedule`, `python-dotenv`, `paramiko`). |
+| `requirements.txt` | وابستگی‌های پایتون (`requests`, `pynetbox`, `python-dotenv`, `paramiko`, `netmiko`). |
 | `requirements-dev.txt` | وابستگی‌های تست (pytest)؛ شامل `requirements.txt` نیز می‌شود. |
 | `tests/` | مجموعه تست pytest برای پارسرهای CLI، توابع نام‌گذاری و منطق همگام‌سازی NetBox — کاملاً با fakeهای درون‌حافظه‌ای اجرا می‌شود و به سخت‌افزار نیاز ندارد. |
 | `.gitignore` | فایل‌های `.env`، `__pycache__/`، venv و پوشه‌های کاری شخصی را نادیده می‌گیرد. |
@@ -659,26 +661,28 @@ pip install -r requirements.txt
 python sync_all_to_netbox.py
 ```
 
-اسکریپت:
-1. بلافاصله پس از راه‌اندازی، یک همگام‌سازی **اولیه** انجام می‌دهد.
-2. اجرای روزانه را در **۰۰:۰۰** و **۱۲:۰۰** زمان‌بندی می‌کند.
-3. هر اقدام را با timestamp و سطح لاگ (`DEBUG` / `INFO` / `WARN` / `ERROR`؛ با `LOG_LEVEL` قابل تنظیم) در stdout ثبت می‌کند.
+هر اجرا **یک همگام‌سازی کامل انجام می‌دهد و خارج می‌شود**: کد خروجی `0` در صورت موفقیت، `1` در صورت خطا، `130` با Ctrl+C. یک فایل قفل (`netbox-sync.lock` در ریشه مخزن) از اجرای هم‌زمان چند نمونه جلوگیری می‌کند؛ قفل قدیمی‌تر از ۲۴ ساعت به‌عنوان stale در نظر گرفته شده (بازیابی پس از crash) و جایگزین می‌شود.
 
 ```
-[2026-06-30 00:00:01] [INFO] Scheduler started — runs at 00:00 and 12:00 daily.
-[2026-06-30 00:00:01] [INFO] Running initial unified sync now ...
-[2026-06-30 00:00:01] [INFO] ============================================================
-[2026-06-30 00:00:01] [INFO] Unified sync started (servers + storage + SAN switches)
-[2026-06-30 00:00:02] [INFO] Scanning 62 IPs across 2 BMC ranges ...
-[2026-06-30 00:00:15] [INFO]   + SERVER 192.0.2.5  HPE DL360 G10  s/n=XXXXXXX
+[2026-07-29 00:00:01] [INFO] ============================================================
+[2026-07-29 00:00:01] [INFO] Unified sync started (servers + storage + SAN + Cisco switches)
+[2026-07-29 00:00:01] [INFO] ============================================================
+[2026-07-29 00:00:01] [INFO] BMC ranges empty — skipping server scan.
+[2026-07-29 00:00:01] [INFO] Scanning 1 IPs for Cisco switches (SSH) ...
+[2026-07-29 00:00:02] [INFO]   + CISCO 192.0.2.65  C9200L-48T-4X  s/n=XXXXXXX
 ...
 ```
 
-برای توقف زمان‌بند، `Ctrl+C` را فشار دهید (در حین اسکن فعال ممکن است تا حدود ۲۰ ثانیه طول بکشد تا بررسی‌های در حال انجام تمام شوند؛ بررسی‌های در صف بلافاصله لغو می‌شوند).
+برای توقف یک همگام‌سازی در حال اجرا، `Ctrl+C` را فشار دهید (در حین اسکن فعال ممکن است تا حدود ۲۰ ثانیه طول بکشد تا بررسی‌های در حال انجام تمام شوند؛ بررسی‌های در صف بلافاصله لغو می‌شوند).
 
-### اجرا به‌عنوان سرویس (اختیاری)
+### زمان‌بندی با cron (پیشنهادی)
 
-برای محیط عملیاتی، توصیه می‌شود اسکریپت را زیر systemd، به‌صورت سرویس ویندوز یا درون کانتینر اجرا کنید تا پس از ریبوت نیز فعال بماند. **فقط یک نمونه** از اسکریپت را اجرا کنید — شمارندههای ضدنوسان در حافظه پروسه نگه‌داری می‌شوند و چند نمونه هم‌زمان روی همان اشیای NetBox با هم تداخل می‌کنند.
+```cron
+# دو بار در روز (۰۰:۰۰ و ۱۲:۰۰)، لاگ‌ها به فایل اضافه می‌شوند
+0 0,12 * * * /opt/netbox-sync/.venv/bin/python /opt/netbox-sync/sync_all_to_netbox.py >> /var/log/netbox-sync.log 2>&1
+```
+
+systemd timer یا Windows Task Scheduler نیز به همین خوبی کار می‌کند — هر چیزی که این دستور را دوره‌ای اجرا کند. اسکریپت فایل `.env` خود را صرف‌نظر از دایرکتوری فعلی، کنار مخزن پیدا می‌کند.
 
 ### اجرای تست‌ها
 
