@@ -412,6 +412,81 @@ def sync_cisco_interfaces(dev_id, ports):
             try: iface.delete()
             except Exception: pass
 
+# ── VLANs ────────────────────────────────────────────────────────────────────
+
+# Ownership marker: only VLANs whose description starts with this prefix are
+# updated/deleted by the sync. Manual VLANs are never modified.
+VLAN_MARKER = "netbox-sync:"
+
+def sync_cisco_vlans(site_id, hostname, vlans):
+    """Get-or-create each VLAN in IPAM for the site; refresh marker-owned
+    records. Returns {vid: netbox_id} for interface linkage."""
+    api = netbox.get_netbox()
+    vid_map = {}
+    for v in vlans:
+        vid = v["vid"]
+        payload = {"vid": vid, "name": v.get("name") or f"VLAN{vid:04d}",
+                   "status": "active",
+                   "description": f"{VLAN_MARKER} last seen {hostname}"}
+        existing = api.ipam.vlans.get(vid=vid, site_id=site_id)
+        if existing:
+            if (existing.description or "").startswith(VLAN_MARKER):
+                api.ipam.vlans.update([{"id": existing.id, **payload}])
+            vid_map[vid] = existing.id
+            continue
+        try:
+            vid_map[vid] = api.ipam.vlans.create({**payload, "site": site_id}).id
+        except Exception as exc:
+            log("WARN", f"  vlan {vid}: create failed on {hostname}: {exc}")
+    return vid_map
+
+def sync_interface_vlans(dev_id, ports, trunks, vid_map):
+    """Wire VLAN linkage on switch interfaces: access untagged, trunk
+    native + tagged (or tagged-all for the default range)."""
+    api = netbox.get_netbox()
+    by_name = {str(i.name): i
+               for i in api.dcim.interfaces.filter(device_id=dev_id)}
+    trunk_by_port = {t["port"]: t for t in trunks}
+    for p in ports:
+        iface = by_name.get(p["port"])
+        if not iface: continue
+        vlan_col = (p.get("vlan") or "").strip().lower()
+        if vlan_col == "routed": continue
+        t = trunk_by_port.get(p["port"])
+        payload = None
+        if t or vlan_col == "trunk":
+            payload = {"id": iface.id}
+            native = (t or {}).get("native")
+            if native in vid_map:
+                payload["untagged_vlan"] = vid_map[native]
+            expanded = _expand_vlan_list((t or {}).get("active")
+                                         or (t or {}).get("allowed"))
+            if expanded is None:
+                payload["mode"] = "tagged-all"
+            else:
+                payload["mode"] = "tagged"
+                payload["tagged_vlans"] = [vid_map[v] for v in sorted(expanded)
+                                           if v in vid_map]
+        elif vlan_col.isdigit() and int(vlan_col) in vid_map:
+            payload = {"id": iface.id, "mode": "access",
+                       "untagged_vlan": vid_map[int(vlan_col)]}
+        if payload:
+            api.dcim.interfaces.update([payload])
+
+def sweep_stale_vlans(site_id, seen_vids):
+    """Delete marker-owned VLANs at the site that no processed switch
+    reported this run. Manual (unmarked) VLANs are never touched."""
+    api = netbox.get_netbox()
+    for vlan in list(api.ipam.vlans.filter(site_id=site_id)):
+        if not (vlan.description or "").startswith(VLAN_MARKER):
+            continue
+        if vlan.vid not in seen_vids:
+            try:
+                vlan.delete()
+                log("INFO", f"  vlan {vlan.vid} (site {site_id}) deleted — no longer seen")
+            except Exception as exc:
+                log("WARN", f"  could not delete stale vlan {vlan.vid}: {exc}")
+
 # ── CDP/LLDP cable reconciliation ────────────────────────────────────────────
 
 # Ownership marker: only cables whose description starts with this prefix are

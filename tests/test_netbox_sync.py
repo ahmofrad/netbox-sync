@@ -717,6 +717,61 @@ def test_sync_cisco_vlans_create_update_and_manual_reuse(monkeypatch):
     assert vid_map[30] is not None
 
 
+def test_sync_interface_vlans_access_trunk_and_tagged_all(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    ifaces_ep = FakeEndpoint([
+        FakeRecord(1, name="Gi1/0/1", device_id=7),
+        FakeRecord(2, name="Gi1/0/2", device_id=7),
+        FakeRecord(3, name="Gi1/0/3", device_id=7),
+        FakeRecord(4, name="Gi1/0/4", device_id=7),
+    ])
+    api = SimpleNamespace(
+        dcim=SimpleNamespace(interfaces=ifaces_ep),
+        ipam=SimpleNamespace(vlans=FakeEndpoint()))
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    ports = [
+        {"port": "Gi1/0/1", "name": "", "status": "connected", "vlan": "10",
+         "duplex": "full", "speed": "1000", "type": "10/100/1000BaseTX"},
+        {"port": "Gi1/0/2", "name": "", "status": "connected", "vlan": "trunk",
+         "duplex": "full", "speed": "1000", "type": "1000BaseSX SFP"},
+        {"port": "Gi1/0/3", "name": "", "status": "connected", "vlan": "trunk",
+         "duplex": "full", "speed": "10G", "type": "SFP-10GBase-SR"},
+        {"port": "Gi1/0/4", "name": "", "status": "connected", "vlan": "routed",
+         "duplex": "full", "speed": "1000", "type": "10/100/1000BaseTX"},
+    ]
+    trunks = [
+        {"port": "Gi1/0/2", "mode": "on", "native": 1,
+         "allowed": "1-4094", "active": "1-4094"},
+        {"port": "Gi1/0/3", "mode": "on", "native": 10,
+         "allowed": "1,10,20-22", "active": "10,20-22"},
+    ]
+    vid_map = {1: 101, 10: 110, 20: 120, 21: 121, 22: 122, 99: 199}
+    cisco.sync_interface_vlans(7, ports, trunks, vid_map)
+
+    by_id = {u["id"]: u for u in ifaces_ep.updated}
+    assert by_id[1]["mode"] == "access" and by_id[1]["untagged_vlan"] == 110
+    assert by_id[2]["mode"] == "tagged-all"      # 1-4094 -> no explicit list
+    assert by_id[2]["untagged_vlan"] == 101
+    assert by_id[3]["mode"] == "tagged"
+    assert by_id[3]["untagged_vlan"] == 110
+    assert by_id[3]["tagged_vlans"] == [110, 120, 121, 122]
+    assert 4 not in by_id                        # routed -> untouched
+
+
+def test_sweep_stale_vlans(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    seen = FakeRecord(50, vid=10, site_id=3, description="netbox-sync: last seen SW1")
+    stale = FakeRecord(51, vid=20, site_id=3, description="netbox-sync: last seen SW1")
+    manual = FakeRecord(52, vid=30, site_id=3, description="manual vlan")
+    api = _vlan_api([seen, stale, manual])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sweep_stale_vlans(3, {10, 40})
+
+    assert api.ipam.vlans.deleted_ids == [51]
+
+
 def test_interface_syncs_preserve_mgmt_interfaces(monkeypatch):
     """The synthetic mgmt interface must survive the stale-interface cleanup
     in both Cisco and SAN interface syncs."""
