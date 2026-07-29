@@ -166,6 +166,65 @@ def _parse_lldp_detail(text):
         entries.append(cur)
     return [e for e in entries if e.get("device_id")]
 
+def _parse_vlan_brief(text):
+    """Parse `show vlan brief`: vid, name, status. Ports column ignored."""
+    vlans = []
+    for line in text.splitlines():
+        s = line.rstrip()
+        m = re.match(r'^(\d+)\s+(.+?)\s+(active|act/unsup|suspended|shutdown)\b',
+                     s, re.IGNORECASE)
+        if not m: continue
+        vlans.append({"vid": int(m.group(1)), "name": m.group(2).strip(),
+                      "status": m.group(3).lower()})
+    return vlans
+
+def _expand_vlan_list(spec):
+    """Expand "1,10,20-25,100" into a set of vids. Returns None for the
+    default all-VLANs range — the caller maps that to mode 'tagged-all'
+    instead of an explicit tagged list."""
+    s = (spec or "").strip().lower()
+    if not s or s in ("all", "1-4094", "1-4096"):
+        return None
+    vids = set()
+    for part in s.split(","):
+        part = part.strip()
+        if not part: continue
+        m = re.match(r'^(\d+)(?:-(\d+))?$', part)
+        if not m: continue
+        lo = int(m.group(1)); hi = int(m.group(2) or lo)
+        vids.update(range(lo, min(hi, 4094) + 1))
+    return vids
+
+def _parse_interfaces_trunk(text):
+    """Parse `show interfaces trunk` into per-port dicts. Tracks the
+    sectioned tables: main (mode/native), 'Vlans allowed on trunk',
+    'Vlans allowed and active in management domain'."""
+    trunks = {}
+    section = None
+    for line in text.splitlines():
+        s = line.rstrip()
+        if not s.strip(): continue
+        low = s.lower()
+        if "vlans allowed on trunk" in low:
+            section = "allowed"; continue
+        if "vlans allowed and active" in low:
+            section = "active"; continue
+        if "vlans in spanning tree" in low:
+            section = None; continue
+        if re.match(r'^Port\s+Mode\s+Encapsulation', s, re.IGNORECASE):
+            section = "main"; continue
+        m = re.match(r'^(\S+)\s+(on|desirable|auto|trunk|off|nonegotiate)\s+'
+                     r'(\S+)\s+(\S+)\s+(\d+)\s*$', s, re.IGNORECASE)
+        if m and section in (None, "main"):
+            trunks[m.group(1)] = {"port": m.group(1), "mode": m.group(2).lower(),
+                                  "native": int(m.group(5)),
+                                  "allowed": None, "active": None}
+            continue
+        m2 = re.match(r'^(\S+)\s+([\d,\-]+)\s*$', s)
+        if m2 and section in ("allowed", "active") and m2.group(1) in trunks:
+            trunks[m2.group(1)][section] = m2.group(2)
+    return list(trunks.values())
+
 def _eth_interface_type(speed, type_str=None):
     """Map interfaces-status speed/type to a NetBox interface type choice.
     Modular (SFP) ports map to the -x- types; unknown/auto -> 'other'."""

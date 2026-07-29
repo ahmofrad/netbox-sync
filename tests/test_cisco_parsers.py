@@ -160,3 +160,55 @@ def test_eth_interface_type():
     assert mod._eth_interface_type("10G", "10GBase-T") == "10gbase-t"
     assert mod._eth_interface_type("auto", "10/100/1000BaseTX") == "other"
     assert mod._eth_interface_type("", "") == "other"
+
+
+VLAN_BRIEF = """VLAN Name                             Status    Ports
+---- -------------------------------- --------- -------------------------------
+1    default                          active    Gi1/0/3, Gi1/0/4
+10   USERS                            active    Gi1/0/2
+20   SERVER VLAN                      active
+100  fddi-default                     act/unsup
+"""
+
+
+def test_parse_vlan_brief():
+    vlans = mod._parse_vlan_brief(VLAN_BRIEF)
+    assert vlans == [
+        {"vid": 1, "name": "default", "status": "active"},
+        {"vid": 10, "name": "USERS", "status": "active"},
+        {"vid": 20, "name": "SERVER VLAN", "status": "active"},
+        {"vid": 100, "name": "fddi-default", "status": "act/unsup"},
+    ]
+
+
+INTERFACES_TRUNK = """Port        Mode             Encapsulation  Status        Native vlan
+Gi1/0/1     on               802.1q         trunking      1
+Te1/1/1     on               802.1q         trunking      10
+
+Port        Vlans allowed on trunk
+Gi1/0/1     1-4094
+Te1/1/1     1,10,20
+
+Port        Vlans allowed and active in management domain
+Gi1/0/1     1,10
+Te1/1/1     10,20-22
+
+Port        Vlans in spanning tree forwarding state and not pruned
+Gi1/0/1     1,10
+"""
+
+
+def test_parse_interfaces_trunk():
+    trunks = {t["port"]: t for t in mod._parse_interfaces_trunk(INTERFACES_TRUNK)}
+    assert trunks["Gi1/0/1"]["native"] == 1
+    assert trunks["Gi1/0/1"]["allowed"] == "1-4094"
+    assert trunks["Gi1/0/1"]["active"] == "1,10"
+    assert trunks["Te1/1/1"]["native"] == 10
+    assert trunks["Te1/1/1"]["active"] == "10,20-22"
+
+
+def test_expand_vlan_list():
+    assert mod._expand_vlan_list("1,10,20-22") == {1, 10, 20, 21, 22}
+    assert mod._expand_vlan_list("1-4094") is None
+    assert mod._expand_vlan_list("all") is None
+    assert mod._expand_vlan_list("") is None
