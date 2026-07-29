@@ -5,6 +5,8 @@ Inventory item roles are resolved by NAME via get_or_create_inventory_role().
 Role IDs are DB-sequence-dependent and NOT portable between NetBox
 instances, so nothing here may hardcode them.
 """
+import re
+
 import pynetbox
 
 from netbox_sync.config import (NETBOX_URL, NETBOX_TOKEN, _env_bool,
@@ -14,7 +16,7 @@ from netbox_sync.config import (NETBOX_URL, NETBOX_TOKEN, _env_bool,
 from netbox_sync.models import (SERVER_MODEL_MAP, STORAGE_MODEL_MAP,
                                 SWITCH_MODEL_MAP, CISCO_MODEL_MAP)
 from netbox_sync.utils import (slugify, normalize_model, resolve_site,
-                               _invalid_serial)
+                               _invalid_serial, _mgmt_prefixlen)
 
 nb = None
 
@@ -140,6 +142,34 @@ def find_device(serial, role_name=None):
         match = [d for d in results if d.role and d.role.name == role_name]
         return match[0] if match else None
     return results[0]
+
+def _sanitize_dns_name(hostname):
+    h = re.sub(r'[^a-z0-9.-]', '', (hostname or "").lower())[:63]
+    return h or None
+
+def ensure_primary_ip(dev_id, ip, hostname=None):
+    """Create/update the management IP in IPAM and set it as the device's
+    primary IPv4. Existing IPAM records are reused unchanged (any mask);
+    new ones get the scan-range-derived prefix length."""
+    api = get_netbox()
+    existing = list(api.ipam.ip_addresses.filter(address=str(ip)))
+    if existing:
+        ip_id = existing[0].id
+    else:
+        payload = {
+            "address": f"{ip}/{_mgmt_prefixlen(ip)}",
+            "status": "active",
+            "description": "netbox-sync: mgmt",
+        }
+        dns = _sanitize_dns_name(hostname)
+        if dns:
+            payload["dns_name"] = dns
+        ip_id = api.ipam.ip_addresses.create(payload).id
+    dev = api.dcim.devices.get(id=dev_id)
+    current = getattr(getattr(dev, "primary_ip4", None), "id", None) if dev else None
+    if current != ip_id:
+        api.dcim.devices.update([{"id": dev_id, "primary_ip4": ip_id}])
+    return ip_id
 
 # ── device ensure / mark offline ─────────────────────────────────────────────
 def _device_name(probe, prefix="server"):

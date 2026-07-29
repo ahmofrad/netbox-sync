@@ -5,7 +5,9 @@ import re
 import socket
 import time
 
-from netbox_sync.config import SITE_KEYWORD_MAP, SITE_UNKNOWN, SITE_IP_MAP
+from netbox_sync.config import (SITE_KEYWORD_MAP, SITE_UNKNOWN, SITE_IP_MAP,
+                                BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
+                                CISCO_RANGES)
 
 # ── generic helpers ──────────────────────────────────────────────────────────
 def slugify(s):
@@ -35,6 +37,24 @@ def resolve_site(hostname, ip):
         if keyword in name_lower:
             return site
     return SITE_UNKNOWN
+
+def _mgmt_prefixlen(ip):
+    """Prefix length for a management IP: the prefix length of the first
+    configured scan range (BMC, storage, SAN, Cisco — in that order) that
+    contains it; 32 when no range does."""
+    try:
+        addr = ipaddress.ip_address(str(ip).strip())
+    except (ValueError, AttributeError):
+        return 32
+    for ranges in (BMC_RANGES, STORAGE_RANGES, SAN_RANGES, CISCO_RANGES):
+        for cidr in ranges:
+            try:
+                net = ipaddress.ip_network(cidr, strict=False)
+                if addr in net:
+                    return net.prefixlen
+            except (ValueError, TypeError):
+                continue
+    return 32
 
 def gib_from_bytes(v):
     try: return int(round(int(v) / (1024**3)))

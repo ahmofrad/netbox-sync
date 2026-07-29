@@ -579,3 +579,67 @@ def test_ssh_host_key_policy_strict_when_enabled(monkeypatch):
     assert isinstance(_FakeSSHClient.instance.policy,
                       brc.paramiko.RejectPolicy)
     assert _FakeSSHClient.instance.host_keys_loaded is True
+
+
+# ── primary IPv4 ─────────────────────────────────────────────────────────────
+
+def test_mgmt_prefixlen_from_ranges(monkeypatch):
+    monkeypatch.setattr(utils, "BMC_RANGES", ["10.0.0.0/24"])
+    monkeypatch.setattr(utils, "STORAGE_RANGES", [])
+    monkeypatch.setattr(utils, "SAN_RANGES", [])
+    monkeypatch.setattr(utils, "CISCO_RANGES", ["172.31.1.0/27"])
+    assert utils._mgmt_prefixlen("10.0.0.5") == 24
+    assert utils._mgmt_prefixlen("172.31.1.5") == 27
+    assert utils._mgmt_prefixlen("192.0.2.9") == 32   # no range contains it
+    assert utils._mgmt_prefixlen("junk") == 32        # invalid tolerated
+
+
+def _ipam_api(ip_items, device_record):
+    # api.ipam is a separate pynetbox app from api.dcim — model both
+    return SimpleNamespace(
+        dcim=SimpleNamespace(
+            devices=FakeEndpoint([device_record] if device_record else [])),
+        ipam=SimpleNamespace(ip_addresses=FakeEndpoint(ip_items)))
+
+
+def test_primary_ip_created_with_range_mask(monkeypatch):
+    monkeypatch.setattr(utils, "BMC_RANGES", [])
+    monkeypatch.setattr(utils, "STORAGE_RANGES", [])
+    monkeypatch.setattr(utils, "SAN_RANGES", [])
+    monkeypatch.setattr(utils, "CISCO_RANGES", ["172.31.1.0/24"])
+    dev = FakeRecord(7, name="SW1", primary_ip4=None)
+    api = _ipam_api([], dev)
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    ip_id = nbx.ensure_primary_ip(7, "172.31.1.103", "F10-SW-W-02")
+
+    created = api.ipam.ip_addresses.created[0]
+    assert created["address"] == "172.31.1.103/24"
+    assert created["dns_name"] == "f10-sw-w-02"
+    assert created["description"] == "netbox-sync: mgmt"
+    assert created["status"] == "active"
+    assert {u["id"] for u in api.dcim.devices.updated} == {7}
+    assert api.dcim.devices.updated[0]["primary_ip4"] == ip_id
+
+
+def test_primary_ip_reuses_existing(monkeypatch):
+    dev = FakeRecord(7, name="SW1", primary_ip4=None)
+    existing_ip = FakeRecord(50, address="172.31.1.103")
+    api = _ipam_api([existing_ip], dev)
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    ip_id = nbx.ensure_primary_ip(7, "172.31.1.103", "SW1")
+
+    assert ip_id == 50
+    assert api.ipam.ip_addresses.created == []   # reused, no new record
+
+
+def test_primary_ip_no_write_when_already_correct(monkeypatch):
+    dev = FakeRecord(7, name="SW1", primary_ip4=FakeRecord(50))
+    existing_ip = FakeRecord(50, address="172.31.1.103")
+    api = _ipam_api([existing_ip], dev)
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    nbx.ensure_primary_ip(7, "172.31.1.103", "SW1")
+
+    assert api.dcim.devices.updated == []
