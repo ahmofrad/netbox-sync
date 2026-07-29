@@ -48,34 +48,34 @@ def _env_bool(name, default=False):
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
 
 # ── config – ranges ──────────────────────────────────────────────────────────
+def _parse_ranges(env_name, default):
+    """Range semantics: unset env var -> default; set-but-empty -> family
+    disabled ([]); set -> comma-separated CIDR list."""
+    val = os.getenv(env_name)
+    if val is None:
+        return list(default)
+    return [r.strip() for r in val.split(",") if r.strip()]
+
 DEFAULT_BMC_RANGES = [
     "192.0.2.0/27",
     "198.51.100.0/27",
 ]
-BMC_RANGES = DEFAULT_BMC_RANGES
-if os.getenv("BMC_RANGES"):
-    BMC_RANGES = [r.strip() for r in os.getenv("BMC_RANGES").split(",") if r.strip()]
+BMC_RANGES = _parse_ranges("BMC_RANGES", DEFAULT_BMC_RANGES)
 
 DEFAULT_STORAGE_RANGES = [
     "192.0.2.16/32",
     "198.51.100.16/32",
 ]
-STORAGE_RANGES = DEFAULT_STORAGE_RANGES
-if os.getenv("STORAGE_RANGES"):
-    STORAGE_RANGES = [r.strip() for r in os.getenv("STORAGE_RANGES").split(",") if r.strip()]
+STORAGE_RANGES = _parse_ranges("STORAGE_RANGES", DEFAULT_STORAGE_RANGES)
 
 DEFAULT_SAN_RANGES = [
     "192.0.2.32/29",
     "198.51.100.32/29",
 ]
-SAN_RANGES = DEFAULT_SAN_RANGES
-if os.getenv("SAN_RANGES"):
-    SAN_RANGES = [r.strip() for r in os.getenv("SAN_RANGES").split(",") if r.strip()]
+SAN_RANGES = _parse_ranges("SAN_RANGES", DEFAULT_SAN_RANGES)
 
 # Cisco family is opt-in: empty default means "disabled".
-CISCO_RANGES = []
-if os.getenv("CISCO_RANGES"):
-    CISCO_RANGES = [r.strip() for r in os.getenv("CISCO_RANGES").split(",") if r.strip()]
+CISCO_RANGES = _parse_ranges("CISCO_RANGES", [])
 
 REDFISH_PORT  = int(os.getenv("REDFISH_PORT", "443"))
 STORAGE_PORT  = int(os.getenv("STORAGE_PORT", "443"))

@@ -443,6 +443,23 @@ def test_cisco_ranges_default_empty_and_parse(monkeypatch):
     importlib.reload(cfg)
 
 
+def test_empty_range_env_disables_family(monkeypatch):
+    """Set-but-empty range env vars must disable the family ([]), NOT fall
+    back to the placeholder defaults — this is how users turn families off."""
+    import importlib
+    monkeypatch.setenv("BMC_RANGES", "")
+    monkeypatch.setenv("STORAGE_RANGES", "")
+    monkeypatch.setenv("SAN_RANGES", "")
+    importlib.reload(cfg)
+    assert cfg.BMC_RANGES == []
+    assert cfg.STORAGE_RANGES == []
+    assert cfg.SAN_RANGES == []
+    # Unset env vars still fall back to the documented placeholder defaults
+    monkeypatch.delenv("BMC_RANGES")
+    importlib.reload(cfg)
+    assert cfg.BMC_RANGES == cfg.DEFAULT_BMC_RANGES
+
+
 def test_validate_config_requires_cisco_creds_only_when_ranges_set(monkeypatch):
     for var in REQUIRED_VARS:
         monkeypatch.setenv(var, "x")

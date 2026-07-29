@@ -6,7 +6,8 @@ from netbox_sync.collectors.cisco import (cisco_collect_inventory,
                                           sync_cdp_cables)
 from netbox_sync.collectors.msa import storage_collect_inventory
 from netbox_sync.collectors.redfish import rf_collect_inventory
-from netbox_sync.config import log
+from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
+                                CISCO_RANGES)
 from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_storage_device, ensure_san_switch_device,
                                 ensure_cisco_device,
@@ -19,7 +20,7 @@ from netbox_sync.scanner import scan_all
 
 def run_sync():
     log("INFO", "=" * 60)
-    log("INFO", "Unified sync started (servers + storage + SAN switches)")
+    log("INFO", "Unified sync started (servers + storage + SAN + Cisco switches)")
     log("INFO", "=" * 60)
 
     found = scan_all()
@@ -232,50 +233,33 @@ def run_sync():
     # ── Mark unreachable devices offline ─────────────────────────────────────
     # A device must be missing from OFFLINE_THRESHOLD consecutive scans before
     # being marked offline. This prevents transient iLO slowness under load
-    # from causing false offline markings.
-    log("INFO", "Checking for unreachable servers (Redfish) ...")
-    try:
-        for dev in list(api.dcim.devices.filter(cf_redfish_enabled=True)):
-            bmc_ip = (dev.custom_fields or {}).get("bmc_ip")
-            if not bmc_ip: continue
-            ip = bmc_ip.split("/")[0].strip()
-            _check_offline(ip, live_server_ips, dev.id, dev.name,
-                           mark_server_offline, "Server")
-    except Exception as e:
-        log("ERROR", f"Server offline check failed: {e}")
-
-    log("INFO", "Checking for unreachable storage ...")
-    try:
-        for dev in list(api.dcim.devices.filter(cf_storage_enabled=True)):
-            storage_ip = (dev.custom_fields or {}).get("storage_ip")
-            if not storage_ip: continue
-            ip = str(storage_ip).split("/")[0].strip()
-            _check_offline(ip, live_storage_ips, dev.id, dev.name,
-                           mark_storage_offline, "Storage")
-    except Exception as e:
-        log("ERROR", f"Storage offline check failed: {e}")
-
-    log("INFO", "Checking for unreachable SAN switches ...")
-    try:
-        for dev in list(api.dcim.devices.filter(cf_san_switch_enabled=True)):
-            san_ip = (dev.custom_fields or {}).get("san_switch_ip")
-            if not san_ip: continue
-            ip = str(san_ip).split("/")[0].strip()
-            _check_offline(ip, live_san_ips, dev.id, dev.name,
-                           mark_san_offline, "SAN switch")
-    except Exception as e:
-        log("ERROR", f"SAN switch offline check failed: {e}")
-
-    log("INFO", "Checking for unreachable Cisco switches ...")
-    try:
-        for dev in list(api.dcim.devices.filter(cf_cisco_enabled=True)):
-            cisco_ip = (dev.custom_fields or {}).get("cisco_ip")
-            if not cisco_ip: continue
-            ip = str(cisco_ip).split("/")[0].strip()
-            _check_offline(ip, live_cisco_ips, dev.id, dev.name,
-                           mark_cisco_offline, "Cisco switch")
-    except Exception as e:
-        log("ERROR", f"Cisco offline check failed: {e}")
+    # from causing false offline markings. Families whose ranges are disabled
+    # are NOT swept — disabling a family must never affect its devices.
+    _offline_sweep(api, bool(BMC_RANGES), "cf_redfish_enabled", "bmc_ip",
+                   live_server_ips, mark_server_offline, "servers (Redfish)")
+    _offline_sweep(api, bool(STORAGE_RANGES), "cf_storage_enabled", "storage_ip",
+                   live_storage_ips, mark_storage_offline, "storage")
+    _offline_sweep(api, bool(SAN_RANGES), "cf_san_switch_enabled", "san_switch_ip",
+                   live_san_ips, mark_san_offline, "SAN switches")
+    _offline_sweep(api, bool(CISCO_RANGES), "cf_cisco_enabled", "cisco_ip",
+                   live_cisco_ips, mark_cisco_offline, "Cisco switches")
 
     log("INFO", "Unified sync complete")
     log("INFO", "=" * 60)
+
+
+def _offline_sweep(api, enabled, cf_field, ip_field, live_ips, mark_fn, label):
+    """One family's offline pass: every enabled device whose stored IP was not
+    seen this scan gets a miss via _check_offline. No-op when the family is
+    disabled (empty ranges) so it never offlines its existing devices."""
+    if not enabled:
+        return
+    log("INFO", f"Checking for unreachable {label} ...")
+    try:
+        for dev in list(api.dcim.devices.filter(**{cf_field: True})):
+            stored_ip = (dev.custom_fields or {}).get(ip_field)
+            if not stored_ip: continue
+            ip = str(stored_ip).split("/")[0].strip()
+            _check_offline(ip, live_ips, dev.id, dev.name, mark_fn, label)
+    except Exception as e:
+        log("ERROR", f"{label} offline check failed: {e}")

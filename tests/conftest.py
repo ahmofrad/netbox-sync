@@ -8,6 +8,14 @@ a real environment.
 import os
 import sys
 
+import dotenv
+
+# Tests must be hermetic: a real .env in the repo (e.g. production config on
+# a dev machine) must never leak into the test process. netbox_sync.config
+# calls load_dotenv() at import time, and config-reload tests would re-read
+# it on every reload — so stub it out before any netbox_sync import happens.
+dotenv.load_dotenv = lambda *a, **k: None
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault("NETBOX_URL", "https://netbox.test")

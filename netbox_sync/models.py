@@ -89,6 +89,7 @@ CISCO_MODEL_MAP = {
     "c9300-48p":         "Cisco C9300-48P",
     "c9300-24t":         "Cisco C9300-24T",
     "c9200l-48p-4g":     "Cisco C9200L-48P-4G",
+    "c9200l-48t-4x":     "Cisco C9200L-48T-4X",
     "c9200-48p":         "Cisco C9200-48P",
     "c3850-48p":         "Cisco WS-C3850-48P",
     "ws-c3850-48p":      "Cisco WS-C3850-48P",

@@ -118,7 +118,7 @@ A Python automation tool that automatically discovers **HPE ProLiant servers** (
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.9+
 - A reachable **NetBox** instance (v3.x) with an API token
 - Network access from the host running this script to:
   - iLO/BMC IPs on `REDFISH_PORT` (default 443)
@@ -170,7 +170,7 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `CISCO_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for Cisco switches. Empty = family disabled. |
 | `DEFAULT_CISCO_ROLE` | ❌ | `Switch` | NetBox device role for Cisco switches. |
 
-> *The shipped defaults in `sync_all_to_netbox.py` are **documentation-only** placeholder CIDRs (`192.0.2.0/27` = TEST-NET). Set `BMC_RANGES` and `STORAGE_RANGES` in `.env` to your real ranges.
+> *The shipped defaults in `netbox_sync/config.py` are **documentation-only** placeholder CIDRs (`192.0.2.0/27` = TEST-NET). Set the ranges in `.env` to your real networks — or set a range **empty** (e.g. `BMC_RANGES=`) to disable that family entirely (no scanning and no offline marking for it).
 
 ### `.env` example
 
@@ -308,7 +308,7 @@ The script:
 ...
 ```
 
-Press `Ctrl+C` to stop the scheduler.
+Press `Ctrl+C` to stop the scheduler (during an active scan it may take up to ~20 seconds for in-flight probes to finish; pending probes are cancelled immediately).
 
 ### Run as a service (optional)
 
@@ -477,7 +477,7 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 
 ## پیش‌نیازها
 
-- پایتون ۳.۸ یا بالاتر
+- پایتون ۳.۹ یا بالاتر
 - یک نمونه **NetBox** (نسخه ۳.x) در دسترس، به‌همراه token سِ API
 - دسترسی شبکه از ماشینی که اسکریپت روی آن اجرا می‌شود به:
   - IPهای iLO/BMC روی `REDFISH_PORT` (پیش‌فرض ۴۴۳)
@@ -528,7 +528,7 @@ pip install -r requirements.txt
 | `CISCO_RANGES` | ❌ | *(خالی)* | بازه‌های CIDR جداشده با کاما برای سوئیچ‌های سیسکو. خالی = خانواده غیرفعال. |
 | `DEFAULT_CISCO_ROLE` | ❌ | `Switch` | نقش دستگاه در NetBox برای سوئیچ‌های سیسکو. |
 
-> *پیش‌فرض‌های موجود در `sync_all_to_netbox.py` صرفاً CIDR‌های **نمونه/تست** هستند (`192.0.2.0/27` = TEST-NET). حتماً بازه‌های واقعی خود را در `.env` تنظیم کنید.
+> *پیش‌فرض‌های موجود در `netbox_sync/config.py` صرفاً CIDR‌های **نمونه/تست** هستند (`192.0.2.0/27` = TEST-NET). بازه‌های واقعی خود را در `.env` تنظیم کنید — یا برای غیرفعال‌کردن کامل یک خانواده، مقدار آن را **خالی** بگذارید (مثلاً `BMC_RANGES=`)؛ در این صورت نه اسکنی انجام می‌شود و نه علامت‌گذاری آفلاین برای آن خانواده.
 
 ### نمونه `.env`
 
@@ -666,7 +666,7 @@ python sync_all_to_netbox.py
 ...
 ```
 
-برای توقف زمان‌بند، `Ctrl+C` را فشار دهید.
+برای توقف زمان‌بند، `Ctrl+C` را فشار دهید (در حین اسکن فعال ممکن است تا حدود ۲۰ ثانیه طول بکشد تا بررسی‌های در حال انجام تمام شوند؛ بررسی‌های در صف بلافاصله لغو می‌شوند).
 
 ### اجرا به‌عنوان سرویس (اختیاری)
 
