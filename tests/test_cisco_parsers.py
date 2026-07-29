@@ -212,3 +212,34 @@ def test_expand_vlan_list():
     assert mod._expand_vlan_list("1-4094") is None
     assert mod._expand_vlan_list("all") is None
     assert mod._expand_vlan_list("") is None
+
+
+VTP_STATUS = """VTP Version capable             : 1 to 3
+VTP version running             : 3
+VTP Domain Name                 : snapp
+VTP Pruning Mode                : Disabled (Operationally Disabled)
+VTP Traps Generation            : Disabled
+Device ID                       : d009.c86a.fc80
+
+Feature VLAN:
+--------------
+VTP Operating Mode                : Client
+Number of existing VLANs          : 57
+Maximum VLANs supported locally   : 1024
+
+Feature MST:
+--------------
+VTP Operating Mode                : Transparent
+"""
+
+
+def test_parse_vtp_status_real_output():
+    out = mod._parse_vtp_status(VTP_STATUS)
+    assert out["domain"] == "snapp"
+    assert out["mode"] == "client"   # Feature VLAN mode, not the MST one
+
+
+def test_parse_vtp_status_empty_domain():
+    out = mod._parse_vtp_status("VTP Domain Name                 : \n")
+    assert out["domain"] is None
+    assert out["mode"] is None

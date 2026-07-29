@@ -195,6 +195,30 @@ def _expand_vlan_list(spec):
         vids.update(range(lo, min(hi, 4094) + 1))
     return vids
 
+def _parse_vtp_status(text):
+    """Parse `show vtp status`: domain name from the header block, operating
+    mode only from the 'Feature VLAN:' section (later feature sections like
+    MST have their own mode lines)."""
+    out = {"domain": None, "mode": None}
+    in_feature_vlan = False
+    for line in text.splitlines():
+        s = line.strip()
+        m = re.match(r'^VTP Domain Name\s*:\s*(.*)$', s, re.IGNORECASE)
+        if m:
+            d = m.group(1).strip()
+            out["domain"] = d or None
+            continue
+        if re.match(r'^Feature VLAN\s*:', s, re.IGNORECASE):
+            in_feature_vlan = True
+            continue
+        if re.match(r'^Feature \w+\s*:', s, re.IGNORECASE):
+            in_feature_vlan = False
+            continue
+        m = re.match(r'^VTP Operating Mode\s*:\s*(\S+)', s, re.IGNORECASE)
+        if m and in_feature_vlan and not out["mode"]:
+            out["mode"] = m.group(1).lower()
+    return out
+
 def _parse_interfaces_trunk(text):
     """Parse `show interfaces trunk` into per-port dicts. Tracks the
     sectioned tables: main (mode/native), 'Vlans allowed on trunk',
@@ -366,6 +390,13 @@ def cisco_collect_inventory(ip):
             trunks = []
             log("WARN", f"  show interfaces trunk failed: {exc}")
 
+        try:
+            vtp = _parse_vtp_status(sess.run("show vtp status"))
+            log("INFO", f"  vtp domain: {vtp.get('domain')}")
+        except Exception as exc:
+            vtp = {"domain": None, "mode": None}
+            log("WARN", f"  show vtp status failed: {exc}")
+
         inventory = {}
         add_item = _make_add_item(inventory)
         for row in inv_rows:
@@ -381,7 +412,7 @@ def cisco_collect_inventory(ip):
         }
         return {"summary": summary, "ports": ports,
                 "neighbors": neighbors, "inventory": inventory,
-                "vlans": vlans, "trunks": trunks}
+                "vlans": vlans, "trunks": trunks, "vtp": vtp}
     finally:
         sess.logout()
 
