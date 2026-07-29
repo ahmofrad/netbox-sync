@@ -4,6 +4,7 @@ Everything in this module is read from the environment at import time, right
 after load_dotenv() runs, so importing any netbox_sync module picks up the
 user's .env exactly like the old monolith did.
 """
+import ipaddress
 import os
 from datetime import datetime
 
@@ -114,3 +115,25 @@ def log(level, msg):
     if _LOG_LEVELS.get(level, 20) < _LOG_LEVELS.get(LOG_LEVEL, 20):
         return
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level}] {msg}")
+
+# ── site assignment by IP range ──────────────────────────────────────────────
+def _parse_site_ip_map(env_value):
+    """Parse "cidr:Site,cidr:Site2" into [(IPv4Network, site)] sorted by
+    prefix length descending (most specific first; stable on ties).
+    Malformed entries are skipped with a WARN."""
+    pairs = [p.strip() for p in (env_value or "").split(",") if p.strip()]
+    out = []
+    for pair in pairs:
+        if ":" not in pair:
+            log("WARN", f"SITE_IP_MAP entry {pair!r} is not 'cidr:Site' — skipped")
+            continue
+        cidr, site = pair.split(":", 1)
+        try:
+            out.append((ipaddress.ip_network(cidr.strip(), strict=False),
+                        site.strip()))
+        except ValueError as exc:
+            log("WARN", f"SITE_IP_MAP entry {pair!r} has invalid CIDR ({exc}) — skipped")
+    out.sort(key=lambda t: -t[0].prefixlen)
+    return out
+
+SITE_IP_MAP = _parse_site_ip_map(os.getenv("SITE_IP_MAP"))

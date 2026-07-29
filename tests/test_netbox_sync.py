@@ -460,6 +460,25 @@ def test_empty_range_env_disables_family(monkeypatch):
     assert cfg.BMC_RANGES == cfg.DEFAULT_BMC_RANGES
 
 
+def test_site_ip_map_parsing_and_sort(monkeypatch):
+    import importlib
+    monkeypatch.setenv(
+        "SITE_IP_MAP",
+        "172.31.0.0/16:HQ,172.31.1.0/24:Branch,bad-entry,10.0.0.0/8:Net")
+    importlib.reload(cfg)
+    assert [(str(n), s) for n, s in cfg.SITE_IP_MAP] == [
+        ("172.31.1.0/24", "Branch"),   # /24 beats /16 beats /8 (longest first)
+        ("172.31.0.0/16", "HQ"),
+        ("10.0.0.0/8", "Net"),
+    ]
+    monkeypatch.setenv("SITE_IP_MAP", "not-a-cidr:X")
+    importlib.reload(cfg)
+    assert cfg.SITE_IP_MAP == []       # invalid CIDR skipped, no crash
+    monkeypatch.delenv("SITE_IP_MAP", raising=False)
+    importlib.reload(cfg)
+    assert cfg.SITE_IP_MAP == []       # unset -> empty (backward compatible)
+
+
 def test_validate_config_requires_cisco_creds_only_when_ranges_set(monkeypatch):
     for var in REQUIRED_VARS:
         monkeypatch.setenv(var, "x")
