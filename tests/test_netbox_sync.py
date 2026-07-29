@@ -685,6 +685,38 @@ def test_primary_ip_no_write_when_already_correct(monkeypatch):
     assert api.ipam.ip_addresses.updated == []
 
 
+# ── Cisco VLAN sync ──────────────────────────────────────────────────────────
+
+def _vlan_api(vlan_items):
+    return SimpleNamespace(
+        dcim=SimpleNamespace(interfaces=FakeEndpoint()),
+        ipam=SimpleNamespace(vlans=FakeEndpoint(vlan_items)))
+
+
+def test_sync_cisco_vlans_create_update_and_manual_reuse(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    marked = FakeRecord(50, vid=10, site_id=3, description="netbox-sync: last seen OLD")
+    manual = FakeRecord(51, vid=20, site_id=3, description="manual vlan")
+    api = _vlan_api([marked, manual])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    vid_map = cisco.sync_cisco_vlans(3, "SW1", [
+        {"vid": 10, "name": "USERS", "status": "active"},
+        {"vid": 20, "name": "SERVERS", "status": "active"},
+        {"vid": 30, "name": "GUEST", "status": "active"},
+    ])
+
+    assert vid_map[10] == 50
+    assert vid_map[20] == 51
+    # marked existing -> updated; manual -> untouched; new -> created with site
+    assert {u["id"] for u in api.ipam.vlans.updated} == {50}
+    assert len(api.ipam.vlans.created) == 1
+    assert api.ipam.vlans.created[0]["vid"] == 30
+    assert api.ipam.vlans.created[0]["site"] == 3
+    assert api.ipam.vlans.created[0]["description"].startswith(cisco.VLAN_MARKER)
+    assert vid_map[30] is not None
+
+
 def test_interface_syncs_preserve_mgmt_interfaces(monkeypatch):
     """The synthetic mgmt interface must survive the stale-interface cleanup
     in both Cisco and SAN interface syncs."""
