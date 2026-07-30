@@ -423,7 +423,7 @@ For each discovered Cisco switch, the script reads `show cdp neighbors detail` (
 
 ## VLAN sync (Cisco)
 
-VLANs from `show vlan brief` are created/updated in IPAM grouped by **broadcast domain**: each switch's VTP domain (`show vtp status`; per-switch fallback when the domain is empty) maps to a site-scoped **VLAN group** named `BD1`, `BD2`… (stable across runs — the VTP key lives in the group description). Overlapping VLAN IDs at one site coexist in different groups. Interfaces get their VLAN linkage (access untagged, trunk native + tagged) as before. Marker-owned (`netbox-sync:`) VLANs no longer reported by any switch in the group are deleted after each run; manual VLANs/groups are never modified or deleted.
+VLANs from `show vlan brief` are created/updated in IPAM grouped by **broadcast domain derived from CDP topology**: switches that see each other as CDP neighbors (same-site edges) form connected components, and each component maps to a site-scoped **VLAN group** named `BD1`, `BD2`… The group key (in the description, `netbox-sync: vtp=<key>`) prefers a member's VTP domain (casefolded), else the first hostname — stable across runs. This handles empty-VTP (transparent) switches correctly: an island of CDP-connected switches shares one group instead of one group per switch. Overlapping VLAN IDs at one site coexist in different components' groups. Interfaces get their VLAN linkage (access untagged, trunk native + tagged) as before. Marker-owned (`netbox-sync:`) VLANs no longer reported by any group member, and stale duplicate groups (case variants, abandoned per-switch fallbacks), are deleted after each run; manual VLANs/groups are never modified or deleted.
 
 ## Offline detection
 
@@ -815,7 +815,7 @@ python -m pytest tests/
 
 ## همگام‌سازی VLAN (سیسکو)
 
-VLANهای `show vlan brief` بر اساس **دامنه broadcast** در IPAM گروه‌بندی می‌شوند: دامنه VTP هر سوئیچ (`show vtp status`؛ در صورت خالی بودن، به‌صورت per-switch) به یک **VLAN group** با نام `BD1`، `BD2`… نگاشت می‌شود (پایدار بین اجراها — کلید VTP در description گروه نگه‌داری می‌شود). VLANهای با ID هم‌پوشان در یک سایت در گروه‌های جداگانه کنار هم قرار می‌گیرند. اتصال VLAN رابط‌ها (untagged در access، native + tagged در trunk) مانند قبل انجام می‌شود. VLANهای علامت‌دار (`netbox-sync:`) که دیگر هیچ سوئیچی در گروه گزارش نکند پس از هر اجرا حذف می‌شوند؛ VLANها/گروه‌های دستی هرگز تغییر یا حذف نمی‌شوند.
+VLANهای `show vlan brief` بر اساس **دامنه broadcast مشتق از توپولوژی CDP** در IPAM گروه‌بندی می‌شوند: سوئیچ‌هایی که یکدیگر را به‌عنوان همسایه CDP می‌بینند (یال‌های درون یک سایت) اجزای متصل را تشکیل می‌دهند و هر جزء به یک **VLAN group** با نام `BD1`، `BD2`… نگاشت می‌شود. کلید گروه (در description، `netbox-sync: vtp=<key>`) دامنه VTP یکی از اعضا را ترجیح می‌دهد (با حروف کوچک)، در غیر این صورت اولین hostname — پایدار بین اجراها. این روش سوئیچ‌های بدون دامنه VTP (transparent) را نیز درست مدیریت می‌کند: جزیره سوئیچ‌های متصل به جای یک گروه per-switch، یک گروه مشترک می‌گیرند. VLANهای با ID هم‌پوشان در یک سایت در گروه‌های اجزای مختلف کنار هم قرار می‌گیرند. اتصال VLAN رابط‌ها (untagged در access، native + tagged در trunk) مانند قبل انجام می‌شود. VLANهای علامت‌دار (`netbox-sync:`) که دیگر هیچ عضوی از گروه گزارش نکند و گروه‌های تکراری قدیمی (انواع حروف بزرگ/کوچک، fallbackهای رها شده per-switch) پس از هر اجرا حذف می‌شوند؛ VLANها/گروه‌های دستی هرگز تغییر یا حذف نمی‌شوند.
 
 ## تشخیص آفلاین
 
