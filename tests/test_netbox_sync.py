@@ -68,6 +68,9 @@ class FakeEndpoint:
         for p in payloads:
             rec = FakeRecord(self._next_id, endpoint=self, **p)
             self._next_id += 1
+            # NetBox's device_id filter matches the device relation — model it
+            if not hasattr(rec, "device_id") and hasattr(rec, "device"):
+                rec.device_id = rec.device
             self.items.append(rec)
             records.append(rec)
         return records if isinstance(payload, list) else records[0]
@@ -548,6 +551,32 @@ def test_cdp_cables_protocol_label(monkeypatch):
 
     cisco.sync_cdp_cables(7, _NEIGHBORS, protocol="lldp")
     assert " lldp " in api.dcim.cables.created[0]["description"]
+
+
+def test_ensure_svi_interface_creates_virtual_with_vlan(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    ifaces_ep = FakeEndpoint()
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(interfaces=ifaces_ep))
+
+    iid = cisco.ensure_svi_interface(7, "Vlan50", {50: 500})
+    created = ifaces_ep.created[0]
+    assert created["name"] == "Vlan50"
+    assert created["type"] == "virtual"
+    assert created["untagged_vlan"] == 500
+    assert created["mgmt_only"] is True
+    assert iid is not None
+
+    # second call reuses
+    cisco.ensure_svi_interface(7, "Vlan50", {50: 500})
+    assert ifaces_ep.create_calls == 1
+
+
+def test_ensure_svi_interface_non_vlan_name(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    ifaces_ep = FakeEndpoint()
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(interfaces=ifaces_ep))
+    cisco.ensure_svi_interface(7, "Loopback0", {})
+    assert "untagged_vlan" not in ifaces_ep.created[0]
 
 
 # ── config validation ────────────────────────────────────────────────────────

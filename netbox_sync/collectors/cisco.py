@@ -195,6 +195,16 @@ def _expand_vlan_list(spec):
         vids.update(range(lo, min(hi, 4094) + 1))
     return vids
 
+def _parse_ip_interface_brief(text):
+    """Parse `show ip interface brief` -> {interface: ip}; unassigned skipped."""
+    out = {}
+    for line in text.splitlines():
+        s = line.strip()
+        m = re.match(r'^(\S+)\s+(\d+\.\d+\.\d+\.\d+)\s+', s)
+        if m:
+            out[m.group(1)] = m.group(2)
+    return out
+
 def _parse_vtp_status(text):
     """Parse `show vtp status`: domain name from the header block, operating
     mode only from the 'Feature VLAN:' section (later feature sections like
@@ -399,6 +409,13 @@ def cisco_collect_inventory(ip):
             vtp = {"domain": None, "mode": None}
             log("WARN", f"  show vtp status failed: {exc}")
 
+        try:
+            ip_brief = _parse_ip_interface_brief(sess.run("show ip interface brief"))
+            log("INFO", f"  ip brief: {len(ip_brief)} addressed interfaces")
+        except Exception as exc:
+            ip_brief = {}
+            log("WARN", f"  show ip interface brief failed: {exc}")
+
         inventory = {}
         add_item = _make_add_item(inventory)
         for row in inv_rows:
@@ -414,7 +431,8 @@ def cisco_collect_inventory(ip):
         }
         return {"summary": summary, "ports": ports,
                 "neighbors": neighbors, "inventory": inventory,
-                "vlans": vlans, "trunks": trunks, "vtp": vtp}
+                "vlans": vlans, "trunks": trunks, "vtp": vtp,
+                "ip_brief": ip_brief}
     finally:
         sess.logout()
 
@@ -464,6 +482,21 @@ def sync_cisco_interfaces(dev_id, ports):
                 continue   # never delete management interfaces
             try: iface.delete()
             except Exception: pass
+
+def ensure_svi_interface(dev_id, name, vid_map):
+    """Get-or-create an SVI (e.g. Vlan50) as a virtual mgmt_only interface;
+    untagged_vlan parsed from the VlanNN name when present in vid_map."""
+    api = netbox.get_netbox()
+    existing = api.dcim.interfaces.get(device_id=dev_id, name=name)
+    if existing:
+        return existing.id
+    payload = {"device": dev_id, "name": name, "type": "virtual",
+               "enabled": True, "mgmt_only": True,
+               "description": "netbox-sync: SVI (management)"}
+    m = re.match(r'^Vlan(\d+)$', name)
+    if m and int(m.group(1)) in vid_map:
+        payload["untagged_vlan"] = vid_map[int(m.group(1))]
+    return api.dcim.interfaces.create(payload).id
 
 # ── VLANs ────────────────────────────────────────────────────────────────────
 

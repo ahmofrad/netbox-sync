@@ -214,6 +214,18 @@ def test_expand_vlan_list():
     assert mod._expand_vlan_list("") is None
 
 
+IP_BRIEF = """Interface              IP-Address      OK? Method Status                Protocol
+Vlan1                  unassigned      YES NVRAM  administratively down down
+Vlan50                 172.31.1.103    YES NVRAM  up                    up
+GigabitEthernet1/0/1   unassigned      YES unset  up                    up
+"""
+
+
+def test_parse_ip_interface_brief():
+    out = mod._parse_ip_interface_brief(IP_BRIEF)
+    assert out == {"Vlan50": "172.31.1.103"}
+
+
 VTP_STATUS = """VTP Version capable             : 1 to 3
 VTP version running             : 3
 VTP Domain Name                 : snapp
