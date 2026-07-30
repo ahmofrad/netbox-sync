@@ -11,10 +11,11 @@ import pynetbox
 
 from netbox_sync.config import (NETBOX_URL, NETBOX_TOKEN, _env_bool,
                                 SERVER_ROLE, STORAGE_ROLE, SWITCH_ROLE,
-                                CISCO_ROLE,
+                                CISCO_ROLE, FORTIGATE_ROLE,
                                 DEFAULT_MFR, OFFLINE_THRESHOLD, log)
 from netbox_sync.models import (SERVER_MODEL_MAP, STORAGE_MODEL_MAP,
-                                SWITCH_MODEL_MAP, CISCO_MODEL_MAP)
+                                SWITCH_MODEL_MAP, CISCO_MODEL_MAP,
+                                FORTIGATE_MODEL_MAP)
 from netbox_sync.utils import (slugify, normalize_model, resolve_site,
                                _invalid_serial, _mgmt_prefixlen)
 
@@ -348,6 +349,39 @@ def ensure_cisco_device(probe):
     log("INFO", f"  Cisco switch created: {name} (id={new.id})")
     return new.id
 
+def ensure_fortigate_device(probe):
+    serial = (probe.get("serial") or "").strip()
+    mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Fortinet")
+    role_id = get_or_create_role(FORTIGATE_ROLE, "c62828")
+    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
+    site_id = get_or_create_site(site_name)
+    dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, FORTIGATE_MODEL_MAP)
+    name = _device_name(probe, prefix="fortigate")
+    api = get_netbox()
+    dev = find_device(serial, role_name=FORTIGATE_ROLE)
+    if dev is None:
+        cands = list(api.dcim.devices.filter(name=name, site_id=site_id, role_id=role_id))
+        dev = cands[0] if cands else None
+        if dev: log("INFO", f"  Found fortigate by name+site: {name} (id={dev.id})")
+    payload = {
+        "name": name, "status": "active", "site": site_id,
+        "device_type": dtype_id, "role": role_id,
+        "custom_fields": {
+            "fortigate_ip":       probe["ip"],
+            "fortigate_enabled":  True,
+            "fortigate_firmware": probe.get("firmware"),
+            "fortigate_model":    probe.get("model"),
+        },
+        **({"serial": serial} if not _invalid_serial(serial) else {}),
+    }
+    if dev:
+        api.dcim.devices.update([{"id": dev.id, **payload}])
+        log("INFO", f"  FortiGate updated: {name} (id={dev.id})")
+        return dev.id
+    new = api.dcim.devices.create(payload)
+    log("INFO", f"  FortiGate created: {name} (id={new.id})")
+    return new.id
+
 def mark_server_offline(dev_id, dev_name):
     try:
         get_netbox().dcim.devices.update([{
@@ -387,6 +421,16 @@ def mark_cisco_offline(dev_id, dev_name):
         log("WARN", f"  Cisco switch marked offline: {dev_name} (id={dev_id})")
     except Exception as e:
         log("ERROR", f"  Could not mark Cisco switch offline {dev_name}: {e}")
+
+def mark_fortigate_offline(dev_id, dev_name):
+    try:
+        get_netbox().dcim.devices.update([{
+            "id": dev_id, "status": "offline",
+            "custom_fields": {"fortigate_enabled": False},
+        }])
+        log("WARN", f"  FortiGate marked offline: {dev_name} (id={dev_id})")
+    except Exception as e:
+        log("ERROR", f"  Could not mark FortiGate offline {dev_name}: {e}")
 
 # ── Consecutive-failure tracking (prevents flapping) ─────────────────────────
 # A device must fail to appear in the scan for OFFLINE_THRESHOLD consecutive

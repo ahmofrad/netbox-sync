@@ -603,11 +603,12 @@ def _cable_iface_ids(cable):
         if oid is not None:
             yield oid
 
-def sync_cdp_cables(dev_id, neighbors):
-    """Reconcile NetBox cables for one switch from CDP/LLDP neighbor data.
+def sync_cdp_cables(dev_id, neighbors, protocol="cdp"):
+    """Reconcile NetBox cables for one device from CDP/LLDP neighbor data.
 
     Both ends must resolve to existing NetBox interfaces; anything else is
-    skipped (DEBUG). Only marker-owned cables are managed."""
+    skipped (DEBUG). Only marker-owned cables are managed. The description
+    records the discovery protocol ('cdp' or 'lldp')."""
     api = netbox.get_netbox()
     local_ifaces = {str(i.name): i
                     for i in api.dcim.interfaces.filter(device_id=dev_id)}
@@ -649,7 +650,7 @@ def sync_cdp_cables(dev_id, neighbors):
                         f"{peer_name}, skipping")
             continue
 
-        desc = (f"{CABLE_MARKER} cdp {local.name} <-> "
+        desc = (f"{CABLE_MARKER} {protocol} {local.name} <-> "
                 f"{peer_name} {peer_iface.name}")
         existing = marked_by_iface.get(local.id) or marked_by_iface.get(peer_iface.id)
         if existing:

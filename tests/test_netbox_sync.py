@@ -486,6 +486,66 @@ def test_validate_config_fortigate_requirements(monkeypatch, tmp_path):
     cfg._validate_config()   # creds + non-empty token file -> passes
 
 
+# ── FortiGate device + interfaces ────────────────────────────────────────────
+
+def test_ensure_fortigate_device_creates(monkeypatch):
+    devices_ep = FakeEndpoint()
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(devices=devices_ep))
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda n: 11)
+    monkeypatch.setattr(nbx, "get_or_create_role", lambda n, *a: 12)
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda n: 13)
+    monkeypatch.setattr(nbx, "get_or_create_device_type", lambda *a, **k: 14)
+    monkeypatch.setattr(nbx, "find_device", lambda *a, **k: None)
+
+    nbx.ensure_fortigate_device({
+        "ip": "192.0.2.70", "serial": "FGT60FTK21000001",
+        "model": "FortiGate 60F", "hostname": "FGT-DC-01",
+        "manufacturer": "Fortinet", "firmware": "v7.2.4"})
+    payload = devices_ep.created[0]
+    assert payload["serial"] == "FGT60FTK21000001"
+    assert payload["custom_fields"]["fortigate_ip"] == "192.0.2.70"
+    assert payload["custom_fields"]["fortigate_enabled"] is True
+
+
+def test_sync_fortigate_interfaces_bulk_and_vlan_subif(monkeypatch):
+    import netbox_sync.collectors.fortigate as fg
+    ifaces_ep = FakeEndpoint([
+        FakeRecord(1, name="port1", device_id=7),
+        FakeRecord(2, name="port9", device_id=7, mgmt_only=False),
+    ])
+    api = _fake_api(interfaces=ifaces_ep)
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    ports = [
+        {"name": "port1", "link": True, "speed_mbps": 1000,
+         "type": "physical", "ip": "", "vlanid": None, "parent": ""},
+        {"name": "port1.10", "link": True, "speed_mbps": 1000,
+         "type": "vlan", "ip": "10.10.10.1/24", "vlanid": 10, "parent": "port1"},
+    ]
+    fg.sync_fortigate_interfaces(7, ports, {10: 110})
+
+    by_name = {}
+    for u in ifaces_ep.updated:
+        rec = next(i for i in ifaces_ep.items if i.id == u["id"])
+        by_name[rec.name] = u
+    assert by_name["port1"]["type"] == "1000base-t"
+    created = {c["name"]: c for c in ifaces_ep.created}
+    assert created["port1.10"]["type"] == "virtual"
+    assert created["port1.10"]["untagged_vlan"] == 110
+    assert created["port1.10"]["mode"] == "tagged"
+    assert ifaces_ep.deleted_ids == [2]
+    assert ifaces_ep.update_calls == 1 and ifaces_ep.create_calls == 1
+
+
+def test_cdp_cables_protocol_label(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    api = _cisco_cable_api([_LOCAL_IFACE], _PEER, [_PEER_IFACE], [])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sync_cdp_cables(7, _NEIGHBORS, protocol="lldp")
+    assert " lldp " in api.dcim.cables.created[0]["description"]
+
+
 # ── config validation ────────────────────────────────────────────────────────
 
 REQUIRED_VARS = ["NETBOX_URL", "NETBOX_TOKEN", "REDFISH_USER", "REDFISH_PASS",

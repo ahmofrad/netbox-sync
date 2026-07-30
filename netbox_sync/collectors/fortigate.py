@@ -222,3 +222,48 @@ def fortigate_collect(ip):
     }
     return {"summary": summary, "ports": ports, "vlans": vlans,
             "neighbors": neighbors, "inventory": inventory}
+
+# ── interfaces ───────────────────────────────────────────────────────────────
+
+def sync_fortigate_interfaces(dev_id, ports, vid_map):
+    """Bulk create/update FortiGate interfaces: physical ports typed by
+    speed, VLAN subinterfaces as virtual with untagged_vlan."""
+    api = netbox.get_netbox()
+    existing = {str(i.name): i
+                for i in api.dcim.interfaces.filter(device_id=dev_id)}
+    seen = set()
+    updates, creates = [], []
+    for p in ports:
+        name = p["name"]
+        seen.add(name)
+        if p.get("type") == "vlan" and p.get("vlanid") is not None:
+            payload = {"device": dev_id, "name": name, "type": "virtual",
+                       "enabled": p.get("link", False),
+                       "description": f"vlanid={p['vlanid']} ip={p.get('ip')}"[:200],
+                       "mgmt_only": False}
+            if p["vlanid"] in vid_map:
+                payload["mode"] = "tagged"
+                payload["untagged_vlan"] = vid_map[p["vlanid"]]
+        else:
+            payload = {"device": dev_id, "name": name,
+                       "type": _fg_interface_type(p.get("speed_mbps")),
+                       "enabled": bool(p.get("link")),
+                       "description": f"type={p.get('type')} ip={p.get('ip')}"[:200],
+                       "mgmt_only": False}
+        if name in existing:
+            updates.append({"id": existing[name].id, **payload})
+        else:
+            creates.append(payload)
+    if updates:
+        api.dcim.interfaces.update(updates)
+    if creates:
+        try:
+            api.dcim.interfaces.create(creates)
+        except Exception as e:
+            log("WARN", f"  Could not create interfaces: {e}")
+    for name, iface in existing.items():
+        if name not in seen:
+            if getattr(iface, "mgmt_only", False):
+                continue   # never delete management interfaces
+            try: iface.delete()
+            except Exception: pass
