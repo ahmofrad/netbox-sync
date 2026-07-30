@@ -9,9 +9,13 @@ from netbox_sync.collectors.cisco import (cisco_collect_inventory,
                                           ensure_svi_interface,
                                           sweep_stale_vlans,
                                           sweep_legacy_site_vlans,
-                                          sync_cdp_cables)
+                                          sync_cdp_cables,
+                                          _site_vlan_index,
+                                          _mac_to_cisco,
+                                          _cisco_mac_lookup)
 from netbox_sync.collectors.fortigate import (fortigate_collect,
-                                              sync_fortigate_interfaces)
+                                              sync_fortigate_interfaces,
+                                              resolve_fortigate_vlans)
 from netbox_sync.collectors.msa import storage_collect_inventory
 from netbox_sync.collectors.redfish import rf_collect_inventory
 from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
@@ -201,6 +205,8 @@ def run_sync():
     # ── Process Cisco switches ────────────────────────────────────────────────
     live_cisco_ips = {h["ip"] for h in found["cisco_switches"]}
     group_vlan_seen = {}
+    switch_group_ips = {}
+    site_indexes = {}
     legacy_sites = set()
     for probe in found["cisco_switches"]:
         ip = probe["ip"]
@@ -257,6 +263,7 @@ def run_sync():
                 group_id = ensure_vlan_group(site_id, key)
                 vid_map = sync_cisco_vlans(group_id, probe.get("hostname") or "", vlans)
                 group_vlan_seen.setdefault(group_id, set()).update(vid_map.keys())
+                switch_group_ips.setdefault(group_id, []).append(probe["ip"])
                 legacy_sites.add(site_id)
             except Exception as e:
                 log("WARN", f"  VLAN sync failed for {ip}: {e}")
@@ -353,12 +360,37 @@ def run_sync():
         vid_map = {}
         if site_id:
             try:
-                group_id = ensure_vlan_group(site_id, probe.get("hostname") or ip)
-                vid_map = sync_cisco_vlans(group_id, probe.get("hostname") or "", vlans)
-                group_vlan_seen.setdefault(group_id, set()).update(vid_map.keys())
-                legacy_sites.add(site_id)
+                site_index = site_indexes.get(site_id)
+                if site_index is None:
+                    site_index = _site_vlan_index(site_id)
+                    site_indexes[site_id] = site_index
+
+                def _mac_lookup(vid, mac):
+                    if not mac: return None
+                    cmac = _mac_to_cisco(mac)
+                    if not cmac: return None
+                    for cand_gid, _vlan_id in site_index.get(vid, []):
+                        for sw_ip in switch_group_ips.get(cand_gid, []):
+                            try:
+                                if vid in _cisco_mac_lookup(sw_ip, cmac):
+                                    return cand_gid
+                            except Exception:
+                                continue
+                    return None
+
+                vid_map, missing = resolve_fortigate_vlans(
+                    site_index, vlans, data.get("vlan_macs", {}), _mac_lookup)
+                if missing:
+                    group_id = ensure_vlan_group(site_id, probe.get("hostname") or ip)
+                    created = sync_cisco_vlans(group_id, probe.get("hostname") or "", missing)
+                    vid_map.update(created)
+                    group_vlan_seen.setdefault(group_id, set()).update(created.keys())
+                    legacy_sites.add(site_id)
+                    log("INFO", f"  [OK] FortiGate {ip} — {len(vid_map) - len(created)} VLANs reused, {len(created)} created")
+                else:
+                    log("INFO", f"  [OK] FortiGate {ip} — all {len(vid_map)} VLANs reused from switches")
             except Exception as e:
-                log("WARN", f"  VLAN sync failed for {ip}: {e}")
+                log("WARN", f"  FortiGate VLAN resolution failed for {ip}: {e}")
         else:
             log("WARN", f"  no site on device for {ip} — skipping VLAN sync")
 

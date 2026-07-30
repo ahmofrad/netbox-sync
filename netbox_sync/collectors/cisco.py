@@ -518,14 +518,15 @@ def ensure_svi_interface(dev_id, name, vid_map):
     return api.dcim.interfaces.create(payload).id
 
 def _cisco_mac_lookup(ip, cisco_mac):
-    """Ask one switch for a specific MAC; return the VLAN it is learned in
-    (or None). Used for FortiGate VLAN disambiguation."""
+    """Ask one switch for a specific MAC; return the SET of VLANs it is
+    learned in (the MAC may appear in several). Used for FortiGate VLAN
+    disambiguation."""
     sess = CiscoSwitchSession(ip)
     try:
         sess.login()
         rows = _parse_mac_table_entry(
             sess.run(f"show mac address-table address {cisco_mac}"))
-        return rows[0]["vid"] if rows else None
+        return {r["vid"] for r in rows}
     finally:
         sess.logout()
 

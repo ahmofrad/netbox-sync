@@ -231,7 +231,7 @@ def resolve_fortigate_vlans(site_vlan_index, vlans, vlan_macs, mac_lookup):
     return vid_map, missing
 ```
 
-- [ ] **Step 4: GREEN + commit** — `pytest tests\ -q` (132 pass); `git commit -m "Add site VLAN index and FortiGate VLAN resolution"`
+- [ ] **Step 4: GREEN + commit** — `pytest tests\ -q` (131 pass); `git commit -m "Add site VLAN index and FortiGate VLAN resolution"`
 
 ---
 
