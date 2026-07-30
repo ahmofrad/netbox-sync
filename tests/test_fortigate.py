@@ -25,6 +25,24 @@ def test_fg_status():
                    "model": "FortiGate-60F", "version": "v7.2.4"}
 
 
+# Real /monitor/system/status from a FortiGate 1800F running FortiOS 7.2.13:
+# serial is TOP LEVEL, model is split into model_name/model_number.
+STATUS_JSON_72 = {"http_method": "GET",
+                  "serial": "FG180FTK21901250", "version": "v7.2.13",
+                  "results": {"model_name": "FortiGate",
+                              "model_number": "1800F", "model": "FG180F",
+                              "hostname": "HQ",
+                              "log_disk_status": "not_available"}}
+
+
+def test_fg_status_fortios_72_real_shape():
+    out = mod._fg_status(STATUS_JSON_72)
+    assert out["serial"] == "FG180FTK21901250"
+    assert out["model"] == "FortiGate 1800F"
+    assert out["hostname"] == "HQ"
+    assert out["version"] == "v7.2.13"
+
+
 def test_fg_interfaces_merge():
     ports = {p["name"]: p for p in mod._fg_interfaces(MONITOR_IFACES, CMDB_IFACES)}
     assert ports["port1"]["link"] is True
@@ -33,6 +51,41 @@ def test_fg_interfaces_merge():
     assert ports["port2"]["speed_mbps"] == 1000
     assert ports["port1.10"]["vlanid"] == 10
     assert ports["port1.10"]["parent"] == "port1"
+
+
+def test_fg_interfaces_include_cmdb_vlan_subifs():
+    """monitor/system/interface on FortiOS 7.2 reports ONLY physical ports —
+    VLAN subinterfaces exist only in cmdb config and must be unioned in."""
+    mon = {"results": {
+        "port1": {"link": True, "speed": "1000full"},
+        "port2": {"link": False, "speed": "1000"}}}
+    cmdb = {"results": [
+        {"name": "port1", "type": "physical", "ip": "0.0.0.0 0.0.0.0"},
+        {"name": "port2", "type": "physical", "ip": "172.31.9.1 255.255.255.0"},
+        {"name": "AP MGMT", "type": "vlan", "vlanid": 51,
+         "interface": "Core Switch", "ip": "172.31.2.1 255.255.255.0"},
+        {"name": "AsiaTech", "type": "vlan", "vlanid": 10,
+         "interface": "PO5", "ip": "79.127.120.184 255.255.255.240"},
+    ]}
+    ports = {p["name"]: p for p in mod._fg_interfaces(mon, cmdb)}
+    assert len(ports) == 4
+    assert ports["AP MGMT"]["vlanid"] == 51
+    assert ports["AP MGMT"]["parent"] == "Core Switch"
+    assert ports["AP MGMT"]["link"] is True
+    assert ports["AsiaTech"]["vlanid"] == 10
+
+
+def test_ssh_command_failure_detected():
+    class FakeSess:
+        def run(self, cmd):
+            return "8757: Unknown action 0\nCommand fail. Return code -1"
+    assert mod._ssh_run_or_none(FakeSess(), "diagnose lldp neighbor-summary",
+                                "lldp") is None
+
+    class GoodSess:
+        def run(self, cmd):
+            return "port1 00:1c:73:ab:cd:ef SW1 B,R 120 Gi1/0/1"
+    assert mod._ssh_run_or_none(GoodSess(), "x", "lldp") is not None
 
 
 def test_fg_vlans():
