@@ -12,7 +12,8 @@ MONITOR_IFACES = {"results": {
     "port1.10": {"link": True, "speed": "1000full"}}}
 
 CMDB_IFACES = {"results": [
-    {"name": "port1", "type": "physical", "ip": "0.0.0.0 0.0.0.0"},
+    {"name": "port1", "type": "physical", "ip": "0.0.0.0 0.0.0.0",
+     "alias": "UPLINK-CORE"},
     {"name": "port2", "type": "physical", "ip": "172.31.9.1 255.255.255.0"},
     {"name": "port1.10", "type": "vlan", "vlanid": 10,
      "interface": "port1", "ip": "10.10.10.1 255.255.255.0"},
@@ -51,6 +52,12 @@ def test_fg_interfaces_merge():
     assert ports["port2"]["speed_mbps"] == 1000
     assert ports["port1.10"]["vlanid"] == 10
     assert ports["port1.10"]["parent"] == "port1"
+
+
+def test_fg_interfaces_capture_alias():
+    ports = {p["name"]: p for p in mod._fg_interfaces(MONITOR_IFACES, CMDB_IFACES)}
+    assert ports["port1"]["alias"] == "UPLINK-CORE"
+    assert ports["port2"]["alias"] == ""
 
 
 def test_fg_interfaces_include_cmdb_vlan_subifs():

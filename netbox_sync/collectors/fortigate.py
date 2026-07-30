@@ -70,6 +70,7 @@ def _fg_interfaces(monitor_data, cmdb_data):
             "ip": c.get("ip") or "",
             "vlanid": c.get("vlanid"),
             "parent": c.get("interface") or "",
+            "alias": c.get("alias") or "",
         })
     for c in cfg:
         if not isinstance(c, dict): continue
@@ -83,6 +84,7 @@ def _fg_interfaces(monitor_data, cmdb_data):
             "ip": c.get("ip") or "",
             "vlanid": c.get("vlanid"),
             "parent": c.get("interface") or "",
+            "alias": c.get("alias") or "",
         })
     return ports
 
@@ -290,6 +292,8 @@ def sync_fortigate_interfaces(dev_id, ports, vid_map):
                        "enabled": bool(p.get("link")),
                        "description": f"type={p.get('type')} ip={p.get('ip')}"[:200],
                        "mgmt_only": False}
+        if p.get("alias"):
+            payload["label"] = str(p["alias"])[:64]
         if name in existing:
             updates.append({"id": existing[name].id, **payload})
         else:

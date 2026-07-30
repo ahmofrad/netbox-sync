@@ -518,9 +518,11 @@ def test_sync_fortigate_interfaces_bulk_and_vlan_subif(monkeypatch):
 
     ports = [
         {"name": "port1", "link": True, "speed_mbps": 1000,
-         "type": "physical", "ip": "", "vlanid": None, "parent": ""},
+         "type": "physical", "ip": "", "vlanid": None, "parent": "",
+         "alias": "UPLINK-CORE"},
         {"name": "port1.10", "link": True, "speed_mbps": 1000,
-         "type": "vlan", "ip": "10.10.10.1/24", "vlanid": 10, "parent": "port1"},
+         "type": "vlan", "ip": "10.10.10.1/24", "vlanid": 10, "parent": "port1",
+         "alias": ""},
     ]
     fg.sync_fortigate_interfaces(7, ports, {10: 110})
 
@@ -529,10 +531,12 @@ def test_sync_fortigate_interfaces_bulk_and_vlan_subif(monkeypatch):
         rec = next(i for i in ifaces_ep.items if i.id == u["id"])
         by_name[rec.name] = u
     assert by_name["port1"]["type"] == "1000base-t"
+    assert by_name["port1"]["label"] == "UPLINK-CORE"
     created = {c["name"]: c for c in ifaces_ep.created}
     assert created["port1.10"]["type"] == "virtual"
     assert created["port1.10"]["untagged_vlan"] == 110
     assert created["port1.10"]["mode"] == "tagged"
+    assert "label" not in created["port1.10"]   # empty alias -> no label key
     assert ifaces_ep.deleted_ids == [2]
     assert ifaces_ep.update_calls == 1 and ifaces_ep.create_calls == 1
 
