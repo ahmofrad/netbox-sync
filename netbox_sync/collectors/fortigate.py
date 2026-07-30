@@ -109,7 +109,7 @@ def _parse_lldp_summary(text):
     entries = []
     for line in text.splitlines():
         s = line.strip()
-        if not s or s.startswith("-") or s.lower().startswith("port"):
+        if not s or s.startswith("-") or re.match(r'^Port\s', s):
             continue
         m = re.match(r'^(\S+)\s+([0-9a-fA-F:]{17})\s+(.+?)\s+([A-Z,]+)\s+(\d+)\s+(\S+)$', s)
         if not m: continue
