@@ -244,6 +244,35 @@ def test_parse_mac_table_entry():
     assert rows == [{"vid": 51, "mac": "00:09:0f:09:00:24", "port": "Te1/1/1"}]
 
 
+# ── broadcast domain topology ────────────────────────────────────────────────
+
+def test_norm_sw_name():
+    assert mod._norm_sw_name("F12-CCTV-SW-02.example.com") == "f12-cctv-sw-02"
+    assert mod._norm_sw_name("R4-Core-LAN-SW") == "r4-core-lan-sw"
+    assert mod._norm_sw_name("") == ""
+
+
+def test_broadcast_components():
+    names = {"sw-a", "sw-b", "sw-c", "sw-d", "sw-e"}
+    edges = [("sw-a", "sw-b"), ("sw-b", "sw-c"), ("sw-d", "sw-d"),
+             ("sw-d", "ghost")]     # ghost edges ignored by caller semantics
+    comps = {frozenset(c) for c in mod._broadcast_components(names, edges)}
+    assert comps == {frozenset({"sw-a", "sw-b", "sw-c"}),
+                     frozenset({"sw-d"}), frozenset({"sw-e"})}
+
+
+def test_component_key_prefers_vtp_domain_casefolded():
+    members = {"f_-1-cctv-sw", "f12-cctv-sw-02"}
+    vtp = {"f_-1-cctv-sw": "", "f12-cctv-sw-02": "Snapp"}
+    assert mod._component_key(members, vtp) == "snapp"
+
+
+def test_component_key_first_hostname_when_no_vtp():
+    members = {"f_-4-cctv-sw-n-01", "f12-cctv-sw-02", "f_-1-cctv-sw"}
+    vtp = {"f_-4-cctv-sw-n-01": "", "f12-cctv-sw-02": "", "f_-1-cctv-sw": ""}
+    assert mod._component_key(members, vtp) == "f12-cctv-sw-02"
+
+
 VTP_STATUS = """VTP Version capable             : 1 to 3
 VTP version running             : 3
 VTP Domain Name                 : snapp
