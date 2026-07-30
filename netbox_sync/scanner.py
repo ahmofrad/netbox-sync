@@ -4,10 +4,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from netbox_sync.collectors.brocade import probe_san_switch
 from netbox_sync.collectors.cisco import probe_cisco_switch
+from netbox_sync.collectors.fortigate import probe_fortigate
 from netbox_sync.collectors.msa import probe_storage
 from netbox_sync.collectors.redfish import probe_redfish
 from netbox_sync.config import (BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
-                                CISCO_RANGES, SCAN_WORKERS, log)
+                                CISCO_RANGES, FORTIGATE_RANGES,
+                                SCAN_WORKERS, log)
 from netbox_sync.utils import expand_ranges
 
 
@@ -27,7 +29,8 @@ def _drain_pool(ex, futures, on_hit):
 
 
 def scan_all():
-    all_found = {"servers": [], "storage": [], "san_switches": [], "cisco_switches": []}
+    all_found = {"servers": [], "storage": [], "san_switches": [], "cisco_switches": [],
+                 "fortigates": []}
 
     bmc_ips = expand_ranges(BMC_RANGES)
     if bmc_ips:
@@ -101,5 +104,27 @@ def scan_all():
             log("INFO", "No Cisco IPs to scan (all excluded).")
     else:
         log("INFO", "Cisco ranges not configured — skipping Cisco scan.")
+
+    # ── FortiGates (REST API, opt-in family) ────────────────────────────────
+    if FORTIGATE_RANGES:
+        used_ips = used_ips | {h["ip"] for h in all_found["cisco_switches"]}
+        all_fg_ips = expand_ranges(FORTIGATE_RANGES)
+        fg_ips = [ip for ip in all_fg_ips if ip not in used_ips]
+        skipped_fg = len(all_fg_ips) - len(fg_ips)
+        if skipped_fg:
+            log("INFO", f"Skipped {skipped_fg} IP(s) in FortiGate ranges already found.")
+        if fg_ips:
+            log("INFO", f"Scanning {len(fg_ips)} IPs for FortiGates (API) ...")
+            ex = ThreadPoolExecutor(max_workers=SCAN_WORKERS)
+            futures = {ex.submit(probe_fortigate, ip): ip for ip in fg_ips}
+            def _on_fg(r):
+                log("INFO", f"  + FORTIGATE {r['ip']}  {r['model']}  s/n={r['serial']}")
+                all_found["fortigates"].append(r)
+            _drain_pool(ex, futures, _on_fg)
+            log("INFO", f"FortiGate scan done: {len(all_found['fortigates'])} found.")
+        else:
+            log("INFO", "No FortiGate IPs to scan (all excluded).")
+    else:
+        log("INFO", "FortiGate ranges not configured — skipping FortiGate scan.")
 
     return all_found

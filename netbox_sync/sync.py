@@ -9,15 +9,19 @@ from netbox_sync.collectors.cisco import (cisco_collect_inventory,
                                           sweep_stale_vlans,
                                           sweep_legacy_site_vlans,
                                           sync_cdp_cables)
+from netbox_sync.collectors.fortigate import (fortigate_collect,
+                                              sync_fortigate_interfaces)
 from netbox_sync.collectors.msa import storage_collect_inventory
 from netbox_sync.collectors.redfish import rf_collect_inventory
 from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
-                                CISCO_RANGES)
+                                CISCO_RANGES, FORTIGATE_RANGES)
 from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_storage_device, ensure_san_switch_device,
-                                ensure_cisco_device, ensure_primary_ip,
+                                ensure_cisco_device, ensure_fortigate_device,
+                                ensure_primary_ip,
                                 mark_server_offline, mark_storage_offline,
                                 mark_san_offline, mark_cisco_offline,
+                                mark_fortigate_offline,
                                 _check_offline,
                                 sync_inventory)
 from netbox_sync.scanner import scan_all
@@ -287,6 +291,88 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  Cisco cable sync failed for {ip}: {e}")
 
+    # ── Process FortiGates ────────────────────────────────────────────────────
+    live_fortigate_ips = {h["ip"] for h in found["fortigates"]}
+    for probe in found["fortigates"]:
+        ip = probe["ip"]
+        log("INFO", f"Processing FORTIGATE {ip}  ({probe.get('model')} / {probe.get('serial')})")
+
+        try:
+            dev_id = ensure_fortigate_device(probe)
+        except Exception as e:
+            log("ERROR", f"  ensure_fortigate_device failed for {ip}: {e}"); continue
+
+        try:
+            ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"))
+        except Exception as e:
+            log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
+
+        try:
+            data = fortigate_collect(ip)
+        except KeyboardInterrupt: raise
+        except Exception as e:
+            log("ERROR", f"  FortiGate inventory collection failed for {ip}: {e}"); continue
+
+        summary = data["summary"]
+        ports = data["ports"]
+        vlans = data["vlans"]
+        neighbors = data["neighbors"]
+        inv = data["inventory"]
+
+        try:
+            payload = {
+                "id": dev_id,
+                "status": "active",
+                "custom_fields": {
+                    "fortigate_ip":         ip,
+                    "fortigate_enabled":    True,
+                    "fortigate_firmware":   summary.get("firmware") or probe.get("firmware"),
+                    "fortigate_model":      summary.get("model") or probe.get("model"),
+                    "fortigate_port_count": summary.get("port_count"),
+                },
+            }
+            if summary.get("serial"): payload["serial"] = summary["serial"]
+            api.dcim.devices.update([payload])
+        except Exception as e:
+            log("ERROR", f"  FortiGate update failed for {ip}: {e}")
+
+        site_id = None
+        try:
+            dev_rec = api.dcim.devices.get(id=dev_id)
+            site_id = getattr(getattr(dev_rec, "site", None), "id", None)
+        except Exception:
+            site_id = None
+
+        vid_map = {}
+        if site_id:
+            try:
+                group_id = ensure_vlan_group(site_id, probe.get("hostname") or ip)
+                vid_map = sync_cisco_vlans(group_id, probe.get("hostname") or "", vlans)
+                group_vlan_seen.setdefault(group_id, set()).update(vid_map.keys())
+                legacy_sites.add(site_id)
+            except Exception as e:
+                log("WARN", f"  VLAN sync failed for {ip}: {e}")
+        else:
+            log("WARN", f"  no site on device for {ip} — skipping VLAN sync")
+
+        try:
+            sync_fortigate_interfaces(dev_id, ports, vid_map)
+            log("INFO", f"  [OK] FortiGate {ip} — {len(ports)} interfaces synced")
+        except Exception as e:
+            log("ERROR", f"  FortiGate interface sync failed for {ip}: {e}")
+
+        try:
+            sync_inventory(dev_id, inv)
+            log("INFO", f"  [OK] FortiGate {ip} — {len(inv)} inventory items synced")
+        except Exception as e:
+            log("ERROR", f"  FortiGate inventory sync failed for {ip}: {e}")
+
+        try:
+            sync_cdp_cables(dev_id, neighbors, protocol="lldp")
+            log("INFO", f"  [OK] FortiGate {ip} — {len(neighbors)} neighbors processed")
+        except Exception as e:
+            log("ERROR", f"  FortiGate cable sync failed for {ip}: {e}")
+
     # ── Sweep stale marker-owned VLANs per group + legacy site VLANs ─────────
     for group_id, seen in group_vlan_seen.items():
         try:
@@ -312,6 +398,8 @@ def run_sync():
                    live_san_ips, mark_san_offline, "SAN switches")
     _offline_sweep(api, bool(CISCO_RANGES), "cf_cisco_enabled", "cisco_ip",
                    live_cisco_ips, mark_cisco_offline, "Cisco switches")
+    _offline_sweep(api, bool(FORTIGATE_RANGES), "cf_fortigate_enabled", "fortigate_ip",
+                   live_fortigate_ips, mark_fortigate_offline, "FortiGates")
 
     log("INFO", "Unified sync complete")
     log("INFO", "=" * 60)

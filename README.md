@@ -2,7 +2,7 @@
 
 > **English** documentation below · مستندات **فارسی** در ادامه
 
-A Python automation tool that automatically discovers **HPE ProLiant servers** (via Redfish/iLO), **HPE MSA storage arrays** (via the XML API), **Brocade / HPE B-Series SAN switches** (via SSH CLI), and **Cisco Catalyst switches** (via SSH CLI, with CDP/LLDP cabling) on your network, then synchronizes their hardware inventory into [NetBox](https://github.com/netbox-community/netbox) DCIM. It creates, updates, and marks devices offline, and keeps per-component inventory (CPU, RAM, disks, PSUs, NICs, HBAs, controllers, batteries, FRUs, SFP transceivers, FC ports, switch modules, fans) in sync — running on a daily scheduler.
+A Python automation tool that automatically discovers **HPE ProLiant servers** (via Redfish/iLO), **HPE MSA storage arrays** (via the XML API), **Brocade / HPE B-Series SAN switches** (via SSH CLI), **Cisco Catalyst switches** (via SSH CLI, with CDP/LLDP cabling), and **FortiGate firewalls** (via the REST API + SSH, with LLDP cabling) on your network, then synchronizes their hardware inventory into [NetBox](https://github.com/netbox-community/netbox) DCIM. It creates, updates, and marks devices offline, and keeps per-component inventory (CPU, RAM, disks, PSUs, NICs, HBAs, controllers, batteries, FRUs, SFP transceivers, FC ports, switch modules, fans) in sync — you schedule it (cron, systemd timer, Task Scheduler).
 
 ---
 
@@ -108,8 +108,9 @@ A Python automation tool that automatically discovers **HPE ProLiant servers** (
 | File | Purpose |
 |------|---------|
 | `sync_all_to_netbox.py` | Thin entry point — validates config and runs the scheduler (`python sync_all_to_netbox.py` works exactly as before). |
-| `netbox_sync/` | The implementation package: `config` (.env/credentials/logging), `utils` (naming helpers, IP tools), `netbox` (NetBox API layer: CRUD, device ensure/offline, inventory sync), `collectors/` (`redfish`, `msa`, `brocade`, `cisco` sessions + inventory collection), `scanner` (parallel IP probing), `sync` (the `run_sync` orchestrator). |
+| `netbox_sync/` | The implementation package: `config` (.env/credentials/logging), `utils` (naming helpers, IP tools), `netbox` (NetBox API layer: CRUD, device ensure/offline, inventory sync), `collectors/` (`redfish`, `msa`, `brocade`, `cisco`, `fortigate` sessions + inventory collection), `scanner` (parallel IP probing), `sync` (the `run_sync` orchestrator). |
 | `netbox_sync/collectors/cisco.py` | Cisco Catalyst collector — netmiko SSH, IOS/IOS-XE CLI parsers, CDP/LLDP cable reconciliation. |
+| `netbox_sync/collectors/fortigate.py` | FortiGate collector — REST API session + SSH extras (LLDP cables, SFP transceivers). |
 | `netbox_sync/models.py` | Server (`SERVER_MODEL_MAP`), storage (`STORAGE_MODEL_MAP`), and SAN switch (`SWITCH_MODEL_MAP`) model-name normalization maps. Maps vendor strings (e.g. `proliant dl360 gen10`) to canonical NetBox device-type names (e.g. `HPE DL360 G10`). |
 | `.env.example` | Template for your `.env` file. Copy to `.env` and fill in real values. |
 | `requirements.txt` | Python dependencies (`requests`, `pynetbox`, `python-dotenv`, `paramiko`, `netmiko`). |
@@ -171,6 +172,13 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `CISCO_PORT` | ❌ | `22` | SSH port for Cisco switches. |
 | `CISCO_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for Cisco switches. Empty = family disabled. |
 | `DEFAULT_CISCO_ROLE` | ❌ | `Switch` | NetBox device role for Cisco switches. |
+| `FORTIGATE_USER` | ❌* | — | SSH username for FortiGates (LLDP + transceivers); required when `FORTIGATE_RANGES` is set. |
+| `FORTIGATE_PASS` | ❌* | — | SSH password for FortiGates. |
+| `FORTIGATE_PORT` | ❌ | `443` | REST API port (per-device override possible in the token file). |
+| `FORTIGATE_SSH_PORT` | ❌ | `22` | SSH port for FortiGates. |
+| `FORTIGATE_TOKEN_FILE` | ❌ | `fortigate_tokens.txt` | Per-device API tokens: `<ip[:port]> <token>` per line (`#` comments). Gitignored. |
+| `FORTIGATE_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for FortiGates. Empty = family disabled. |
+| `DEFAULT_FORTIGATE_ROLE` | ❌ | `Firewall` | NetBox device role for FortiGates. |
 
 > *The shipped defaults in `netbox_sync/config.py` are **documentation-only** placeholder CIDRs (`192.0.2.0/27` = TEST-NET). Set the ranges in `.env` to your real networks — or set a range **empty** (e.g. `BMC_RANGES=`) to disable that family entirely (no scanning and no offline marking for it).
 
@@ -281,7 +289,17 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 | `cisco_model` | Text | Model |
 | `cisco_port_count` | Integer | Port count |
 
-> The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` (NetBox custom-field filter syntax).
+**For FortiGate firewalls:**
+
+| Custom field | Type | Label |
+|--------------|------|-------|
+| `fortigate_ip` | Text | FortiGate IP |
+| `fortigate_enabled` | Boolean | FortiGate enabled |
+| `fortigate_firmware` | Text | FortiOS version |
+| `fortigate_model` | Text | Model |
+| `fortigate_port_count` | Integer | Port count |
+
+> The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` (NetBox custom-field filter syntax).
 
 ### 3. Device roles & sites
 
@@ -347,6 +365,12 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 - Connects via SSH and runs `show version`, `show inventory`, `show interfaces status`, `show vlan brief`, `show interfaces trunk`, `show cdp neighbors detail` (with `show lldp neighbors detail` as fallback).
 - The Cisco family is **opt-in**: it only activates when `CISCO_RANGES` is set.
 
+**Firewalls (FortiGate, REST API + SSH extras):**
+- FortiGate 40F / 60F / 80F / 100F / 200F class (FortiOS 6/7). Queries `/api/v2/monitor/system/status`, `/api/v2/monitor/system/interface`, `/api/v2/cmdb/system/interface` (VDOM `root`).
+- API tokens are **per-device** in `fortigate_tokens.txt` (gitignored): `<ip[:port]> <token>` per line, `#` comments allowed.
+- SSH runs `diagnose lldp neighbor-summary` (cables) and `diagnose sys transceiver list` (SFP inventory).
+- **Opt-in**: activates only when `FORTIGATE_RANGES` is set.
+
 See `netbox_sync/models.py` for the full model alias maps. Add your own models there.
 
 ## Inventory items collected
@@ -410,11 +434,12 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 
 ## این برنامه چه می‌کند
 
-1. **بازه‌های IP** که شما تعریف کرده‌اید (به‌صورت CIDR) را برای چهار نوع دستگاه اسکن می‌کند:
+1. **بازه‌های IP** که شما تعریف کرده‌اید (به‌صورت CIDR) را برای پنج نوع دستگاه اسکن می‌کند:
    - **سرورهای HPE ProLiant** — از طریق API سِ Redfish روی iLO/BMC.
    - **آرایه‌های ذخیره‌سازی HPE MSA** — از طریق XML API اختصاصی MSA.
    - **سوئیچ‌های Brocade / HPE B-Series SAN** — از طریق CLI سِ SSH‏ (Fabric OS).
    - **سوئیچ‌های Cisco Catalyst** — از طریق CLI سِ SSH، به‌همراه کابل‌کشی CDP/LLDP.
+   - **فایروال‌های FortiGate** — از طریق REST API و SSH، به‌همراه کابل‌کشی LLDP.
 2. برای هر سرور یا ذخیره‌سازی کشف‌شده، یک **دستگاه (device)** در NetBox **ایجاد یا به‌روزرسانی** می‌کند؛ اطلاعاتی نظیر سازنده، نوع دستگاه، نقش، سایت، شماره سریال و فیلدهای سفارشی (IP بورد BMC، نسخه فریم‌ور، خلاصه CPU/RAM/دیسک، وضعیت سلامت و …).
 3. **انventory دقیق سخت‌افزاری** هر دستگاه (CPU، ماژول‌های RAM، دیسک‌ها، پاورها، کارت‌های شبکه، HBA، کنترلرها، باتری‌ها و FRU) را جمع‌آوری می‌کند و هر قطعه را به‌عنوان یک **inventory item** با کلید شماره سریال در NetBox همگام می‌سازد.
 4. **آیتم‌های قدیمی inventory** که دیگر توسط دستگاه گزارش نمی‌شوند را حذف می‌کند.
@@ -475,8 +500,9 @@ After each sync, the script queries NetBox for all devices where `redfish_enable
 | فایل | کاربرد |
 |------|--------|
 | `sync_all_to_netbox.py` | نقطه ورود سبک — اعتبارسنجی پیکربندی و اجرای زمان‌بند (`python sync_all_to_netbox.py` دقیقاً مثل قبل کار می‌کند). |
-| `netbox_sync/` | پکیج پیاده‌سازی: `config` (محیط/اعتبارها/لاگ)، `utils` (توابع نام‌گذاری و ابزارهای IP)، `netbox` (لایه API سِ NetBox: CRUD، ساخت/آفلاین دستگاه، همگام‌سازی inventory)، `collectors/` (sessionها و جمع‌آوری inventory سِ `redfish`، `msa`، `brocade`، `cisco`)، `scanner` (بررسی موازی IP)، `sync` (هماهنگ‌کننده `run_sync`). |
+| `netbox_sync/` | پکیج پیاده‌سازی: `config` (محیط/اعتبارها/لاگ)، `utils` (توابع نام‌گذاری و ابزارهای IP)، `netbox` (لایه API سِ NetBox: CRUD، ساخت/آفلاین دستگاه، همگام‌سازی inventory)، `collectors/` (sessionها و جمع‌آوری inventory سِ `redfish`، `msa`، `brocade`، `cisco`، `fortigate`)، `scanner` (بررسی موازی IP)، `sync` (هماهنگ‌کننده `run_sync`). |
 | `netbox_sync/collectors/cisco.py` | کلکتور Cisco Catalyst — اتصال SSH با netmiko، پارسرهای CLI سِ IOS/IOS-XE، همگام‌سازی کابل‌های CDP/LLDP. |
+| `netbox_sync/collectors/fortigate.py` | کلکتور FortiGate — session سِ REST API به‌علاوه SSH (کابل‌های LLDP، ترانسسیورهای SFP). |
 | `netbox_sync/models.py` | نگاشت‌های نرمال‌سازی نام مدل سرور (`SERVER_MODEL_MAP`)، ذخیره‌سازی (`STORAGE_MODEL_MAP`) و سوئچ SAN (`SWITCH_MODEL_MAP`). رشته‌های سازنده (مانند `proliant dl360 gen10`) را به نام‌های متعارف نوع دستگاه در NetBox (مانند `HPE DL360 G10`) تبدیل می‌کند. |
 | `.env.example` | قالب فایل `.env`. آن را به `.env` کپی کرده و مقادیر واقعی خود را وارد کنید. |
 | `requirements.txt` | وابستگی‌های پایتون (`requests`, `pynetbox`, `python-dotenv`, `paramiko`, `netmiko`). |
@@ -537,6 +563,13 @@ pip install -r requirements.txt
 | `CISCO_PORT` | ❌ | `22` | پورت SSH برای سوئیچ‌های سیسکو. |
 | `CISCO_RANGES` | ❌ | *(خالی)* | بازه‌های CIDR جداشده با کاما برای سوئیچ‌های سیسکو. خالی = خانواده غیرفعال. |
 | `DEFAULT_CISCO_ROLE` | ❌ | `Switch` | نقش دستگاه در NetBox برای سوئیچ‌های سیسکو. |
+| `FORTIGATE_USER` | ❌* | — | نام کاربری SSH برای FortiGateها (LLDP + ترانسسیورها)؛ وقتی `FORTIGATE_RANGES` تنظیم شده الزامی است. |
+| `FORTIGATE_PASS` | ❌* | — | رمز عبور SSH برای FortiGateها. |
+| `FORTIGATE_PORT` | ❌ | `443` | پورت REST API (امکان بازنویسی per-device در فایل توکن). |
+| `FORTIGATE_SSH_PORT` | ❌ | `22` | پورت SSH برای FortiGateها. |
+| `FORTIGATE_TOKEN_FILE` | ❌ | `fortigate_tokens.txt` | توکن‌های API به‌صورت per-device: در هر خط `<ip[:port]> <token>` (کامنت با `#`). این فایل در gitignore قرار دارد. |
+| `FORTIGATE_RANGES` | ❌ | *(خالی)* | بازه‌های CIDR جداشده با کاما برای FortiGateها. خالی = خانواده غیرفعال. |
+| `DEFAULT_FORTIGATE_ROLE` | ❌ | `Firewall` | نقش دستگاه در NetBox برای FortiGateها. |
 
 > *پیش‌فرض‌های موجود در `netbox_sync/config.py` صرفاً CIDR‌های **نمونه/تست** هستند (`192.0.2.0/27` = TEST-NET). بازه‌های واقعی خود را در `.env` تنظیم کنید — یا برای غیرفعال‌کردن کامل یک خانواده، مقدار آن را **خالی** بگذارید (مثلاً `BMC_RANGES=`)؛ در این صورت نه اسکنی انجام می‌شود و نه علامت‌گذاری آفلاین برای آن خانواده.
 
@@ -647,7 +680,17 @@ DEFAULT_SWITCH_ROLE=SAN Switch
 | `cisco_model` | Text | مدل |
 | `cisco_port_count` | Integer | تعداد پورت‌ها |
 
-> حلقه تشخیص آفلاین، دستگاه‌ها را با فیلتر `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` فیلتر می‌کند (سینتکس فیلتر custom field در NetBox).
+**برای فایروال‌های FortiGate:**
+
+| فیلد سفارشی | نوع | برچسب |
+|--------------|------|-------|
+| `fortigate_ip` | Text | IP فایروال FortiGate |
+| `fortigate_enabled` | Boolean | FortiGate فعال |
+| `fortigate_firmware` | Text | نسخه FortiOS |
+| `fortigate_model` | Text | مدل |
+| `fortigate_port_count` | Integer | تعداد پورت‌ها |
+
+> حلقه تشخیص آفلاین، دستگاه‌ها را با فیلتر `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` فیلتر می‌کند (سینتکس فیلتر custom field در NetBox).
 
 ### ۳. نقش‌ها و سایت‌های دستگاه
 
@@ -712,6 +755,12 @@ python -m pytest tests/
 - خانواده‌های Catalyst 2960X / 3650 / 3850 / 9200 / 9300 (هر دو گویش IOS کلاسیک و IOS-XE).
 - اتصال از طریق SSH و اجرای `show version`، `show inventory`، `show interfaces status`، `show vlan brief`، `show interfaces trunk`، `show cdp neighbors detail` (با `show lldp neighbors detail` به‌عنوان جایگزین).
 - خانواده سیسکو **اختیاری** است: فقط وقتی `CISCO_RANGES` تنظیم شود فعال می‌شود.
+
+**فایروالها (FortiGate، REST API + SSH):**
+- خانواده FortiGate 40F / 60F / 80F / 100F / 200F (FortiOS 6/7). کوئری‌های `/api/v2/monitor/system/status`، `/api/v2/monitor/system/interface`، `/api/v2/cmdb/system/interface` (VDOM سِ `root`).
+- توکن‌های API به‌صورت **per-device** در `fortigate_tokens.txt` (gitignore‌شده): در هر خط `<ip[:port]> <token>`، کامنت با `#`.
+- SSH برای اجرای `diagnose lldp neighbor-summary` (کابل‌ها) و `diagnose sys transceiver list` (ترانسسیورهای SFP).
+- **اختیاری**: فقط وقتی `FORTIGATE_RANGES` تنظیم شود فعال می‌شود.
 
 برای مشاهده نگاشت کامل نام مدل‌ها به `netbox_sync/models.py` مراجعه کنید. می‌توانید مدل‌های جدید را نیز در همان فایل اضافه کنید.
 
