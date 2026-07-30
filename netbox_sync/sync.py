@@ -6,6 +6,7 @@ from netbox_sync.collectors.cisco import (cisco_collect_inventory,
                                           ensure_vlan_group,
                                           sync_cisco_vlans,
                                           sync_interface_vlans,
+                                          ensure_svi_interface,
                                           sweep_stale_vlans,
                                           sweep_legacy_site_vlans,
                                           sync_cdp_cables)
@@ -211,11 +212,6 @@ def run_sync():
             log("ERROR", f"  ensure_cisco_device failed for {ip}: {e}"); continue
 
         try:
-            ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"))
-        except Exception as e:
-            log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
-
-        try:
             data = cisco_collect_inventory(ip)
         except KeyboardInterrupt: raise
         except Exception as e:
@@ -227,6 +223,7 @@ def run_sync():
         vlans = data["vlans"]
         trunks = data["trunks"]
         vtp = data["vtp"]
+        ip_brief = data["ip_brief"]
         inv = data["inventory"]
 
         try:
@@ -279,6 +276,21 @@ def run_sync():
             except Exception as e:
                 log("ERROR", f"  Cisco VLAN linkage failed for {ip}: {e}")
 
+        # Primary IPv4 goes on the real management interface (SVI from
+        # show ip interface brief) when identifiable; synthetic mgmt fallback.
+        carrier = ip_brief.get(ip)
+        if carrier:
+            if carrier not in {p["port"] for p in ports}:
+                try:
+                    ensure_svi_interface(dev_id, carrier, vid_map)
+                except Exception as e:
+                    log("WARN", f"  SVI creation failed for {carrier} on {ip}: {e}")
+        try:
+            ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"),
+                              iface_name=carrier)
+        except Exception as e:
+            log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
+
         try:
             sync_inventory(dev_id, inv)
             log("INFO", f"  [OK] Cisco {ip} — {len(inv)} inventory items synced")
@@ -301,11 +313,6 @@ def run_sync():
             dev_id = ensure_fortigate_device(probe)
         except Exception as e:
             log("ERROR", f"  ensure_fortigate_device failed for {ip}: {e}"); continue
-
-        try:
-            ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"))
-        except Exception as e:
-            log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
 
         try:
             data = fortigate_collect(ip)
@@ -360,6 +367,19 @@ def run_sync():
             log("INFO", f"  [OK] FortiGate {ip} — {len(ports)} interfaces synced")
         except Exception as e:
             log("ERROR", f"  FortiGate interface sync failed for {ip}: {e}")
+
+        # Primary IPv4 goes on the real carrier subinterface (matched from
+        # cmdb interface IPs) when identifiable; synthetic mgmt fallback.
+        carrier = None
+        for p in ports:
+            if (p.get("ip") or "").split(" ")[0] == ip:
+                carrier = p["name"]
+                break
+        try:
+            ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"),
+                              iface_name=carrier)
+        except Exception as e:
+            log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
 
         try:
             sync_inventory(dev_id, inv)
