@@ -829,6 +829,32 @@ def test_primary_ip_no_write_when_already_correct(monkeypatch):
     assert api.ipam.ip_addresses.updated == []
 
 
+def test_primary_ip_assigned_to_named_iface(monkeypatch):
+    dev = FakeRecord(7, name="FGT-DC-01", primary_ip4=None)
+    svi = FakeRecord(70, name="MGMT54", device_id=7)
+    api = _ipam_api([], dev, [svi])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    nbx.ensure_primary_ip(7, "192.0.2.70", "FGT-DC-01", iface_name="MGMT54")
+
+    # no synthetic mgmt interface created; IP assigned to the named one
+    assert api.dcim.interfaces.created == []
+    upd = api.ipam.ip_addresses.updated[0]
+    assert upd["assigned_object_id"] == 70
+    assert api.dcim.devices.updated[0]["primary_ip4"] is not None
+
+
+def test_primary_ip_named_iface_missing_falls_back_to_mgmt(monkeypatch):
+    dev = FakeRecord(7, name="SW1", primary_ip4=None)
+    api = _ipam_api([], dev, [])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    nbx.ensure_primary_ip(7, "192.0.2.70", "SW1", iface_name="Vlan999")
+
+    # synthetic mgmt interface created as fallback
+    assert api.dcim.interfaces.created[0]["name"] == "mgmt"
+
+
 # ── Cisco VLAN sync ──────────────────────────────────────────────────────────
 
 def _vlan_api(vlan_items, group_items=None):

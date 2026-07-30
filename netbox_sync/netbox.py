@@ -160,12 +160,13 @@ def _get_or_create_mgmt_iface(api, dev_id):
         "description": "netbox-sync: management interface",
     })
 
-def ensure_primary_ip(dev_id, ip, hostname=None):
+def ensure_primary_ip(dev_id, ip, hostname=None, iface_name=None):
     """Create/update the management IP in IPAM, assign it to the device's
-    mgmt interface, and set it as primary IPv4. NetBox REJECTS primary_ip4
-    unless the IP is assigned to an interface on the same device — hence
-    the synthetic mgmt interface. Existing IPAM records are reused unchanged
-    (any mask); an IP already assigned to ANOTHER device is left alone."""
+    carrier interface, and set it as primary IPv4. NetBox REJECTS primary_ip4
+    unless the IP is assigned to an interface on the same device. The carrier
+    is iface_name when given (real SVI/subinterface), else the synthetic
+    mgmt interface. Existing IPAM records are reused unchanged (any mask);
+    an IP already assigned to ANOTHER device is left alone."""
     api = get_netbox()
     existing = list(api.ipam.ip_addresses.filter(address=str(ip)))
     if existing:
@@ -196,7 +197,14 @@ def ensure_primary_ip(dev_id, ip, hostname=None):
                         f"leaving device id={dev_id} unchanged")
             return ip_id
     else:
-        iface = _get_or_create_mgmt_iface(api, dev_id)
+        iface = None
+        if iface_name:
+            iface = api.dcim.interfaces.get(device_id=dev_id, name=iface_name)
+            if iface is None:
+                log("WARN", f"  carrier interface {iface_name} not found on "
+                            f"device id={dev_id} — using synthetic mgmt")
+        if iface is None:
+            iface = _get_or_create_mgmt_iface(api, dev_id)
         api.ipam.ip_addresses.update([{
             "id": ip_id,
             "assigned_object_type": "dcim.interface",
