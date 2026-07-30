@@ -450,6 +450,42 @@ def test_cdp_cable_deletes_stale_marked(monkeypatch):
     assert api.dcim.cables.deleted_ids == [9]
 
 
+# ── FortiGate token file ─────────────────────────────────────────────────────
+
+def test_fortigate_token_file_parsing(tmp_path):
+    f = tmp_path / "tokens.txt"
+    f.write_text(
+        "# comment line\n"
+        "\n"
+        "172.31.1.1 token-one\n"
+        "172.31.1.2:8443 token-two\n"
+        "badline\n",
+        encoding="utf-8")
+    tokens = cfg._load_fortigate_tokens(str(f))
+    assert tokens == {"172.31.1.1": (443, "token-one"),
+                      "172.31.1.2": (8443, "token-two")}
+
+
+def test_fortigate_token_file_missing(tmp_path):
+    assert cfg._load_fortigate_tokens(str(tmp_path / "nope.txt")) == {}
+
+
+def test_validate_config_fortigate_requirements(monkeypatch, tmp_path):
+    for var in REQUIRED_VARS:
+        monkeypatch.setenv(var, "x")
+    monkeypatch.delenv("FORTIGATE_USER", raising=False)
+    monkeypatch.delenv("FORTIGATE_PASS", raising=False)
+    monkeypatch.setenv("FORTIGATE_RANGES", "192.0.2.0/29")
+    f = tmp_path / "tokens.txt"
+    f.write_text("192.0.2.1 tok\n", encoding="utf-8")
+    monkeypatch.setenv("FORTIGATE_TOKEN_FILE", str(f))
+    with pytest.raises(RuntimeError, match="FORTIGATE_USER"):
+        cfg._validate_config()
+    monkeypatch.setenv("FORTIGATE_USER", "u")
+    monkeypatch.setenv("FORTIGATE_PASS", "p")
+    cfg._validate_config()   # creds + non-empty token file -> passes
+
+
 # ── config validation ────────────────────────────────────────────────────────
 
 REQUIRED_VARS = ["NETBOX_URL", "NETBOX_TOKEN", "REDFISH_USER", "REDFISH_PASS",
