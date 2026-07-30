@@ -12,7 +12,11 @@ from netbox_sync.collectors.cisco import (cisco_collect_inventory,
                                           sync_cdp_cables,
                                           _site_vlan_index,
                                           _mac_to_cisco,
-                                          _cisco_mac_lookup)
+                                          _cisco_mac_lookup,
+                                          _norm_sw_name,
+                                          _broadcast_components,
+                                          _component_key,
+                                          _sweep_stale_groups)
 from netbox_sync.collectors.fortigate import (fortigate_collect,
                                               sync_fortigate_interfaces,
                                               resolve_fortigate_vlans,
@@ -209,6 +213,10 @@ def run_sync():
     switch_group_ips = {}
     site_indexes = {}
     legacy_sites = set()
+
+    # Pass 1: ensure devices and collect everything — broadcast domains are
+    # derived from the CDP topology, which needs every switch's data first.
+    collected = []
     for probe in found["cisco_switches"]:
         ip = probe["ip"]
         log("INFO", f"Processing CISCO {ip}  ({probe.get('model')} / {probe.get('serial')})")
@@ -224,6 +232,43 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  Cisco inventory collection failed for {ip}: {e}"); continue
 
+        collected.append((probe, dev_id, data))
+
+    # Build the CDP topology: nodes = switches, edges = same-site adjacency.
+    norm_of_ip = {}
+    site_of_ip = {}
+    for probe, dev_id, data in collected:
+        ip = probe["ip"]
+        norm_of_ip[ip] = _norm_sw_name(probe.get("hostname"))
+        try:
+            dev_rec = api.dcim.devices.get(id=dev_id)
+            site_of_ip[ip] = getattr(getattr(dev_rec, "site", None), "id", None)
+        except Exception:
+            site_of_ip[ip] = None
+    name_to_ip = {n: ip for ip, n in norm_of_ip.items() if n}
+    edges = []
+    for probe, dev_id, data in collected:
+        a_ip = probe["ip"]
+        a = norm_of_ip[a_ip]
+        for n in data["neighbors"]:
+            b = _norm_sw_name(n.get("device_id"))
+            if b and b in name_to_ip \
+                    and site_of_ip.get(a_ip) == site_of_ip.get(name_to_ip[b]):
+                edges.append((a, b))
+    key_by_name = {}
+    for members in _broadcast_components(set(norm_of_ip.values()), edges):
+        vtp_by_name = {norm_of_ip[p["ip"]]: (d["vtp"].get("domain") or "")
+                       for p, _, d in collected if norm_of_ip[p["ip"]] in members}
+        key = _component_key(members, vtp_by_name)
+        for m in members:
+            key_by_name[m] = key
+    if key_by_name:
+        log("INFO", f"  Broadcast domains from CDP topology: "
+                    f"{sorted(set(key_by_name.values()))}")
+
+    # Pass 2: process each switch with its component's group
+    for probe, dev_id, data in collected:
+        ip = probe["ip"]
         summary = data["summary"]
         ports = data["ports"]
         neighbors = data["neighbors"]
@@ -250,17 +295,11 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  Cisco switch update failed for {ip}: {e}")
 
-        site_id = None
-        try:
-            dev_rec = api.dcim.devices.get(id=dev_id)
-            site_id = getattr(getattr(dev_rec, "site", None), "id", None)
-        except Exception:
-            site_id = None
-
+        site_id = site_of_ip.get(ip)
         vid_map = {}
         if site_id:
             try:
-                key = (vtp.get("domain") or probe.get("hostname") or ip)
+                key = key_by_name.get(norm_of_ip[ip]) or norm_of_ip[ip] or ip
                 group_id = ensure_vlan_group(site_id, key)
                 vid_map = sync_cisco_vlans(group_id, probe.get("hostname") or "", vlans)
                 group_vlan_seen.setdefault(group_id, set()).update(vid_map.keys())
@@ -446,6 +485,10 @@ def run_sync():
             sweep_legacy_site_vlans(site_id)
         except Exception as e:
             log("ERROR", f"  legacy VLAN sweep failed for site {site_id}: {e}")
+        try:
+            _sweep_stale_groups(site_id, set(group_vlan_seen.keys()), key_by_name)
+        except Exception as e:
+            log("ERROR", f"  stale group sweep failed for site {site_id}: {e}")
 
     # ── Mark unreachable devices offline ─────────────────────────────────────
     # A device must be missing from OFFLINE_THRESHOLD consecutive scans before
