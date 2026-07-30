@@ -15,7 +15,8 @@ from netbox_sync.collectors.cisco import (cisco_collect_inventory,
                                           _cisco_mac_lookup)
 from netbox_sync.collectors.fortigate import (fortigate_collect,
                                               sync_fortigate_interfaces,
-                                              resolve_fortigate_vlans)
+                                              resolve_fortigate_vlans,
+                                              _fortigate_iface_mac)
 from netbox_sync.collectors.msa import storage_collect_inventory
 from netbox_sync.collectors.redfish import rf_collect_inventory
 from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
@@ -365,6 +366,15 @@ def run_sync():
                     site_index = _site_vlan_index(site_id)
                     site_indexes[site_id] = site_index
 
+                def _get_mac(vid):
+                    name = next((v["name"] for v in vlans if v["vid"] == vid),
+                                None)
+                    if not name: return None
+                    try:
+                        return _fortigate_iface_mac(ip, name)
+                    except Exception:
+                        return None
+
                 def _mac_lookup(vid, mac):
                     if not mac: return None
                     cmac = _mac_to_cisco(mac)
@@ -379,7 +389,7 @@ def run_sync():
                     return None
 
                 vid_map, missing = resolve_fortigate_vlans(
-                    site_index, vlans, data.get("vlan_macs", {}), _mac_lookup)
+                    site_index, vlans, _get_mac, _mac_lookup)
                 if missing:
                     group_id = ensure_vlan_group(site_id, probe.get("hostname") or ip)
                     created = sync_cisco_vlans(group_id, probe.get("hostname") or "", missing)

@@ -258,8 +258,6 @@ def fortigate_collect(ip):
                     description=f"Port={row.get('port')}",
                     role_id=netbox.get_or_create_inventory_role("SFP", "4caf50"))
             log("INFO", f"  transceivers: {len(inventory)}")
-        ifc_out = _ssh_run_or_none(sess, "fnsysctl ifconfig -a", "ifconfig")
-        if_macs = _parse_ifconfig_a(ifc_out) if ifc_out is not None else {}
     except Exception as exc:
         log("WARN", f"  fortigate ssh failed for {ip}: {exc}")
     finally:
@@ -274,21 +272,32 @@ def fortigate_collect(ip):
         "hostname": (status.get("hostname") or "").strip(),
         "port_count": len(ports),
     }
-    vlan_macs = {}
-    for v in vlans:
-        mac = if_macs.get(v["name"])
-        if mac:
-            vlan_macs[v["vid"]] = mac
-
     return {"summary": summary, "ports": ports, "vlans": vlans,
-            "neighbors": neighbors, "inventory": inventory,
-            "vlan_macs": vlan_macs}
+            "neighbors": neighbors, "inventory": inventory}
+
+def _fortigate_iface_mac(ip, iface_name):
+    """Fetch ONE interface's MAC via fnsysctl ifconfig "<name>".
+    Deliberately per-interface: `ifconfig -a` pages long output in the
+    fnsysctl context and hangs netmiko — the single-interface form is
+    short and reliable. Only called during overlap disambiguation."""
+    sess = FortiGateSSHSession(ip)
+    try:
+        sess.login()
+        out = _ssh_run_or_none(sess, f'fnsysctl ifconfig "{iface_name}"',
+                                 "ifconfig")
+        if out is None:
+            return None
+        macs = _parse_ifconfig_a(out)
+        return next(iter(macs.values()), None)
+    finally:
+        sess.logout()
 
 # ── VLAN resolution (match against switch VLANs) ─────────────────────────────
 
-def resolve_fortigate_vlans(site_vlan_index, vlans, vlan_macs, mac_lookup):
+def resolve_fortigate_vlans(site_vlan_index, vlans, get_mac, mac_lookup):
     """Match FortiGate VLANs to existing switch VLANs.
     unique -> reuse; none -> missing (create per-device); overlap ->
+    get_mac(vid) lazily (single-interface ifconfig), then
     mac_lookup(vid, mac) -> group_id (else missing)."""
     vid_map, missing = {}, []
     for v in vlans:
@@ -299,7 +308,7 @@ def resolve_fortigate_vlans(site_vlan_index, vlans, vlan_macs, mac_lookup):
         elif not matches:
             missing.append(v)
         else:
-            mac = vlan_macs.get(vid)
+            mac = get_mac(vid) if get_mac else None
             gid = mac_lookup(vid, mac) if mac else None
             if gid:
                 vid_map[vid] = next(vlan_id for g, vlan_id in matches if g == gid)

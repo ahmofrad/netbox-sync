@@ -602,10 +602,10 @@ def test_resolve_fortigate_vlans_paths():
              {"vid": 20, "name": "B", "status": "active"},
              {"vid": 30, "name": "C", "status": "active"},
              {"vid": 40, "name": "D", "status": "active"}]
-    macs = {20: "00:09:0f:09:00:26"}
+    get_mac = lambda vid: "00:09:0f:09:00:26" if vid == 20 else None
     lookup = lambda vid, mac: 9 if (vid, mac) == (20, "00:09:0f:09:00:26") else None
 
-    vid_map, missing = fg.resolve_fortigate_vlans(site_index, vlans, macs, lookup)
+    vid_map, missing = fg.resolve_fortigate_vlans(site_index, vlans, get_mac, lookup)
 
     assert vid_map == {10: 50, 20: 60}     # unique reused; overlap resolved
     assert [v["vid"] for v in missing] == [30, 40]   # none + unresolved overlap
