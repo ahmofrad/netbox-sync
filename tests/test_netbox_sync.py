@@ -1046,6 +1046,38 @@ def test_sweep_legacy_site_vlans(monkeypatch):
     assert api.ipam.vlans.deleted_ids == [50]   # only the group-less marked one
 
 
+def test_sweep_stale_groups_migration(monkeypatch):
+    """Stale marked groups (case-variant duplicate, abandoned hostname
+    fallback) are emptied and deleted; fed groups and manual groups stay."""
+    import netbox_sync.collectors.cisco as cisco
+    g_snapp   = FakeRecord(1, name="BD1", description="netbox-sync: vtp=snapp",
+                           scope_type="dcim.site", scope_id=3)
+    g_SNAPP   = FakeRecord(2, name="BD2", description="netbox-sync: vtp=Snapp",
+                           scope_type="dcim.site", scope_id=3)
+    g_fb      = FakeRecord(4, name="BD4", description="netbox-sync: vtp=f12-cctv-sw-02",
+                           scope_type="dcim.site", scope_id=3)
+    manual_g  = FakeRecord(9, name="X", description="manual group",
+                           scope_type="dcim.site", scope_id=3)
+    vlans = [
+        FakeRecord(50, vid=201, group_id=1, description="netbox-sync: x"),
+        FakeRecord(51, vid=202, group_id=2, description="netbox-sync: x"),
+        FakeRecord(52, vid=20,  group_id=4, description="netbox-sync: x"),
+        FakeRecord(53, vid=999, group_id=9, description="manual vlan"),
+    ]
+    api = _vlan_api(vlans, [g_snapp, g_SNAPP, g_fb, manual_g])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    # BD1(snapp) is fed this run; f12-cctv-sw-02 moved to a component group
+    cisco._sweep_stale_groups(
+        3, fed_group_ids={1},
+        key_by_name={"f12-cctv-sw-02": "f_-1-cctv-sw"})
+
+    # BD2 (case-variant) and BD4 (abandoned fallback) lost their VLANs,
+    # then were deleted themselves; BD1 and the manual group untouched
+    assert set(api.ipam.vlans.deleted_ids) == {51, 52}
+    assert set(api.ipam.vlan_groups.deleted_ids) == {2, 4}
+
+
 def test_interface_syncs_preserve_mgmt_interfaces(monkeypatch):
     """The synthetic mgmt interface must survive the stale-interface cleanup
     in both Cisco and SAN interface syncs."""

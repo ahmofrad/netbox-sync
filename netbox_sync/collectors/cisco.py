@@ -517,6 +517,43 @@ def ensure_svi_interface(dev_id, name, vid_map):
         payload["untagged_vlan"] = vid_map[int(m.group(1))]
     return api.dcim.interfaces.create(payload).id
 
+# ── broadcast-domain topology (CDP connected components) ─────────────────────
+
+def _norm_sw_name(name):
+    """Normalize a switch hostname for graph matching: strip domain suffix,
+    casefold."""
+    return (name or "").split(".")[0].strip().lower()
+
+def _broadcast_components(names, edges):
+    """Union-find connected components over switch names. Edges are
+    (name, name) pairs; names not in the node set are ignored."""
+    parent = {n: n for n in names}
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for a, b in edges:
+        if a not in parent or b not in parent:
+            continue
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+    comps = {}
+    for n in names:
+        comps.setdefault(find(n), set()).add(n)
+    return list(comps.values())
+
+def _component_key(members, vtp_by_name):
+    """Stable group key for a broadcast-domain component: the first
+    non-empty VTP domain (hostname-sorted, casefolded), else the first
+    sorted hostname."""
+    for name in sorted(members):
+        d = (vtp_by_name.get(name) or "").strip()
+        if d:
+            return d.lower()
+    return sorted(members)[0]
+
 def _cisco_mac_lookup(ip, cisco_mac):
     """Ask one switch for a specific MAC; return the SET of VLANs it is
     learned in (the MAC may appear in several). Used for FortiGate VLAN
@@ -666,6 +703,35 @@ def sweep_legacy_site_vlans(site_id):
             log("INFO", f"  legacy site vlan {vlan.vid} (site {site_id}) deleted — moved to VLAN group")
         except Exception as exc:
             log("WARN", f"  could not delete legacy vlan {vlan.vid}: {exc}")
+
+def _sweep_stale_groups(site_id, fed_group_ids, key_by_name):
+    """Migration sweep: delete marker-owned groups at the site that are no
+    longer valid — case-variant duplicates of a fed group (e.g. 'Snapp')
+    or abandoned per-switch hostname fallbacks whose switch joined a
+    component. Manual groups and fed groups are never touched."""
+    api = netbox.get_netbox()
+    groups = list(api.ipam.vlan_groups.filter(scope_type="dcim.site", scope_id=site_id))
+    fed_keys = {g.description[len(VLAN_GROUP_MARKER):].lower()
+                for g in groups if g.id in fed_group_ids
+                and (g.description or "").startswith(VLAN_GROUP_MARKER)}
+    for g in groups:
+        desc = g.description or ""
+        if not desc.startswith(VLAN_GROUP_MARKER):
+            continue
+        if g.id in fed_group_ids:
+            continue
+        key = desc[len(VLAN_GROUP_MARKER):].lower()
+        stale = (key in fed_keys) or \
+                (key in key_by_name and key_by_name[key] != key)
+        if not stale:
+            continue
+        sweep_stale_vlans(g.id, set())
+        if not list(api.ipam.vlans.filter(group_id=g.id)):
+            try:
+                g.delete()
+                log("INFO", f"  stale VLAN group {g.name} (site {site_id}) deleted")
+            except Exception as exc:
+                log("WARN", f"  could not delete stale group {g.name}: {exc}")
 
 # ── CDP/LLDP cable reconciliation ────────────────────────────────────────────
 
