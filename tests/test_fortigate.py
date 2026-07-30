@@ -95,6 +95,20 @@ def test_ssh_command_failure_detected():
     assert mod._ssh_run_or_none(GoodSess(), "x", "lldp") is not None
 
 
+IFCONFIG_A = """AP MGMT\tLink encap:Ethernet  HWaddr 00:09:0F:09:00:24
+\tinet addr:172.31.2.1  Bcast:172.31.2.255  Mask:255.255.255.0
+
+AsiaTech\tLink encap:Ethernet  HWaddr 00:09:0F:09:00:26
+\tinet addr:79.127.120.184  Bcast:79.127.120.191  Mask:255.255.255.240
+"""
+
+
+def test_parse_ifconfig_a():
+    out = mod._parse_ifconfig_a(IFCONFIG_A)
+    assert out == {"AP MGMT": "00:09:0f:09:00:24",
+                   "AsiaTech": "00:09:0f:09:00:26"}
+
+
 def test_fg_vlans():
     vlans = mod._fg_vlans(CMDB_IFACES)
     assert vlans == [{"vid": 10, "name": "port1.10", "status": "active"}]

@@ -226,6 +226,24 @@ def test_parse_ip_interface_brief():
     assert out == {"Vlan50": "172.31.1.103"}
 
 
+def test_mac_to_cisco():
+    assert mod._mac_to_cisco("00:09:0F:09:00:24") == "0009.0f09.0024"
+
+
+MAC_TABLE = """          Mac Address Table
+-------------------------------------------
+
+Vlan    Mac Address       Type        Ports
+----    -----------       --------    -----
+  51    0009.0f09.0024    DYNAMIC     Te1/1/1
+"""
+
+
+def test_parse_mac_table_entry():
+    rows = mod._parse_mac_table_entry(MAC_TABLE)
+    assert rows == [{"vid": 51, "mac": "00:09:0f:09:00:24", "port": "Te1/1/1"}]
+
+
 VTP_STATUS = """VTP Version capable             : 1 to 3
 VTP version running             : 3
 VTP Domain Name                 : snapp

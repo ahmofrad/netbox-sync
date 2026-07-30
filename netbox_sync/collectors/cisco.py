@@ -205,6 +205,25 @@ def _parse_ip_interface_brief(text):
             out[m.group(1)] = m.group(2)
     return out
 
+def _mac_to_cisco(mac):
+    """00:09:0F:09:00:24 -> 0009.0f09.0024 (Cisco CLI form); None if invalid."""
+    s = re.sub(r'[^0-9a-fA-F]', '', mac or '').lower()
+    if len(s) != 12: return None
+    return f"{s[0:4]}.{s[4:8]}.{s[8:12]}"
+
+def _parse_mac_table_entry(text):
+    """Parse `show mac address-table address <mac>` rows -> [{vid, mac, port}].
+    MAC normalized to lowercase colon form."""
+    rows = []
+    for line in text.splitlines():
+        m = re.match(r'^\s*(\d+)\s+([0-9a-fA-F.]{14})\s+\S+\s+(\S+)', line)
+        if m:
+            mac = re.sub(r'[^0-9a-fA-F]', '', m.group(2)).lower()
+            rows.append({"vid": int(m.group(1)),
+                         "mac": ":".join(mac[i:i+2] for i in range(0, 12, 2)),
+                         "port": m.group(3)})
+    return rows
+
 def _parse_vtp_status(text):
     """Parse `show vtp status`: domain name from the header block, operating
     mode only from the 'Feature VLAN:' section (later feature sections like
@@ -497,6 +516,18 @@ def ensure_svi_interface(dev_id, name, vid_map):
     if m and int(m.group(1)) in vid_map:
         payload["untagged_vlan"] = vid_map[int(m.group(1))]
     return api.dcim.interfaces.create(payload).id
+
+def _cisco_mac_lookup(ip, cisco_mac):
+    """Ask one switch for a specific MAC; return the VLAN it is learned in
+    (or None). Used for FortiGate VLAN disambiguation."""
+    sess = CiscoSwitchSession(ip)
+    try:
+        sess.login()
+        rows = _parse_mac_table_entry(
+            sess.run(f"show mac address-table address {cisco_mac}"))
+        return rows[0]["vid"] if rows else None
+    finally:
+        sess.logout()
 
 # ── VLANs ────────────────────────────────────────────────────────────────────
 

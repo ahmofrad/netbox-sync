@@ -162,6 +162,16 @@ def _parse_lldp_summary(text):
                         "ip": None})
     return entries
 
+def _parse_ifconfig_a(text):
+    """Parse `fnsysctl ifconfig -a` blocks: interface name -> MAC
+    (lowercase colon form)."""
+    out = {}
+    for line in text.splitlines():
+        m = re.match(r'^(.+?)\tLink encap:Ethernet\s+HWaddr\s+([0-9A-Fa-f:]{17})', line)
+        if m:
+            out[m.group(1).strip()] = m.group(2).lower()
+    return out
+
 def _parse_transceivers(text):
     """Parse `diagnose sys transceiver list`: per-port vendor/part/serial."""
     rows = []
@@ -248,6 +258,8 @@ def fortigate_collect(ip):
                     description=f"Port={row.get('port')}",
                     role_id=netbox.get_or_create_inventory_role("SFP", "4caf50"))
             log("INFO", f"  transceivers: {len(inventory)}")
+        ifc_out = _ssh_run_or_none(sess, "fnsysctl ifconfig -a", "ifconfig")
+        if_macs = _parse_ifconfig_a(ifc_out) if ifc_out is not None else {}
     except Exception as exc:
         log("WARN", f"  fortigate ssh failed for {ip}: {exc}")
     finally:
@@ -262,8 +274,15 @@ def fortigate_collect(ip):
         "hostname": (status.get("hostname") or "").strip(),
         "port_count": len(ports),
     }
+    vlan_macs = {}
+    for v in vlans:
+        mac = if_macs.get(v["name"])
+        if mac:
+            vlan_macs[v["vid"]] = mac
+
     return {"summary": summary, "ports": ports, "vlans": vlans,
-            "neighbors": neighbors, "inventory": inventory}
+            "neighbors": neighbors, "inventory": inventory,
+            "vlan_macs": vlan_macs}
 
 # ── interfaces ───────────────────────────────────────────────────────────────
 
