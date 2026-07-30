@@ -1,0 +1,224 @@
+"""FortiGate firewalls: REST API session (identity/interfaces/VLANs) plus
+SSH extras (LLDP neighbors, SFP transceivers)."""
+import re
+import time
+
+import requests
+from netmiko import ConnectHandler
+
+from netbox_sync import netbox
+from netbox_sync.config import (FORTIGATE_USER, FORTIGATE_PASS, FORTIGATE_PORT,
+                                FORTIGATE_SSH_PORT, FORTIGATE_TOKENS, log)
+from netbox_sync.models import FORTIGATE_MODEL_MAP
+from netbox_sync.utils import (normalize_model, _invalid_serial,
+                               _make_add_item, is_port_open)
+
+# ── REST API session + mappers ───────────────────────────────────────────────
+
+class FortiGateSession:
+    def __init__(self, ip, port, token, timeout=30):
+        self.base = f"https://{ip}:{port}"
+        self.s = requests.Session()
+        self.s.verify = False
+        self.s.headers.update({"Authorization": f"Bearer {token}"})
+        self.timeout = timeout
+
+    def get(self, path):
+        r = self.s.get(f"{self.base}{path}", timeout=self.timeout)
+        r.raise_for_status()
+        return r.json()
+
+def _fg_status(data):
+    results = data.get("results") or data
+    return {
+        "hostname": results.get("hostname"),
+        "serial":   results.get("serial_number"),
+        "model":    results.get("model") or results.get("model_name"),
+        "version":  results.get("version"),
+    }
+
+def _fg_speed(m):
+    s = str(m.get("speed") or "")
+    digits = re.match(r'^(\d+)', s)
+    return int(digits.group(1)) if digits else None
+
+def _fg_interfaces(monitor_data, cmdb_data):
+    """Merge /monitor/system/interface (link/speed) with /cmdb config."""
+    mon = monitor_data.get("results") or {}
+    cfg = cmdb_data.get("results") or []
+    cfg_by_name = {c.get("name"): c for c in cfg if isinstance(c, dict)}
+    ports = []
+    for name, m in mon.items():
+        if not isinstance(m, dict): continue
+        c = cfg_by_name.get(name, {})
+        ports.append({
+            "name": name,
+            "link": bool(m.get("link")),
+            "speed_mbps": _fg_speed(m),
+            "type": c.get("type") or "",
+            "ip": c.get("ip") or "",
+            "vlanid": c.get("vlanid"),
+            "parent": c.get("interface") or "",
+        })
+    return ports
+
+def _fg_vlans(cmdb_data):
+    out = []
+    for c in (cmdb_data.get("results") or []):
+        if not isinstance(c, dict): continue
+        if c.get("type") == "vlan" and c.get("vlanid") is not None:
+            out.append({"vid": int(c["vlanid"]),
+                        "name": c.get("name") or f"VLAN{int(c['vlanid']):04d}",
+                        "status": "active"})
+    return out
+
+def _fg_interface_type(speed_mbps):
+    return {100: "100base-tx", 1000: "1000base-t",
+            10000: "10gbase-t", 25000: "25gbase-x-sfp28",
+            40000: "40gbase-x-qsfpp"}.get(speed_mbps, "other")
+
+# ── SSH extras (LLDP + transceivers) ─────────────────────────────────────────
+
+class FortiGateSSHSession:
+    def __init__(self, ip, timeout=20):
+        self.ip = ip
+        self.timeout = timeout
+        self.conn = None
+
+    def login(self):
+        self.conn = ConnectHandler(
+            device_type="fortinet", host=self.ip, port=FORTIGATE_SSH_PORT,
+            username=FORTIGATE_USER, password=FORTIGATE_PASS,
+            conn_timeout=self.timeout, auth_timeout=self.timeout,
+            banner_timeout=self.timeout)
+
+    def run(self, command):
+        if not self.conn:
+            raise RuntimeError("SSH session not open")
+        return self.conn.send_command(command, read_timeout=self.timeout)
+
+    def logout(self):
+        try:
+            if self.conn:
+                self.conn.disconnect()
+        except Exception: pass
+        self.conn = None
+
+def _parse_lldp_summary(text):
+    """Parse `diagnose lldp neighbor-summary` into CDP-shaped neighbors."""
+    entries = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("-") or s.lower().startswith("port"):
+            continue
+        m = re.match(r'^(\S+)\s+([0-9a-fA-F:]{17})\s+(.+?)\s+([A-Z,]+)\s+(\d+)\s+(\S+)$', s)
+        if not m: continue
+        entries.append({"device_id": m.group(3), "platform": "",
+                        "local_intf": m.group(1), "remote_intf": m.group(6),
+                        "ip": None})
+    return entries
+
+def _parse_transceivers(text):
+    """Parse `diagnose sys transceiver list`: per-port vendor/part/serial."""
+    rows = []
+    cur = None
+    for line in text.splitlines():
+        s = line.strip()
+        m = re.match(r'^Port\s+(\d+)\s*:', s)
+        if m:
+            if cur: rows.append(cur)
+            cur = {"port": int(m.group(1))}
+            continue
+        if cur is None: continue
+        m = re.match(r'^(Vendor|Part Number|Serial Number)\s*:\s*(.+)$', s)
+        if m:
+            key = m.group(1).lower().replace(" ", "_")
+            cur[key] = m.group(2).strip()
+    if cur: rows.append(cur)
+    return rows
+
+# ── probe + collect ──────────────────────────────────────────────────────────
+
+def probe_fortigate(ip, retries=2, retry_delay=3):
+    entry = FORTIGATE_TOKENS.get(ip)
+    if not entry:
+        log("DEBUG", f"  no FortiGate API token for {ip} — skipping")
+        return None
+    port, token = entry
+    for attempt in range(1, retries + 1):
+        # One quick port check is enough for dead IPs (same reasoning as Cisco)
+        if not is_port_open(ip, port, timeout=3, retries=1):
+            if attempt < retries: time.sleep(retry_delay); continue
+            return None
+        try:
+            status = _fg_status(
+                FortiGateSession(ip, port, token).get("/api/v2/monitor/system/status"))
+            if not (status.get("serial") or status.get("model")):
+                raise RuntimeError("status yielded no serial/model")
+            return {
+                "ip": ip, "host": f"{ip}:{port}",
+                "serial": status.get("serial"),
+                "model": (normalize_model(status.get("model"), FORTIGATE_MODEL_MAP)
+                          or status.get("model")),
+                "hostname": (status.get("hostname")
+                             or f"fortigate-{ip.replace('.', '-')}"),
+                "manufacturer": "Fortinet",
+                "firmware": status.get("version"),
+            }
+        except Exception:
+            if attempt < retries: time.sleep(retry_delay); continue
+            return None
+    return None
+
+def fortigate_collect(ip):
+    entry = FORTIGATE_TOKENS.get(ip)
+    if not entry:
+        raise RuntimeError(f"no FortiGate API token for {ip}")
+    port, token = entry
+    fg = FortiGateSession(ip, port, token)
+    status = _fg_status(fg.get("/api/v2/monitor/system/status"))
+    mon = fg.get("/api/v2/monitor/system/interface")
+    cmdb = fg.get("/api/v2/cmdb/system/interface?vdom=root")
+    ports = _fg_interfaces(mon, cmdb)
+    vlans = _fg_vlans(cmdb)
+    log("INFO", f"  fortigate api: {len(ports)} interfaces, {len(vlans)} vlans")
+
+    neighbors = []
+    inventory = {}
+    sess = FortiGateSSHSession(ip)
+    try:
+        sess.login()
+        try:
+            neighbors = _parse_lldp_summary(sess.run("diagnose lldp neighbor-summary"))
+            log("INFO", f"  lldp neighbors: {len(neighbors)}")
+        except Exception as exc:
+            log("WARN", f"  lldp neighbor-summary failed: {exc}")
+        try:
+            add = _make_add_item(inventory)
+            for row in _parse_transceivers(sess.run("diagnose sys transceiver list")):
+                serial = row.get("serial_number")
+                if _invalid_serial(serial): continue
+                add(name=f"SFP Port {row.get('port')}",
+                    manufacturer=row.get("vendor") or "Unknown",
+                    part_number=row.get("part_number"), serial=serial,
+                    description=f"Port={row.get('port')}",
+                    role_id=netbox.get_or_create_inventory_role("SFP", "4caf50"))
+            log("INFO", f"  transceivers: {len(inventory)}")
+        except Exception as exc:
+            log("WARN", f"  transceiver list failed: {exc}")
+    except Exception as exc:
+        log("WARN", f"  fortigate ssh failed for {ip}: {exc}")
+    finally:
+        try: sess.logout()
+        except Exception: pass
+
+    summary = {
+        "serial": status.get("serial"),
+        "model": (normalize_model(status.get("model"), FORTIGATE_MODEL_MAP)
+                  or status.get("model")),
+        "firmware": status.get("version"),
+        "hostname": (status.get("hostname") or "").strip(),
+        "port_count": len(ports),
+    }
+    return {"summary": summary, "ports": ports, "vlans": vlans,
+            "neighbors": neighbors, "inventory": inventory}

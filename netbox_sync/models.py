@@ -94,3 +94,13 @@ CISCO_MODEL_MAP = {
     "c3850-48p":         "Cisco WS-C3850-48P",
     "ws-c3850-48p":      "Cisco WS-C3850-48P",
 }
+
+# ── FortiGate firewalls ──────────────────────────────────────────────────────
+# Keys: raw /monitor/system/status "model" string, lowercased.
+FORTIGATE_MODEL_MAP = {
+    "fortigate-60f":  "FortiGate 60F",
+    "fortigate-100f": "FortiGate 100F",
+    "fortigate-200f": "FortiGate 200F",
+    "fortigate-40f":  "FortiGate 40F",
+    "fortigate-80f":  "FortiGate 80F",
+}
