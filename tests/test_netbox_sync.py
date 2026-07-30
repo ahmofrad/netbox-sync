@@ -579,6 +579,38 @@ def test_ensure_svi_interface_non_vlan_name(monkeypatch):
     assert "untagged_vlan" not in ifaces_ep.created[0]
 
 
+def test_site_vlan_index(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    g = FakeRecord(8, name="BD1", description="netbox-sync: vtp=snapp",
+                    scope_type="dcim.site", scope_id=3)
+    manual_g = FakeRecord(9, name="X", description="manual",
+                          scope_type="dcim.site", scope_id=3)
+    vlans = [FakeRecord(50, vid=10, group_id=8),
+             FakeRecord(51, vid=20, group_id=8),
+             FakeRecord(52, vid=10, group_id=9)]
+    api = _vlan_api(vlans, [g, manual_g])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    index = cisco._site_vlan_index(3)
+    assert index == {10: [(8, 50)], 20: [(8, 51)]}
+
+
+def test_resolve_fortigate_vlans_paths():
+    import netbox_sync.collectors.fortigate as fg
+    site_index = {10: [(8, 50)], 20: [(8, 51), (9, 60)], 30: []}
+    vlans = [{"vid": 10, "name": "A", "status": "active"},
+             {"vid": 20, "name": "B", "status": "active"},
+             {"vid": 30, "name": "C", "status": "active"},
+             {"vid": 40, "name": "D", "status": "active"}]
+    macs = {20: "00:09:0f:09:00:26"}
+    lookup = lambda vid, mac: 9 if (vid, mac) == (20, "00:09:0f:09:00:26") else None
+
+    vid_map, missing = fg.resolve_fortigate_vlans(site_index, vlans, macs, lookup)
+
+    assert vid_map == {10: 50, 20: 60}     # unique reused; overlap resolved
+    assert [v["vid"] for v in missing] == [30, 40]   # none + unresolved overlap
+
+
 # ── config validation ────────────────────────────────────────────────────────
 
 REQUIRED_VARS = ["NETBOX_URL", "NETBOX_TOKEN", "REDFISH_USER", "REDFISH_PASS",

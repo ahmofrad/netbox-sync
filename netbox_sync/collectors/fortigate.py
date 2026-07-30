@@ -284,6 +284,29 @@ def fortigate_collect(ip):
             "neighbors": neighbors, "inventory": inventory,
             "vlan_macs": vlan_macs}
 
+# ── VLAN resolution (match against switch VLANs) ─────────────────────────────
+
+def resolve_fortigate_vlans(site_vlan_index, vlans, vlan_macs, mac_lookup):
+    """Match FortiGate VLANs to existing switch VLANs.
+    unique -> reuse; none -> missing (create per-device); overlap ->
+    mac_lookup(vid, mac) -> group_id (else missing)."""
+    vid_map, missing = {}, []
+    for v in vlans:
+        vid = v["vid"]
+        matches = site_vlan_index.get(vid, [])
+        if len(matches) == 1:
+            vid_map[vid] = matches[0][1]
+        elif not matches:
+            missing.append(v)
+        else:
+            mac = vlan_macs.get(vid)
+            gid = mac_lookup(vid, mac) if mac else None
+            if gid:
+                vid_map[vid] = next(vlan_id for g, vlan_id in matches if g == gid)
+            else:
+                missing.append(v)
+    return vid_map, missing
+
 # ── interfaces ───────────────────────────────────────────────────────────────
 
 def sync_fortigate_interfaces(dev_id, ports, vid_map):

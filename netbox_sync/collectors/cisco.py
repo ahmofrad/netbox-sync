@@ -559,6 +559,18 @@ def ensure_vlan_group(site_id, key):
         "name": f"BD{n}", "slug": f"bd{n}", "description": want_desc,
         "scope_type": "dcim.site", "scope_id": site_id}).id
 
+def _site_vlan_index(site_id):
+    """Map every vid at the site to [(group_id, vlan_id)] using marker-owned
+    VLAN groups only (manual groups ignored)."""
+    api = netbox.get_netbox()
+    index = {}
+    for g in api.ipam.vlan_groups.filter(scope_type="dcim.site", scope_id=site_id):
+        if not (g.description or "").startswith(VLAN_GROUP_MARKER):
+            continue
+        for vlan in api.ipam.vlans.filter(group_id=g.id):
+            index.setdefault(vlan.vid, []).append((g.id, vlan.id))
+    return index
+
 def sync_cisco_vlans(group_id, hostname, vlans):
     """Get-or-create each VLAN in IPAM for the VLAN group; refresh
     marker-owned records. Returns {vid: netbox_id} for interface linkage.
