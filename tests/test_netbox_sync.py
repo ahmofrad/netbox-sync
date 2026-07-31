@@ -54,7 +54,14 @@ class FakeEndpoint:
 
     def filter(self, **kwargs):
         return [i for i in self._alive()
-                if all(getattr(i, k, None) == v for k, v in kwargs.items())]
+                if all(self._match(i, k, v) for k, v in kwargs.items())]
+
+    @staticmethod
+    def _match(rec, key, value):
+        val = getattr(rec, key, None)
+        if val is None and key.startswith("cf_"):
+            val = (getattr(rec, "custom_fields", None) or {}).get(key[3:])
+        return val == value
 
     def get(self, **kwargs):
         matches = self.filter(**kwargs)
@@ -545,6 +552,83 @@ def test_parse_sysinfo():
     assert out == {"name": "Ruckus-Controller_02", "ip": "172.31.2.201",
                    "mac": "38:45:3b:33:a9:40", "model": "ZD1200",
                    "serial": "352138000988", "version": "10.5.1.0 build 276"}
+
+
+AP_ALL = """AP:
+  ID:
+    1:
+      MAC Address= 70:47:77:1b:a3:80
+      Model= r550
+      Approved= Yes
+      Device Name= F13-AP-W
+      Group Name= F13
+      Network Setting:
+        IP Type= Static
+        IP Address= 172.31.2.214
+        Netmask= 255.255.255.0
+        Gateway= 172.31.2.1
+    2:
+      MAC Address= 70:47:77:1b:b0:11
+      Model= r350
+      Approved= Yes
+      Device Name= F11-AP-E
+      Group Name= IOT-Group
+      Network Setting:
+        IP Type= Static
+        IP Address= 172.31.2.220
+        Netmask= 255.255.255.0
+        Gateway= 172.31.2.1
+"""
+
+
+def test_parse_ap_all():
+    import netbox_sync.collectors.ruckus as ruckus
+    aps = ruckus._parse_ap_all(AP_ALL)
+    assert len(aps) == 2
+    assert aps[0] == {"mac": "70:47:77:1b:a3:80", "model": "r550",
+                      "name": "F13-AP-W", "group": "F13",
+                      "ip": "172.31.2.214", "approved": True}
+    assert aps[1]["model"] == "r350"
+    assert aps[1]["group"] == "IOT-Group"
+    assert aps[1]["ip"] == "172.31.2.220"
+
+
+# ── Ruckus AP device sync ────────────────────────────────────────────────────
+
+def test_ensure_ap_device_creates_and_matches_by_mac(monkeypatch):
+    devices_ep = FakeEndpoint()
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(devices=devices_ep))
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda n: 11)
+    monkeypatch.setattr(nbx, "get_or_create_role", lambda n, *a: 12)
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda n: 13)
+    monkeypatch.setattr(nbx, "get_or_create_device_type", lambda *a, **k: 14)
+
+    ap = {"mac": "70:47:77:1b:a3:80", "model": "r550", "name": "F13-AP-W",
+          "group": "F13", "ip": "172.31.2.214", "approved": True}
+    dev_id = nbx.ensure_ap_device(ap, "Ruckus-Controller_02")
+
+    payload = devices_ep.created[0]
+    assert payload["name"] == "F13-AP-W"
+    cf = payload["custom_fields"]
+    assert cf["wap_mac"] == "70:47:77:1b:a3:80"
+    assert cf["wap_group"] == "F13"
+    assert cf["wap_wlc"] == "Ruckus-Controller_02"
+    assert cf["wap_enabled"] is True
+
+    # second call with the same MAC -> updates, never duplicates
+    dev_id2 = nbx.ensure_ap_device(ap, "Ruckus-Controller_02")
+    assert dev_id2 == dev_id
+    assert len(devices_ep.created) == 1
+
+
+def test_mark_ap_offline(monkeypatch):
+    dev = FakeRecord(7, name="F13-AP-W", custom_fields={"wap_enabled": True})
+    devices_ep = FakeEndpoint([dev])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(devices=devices_ep))
+
+    nbx.mark_ap_offline(7, "F13-AP-W")
+    assert devices_ep.updated[0]["status"] == "offline"
+    assert devices_ep.updated[0]["custom_fields"]["wap_enabled"] is False
 
 
 # ── FortiGate device + interfaces ────────────────────────────────────────────

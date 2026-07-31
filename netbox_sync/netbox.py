@@ -470,6 +470,55 @@ def mark_fortigate_offline(dev_id, dev_name):
     except Exception as e:
         log("ERROR", f"  Could not mark FortiGate offline {dev_name}: {e}")
 
+
+def ensure_ap_device(ap, wlc_name, role_name=None):
+    """Ensure a NetBox device for a Ruckus access point. APs have no serial —
+    identity is the MAC (wap_mac custom field)."""
+    from netbox_sync.config import AP_ROLE
+    mac = ap["mac"]
+    role = role_name or AP_ROLE
+    mfr_id = get_or_create_manufacturer("Ruckus")
+    role_id = get_or_create_role(role, "00acc1")
+    site_name = resolve_site(ap.get("name") or "", ap.get("ip") or "")
+    site_id = get_or_create_site(site_name)
+    dtype_id = get_or_create_device_type(ap.get("model") or "Ruckus AP", mfr_id)
+    name = (ap.get("name") or mac)[:64]
+    api = get_netbox()
+    dev = next(iter(api.dcim.devices.filter(cf_wap_mac=mac)), None)
+    if dev is None:
+        cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
+                                             role_id=role_id))
+        dev = cands[0] if cands else None
+        if dev:
+            log("INFO", f"  Found AP by name+site: {name} (id={dev.id})")
+    payload = {
+        "name": name, "status": "active", "site": site_id,
+        "device_type": dtype_id, "role": role_id,
+        "custom_fields": {
+            "wap_mac":    mac,
+            "wap_enabled": True,
+            "wap_group":  ap.get("group"),
+            "wap_wlc":    wlc_name,
+        },
+    }
+    if dev:
+        api.dcim.devices.update([{"id": dev.id, **payload}])
+        return dev.id
+    new = api.dcim.devices.create(payload)
+    log("INFO", f"  AP created: {name} (id={new.id})")
+    return new.id
+
+
+def mark_ap_offline(dev_id, dev_name):
+    try:
+        get_netbox().dcim.devices.update([{
+            "id": dev_id, "status": "offline",
+            "custom_fields": {"wap_enabled": False},
+        }])
+        log("WARN", f"  AP marked offline: {dev_name} (id={dev_id})")
+    except Exception as e:
+        log("ERROR", f"  Could not mark AP offline {dev_name}: {e}")
+
 # ── Consecutive-failure tracking (prevents flapping) ─────────────────────────
 # A device must fail to appear in the scan for OFFLINE_THRESHOLD consecutive
 # runs before being marked offline. The counter persists across scheduled runs
