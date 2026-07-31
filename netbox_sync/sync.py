@@ -27,7 +27,7 @@ from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
                                 CISCO_RANGES, FORTIGATE_RANGES)
 from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
                               ensure_prefix, ensure_host_ip,
-                              _containing_prefix,
+                              _containing_prefix, _prefix_masklen,
                               sweep_stale_prefixes, sweep_stale_host_ips,
                               sync_nat_ips, sweep_nat_ips,
                               sync_nat_services, sweep_nat_services,
@@ -585,6 +585,17 @@ def run_sync():
         log("WARN", f"  parent prefix sync failed: {e}")
 
     # ── Sweep stale marker-owned VLANs per group + legacy site VLANs ─────────
+    # Prefixes first: marked stale prefixes may reference stale VLANs, and
+    # NetBox blocks VLAN deletion while a prefix depends on it (409).
+    for site_id in legacy_sites:
+        try:
+            sweep_stale_prefixes(site_id, site_prefix_seen.get(site_id, set()))
+        except Exception as e:
+            log("ERROR", f"  prefix sweep failed for site {site_id}: {e}")
+    try:
+        sweep_stale_parents()
+    except Exception as e:
+        log("ERROR", f"  parent prefix sweep failed: {e}")
     for group_id, seen in group_vlan_seen.items():
         try:
             sweep_stale_vlans(group_id, seen)
@@ -599,14 +610,6 @@ def run_sync():
             _sweep_stale_groups(site_id, set(group_vlan_seen.keys()), key_by_name)
         except Exception as e:
             log("ERROR", f"  stale group sweep failed for site {site_id}: {e}")
-        try:
-            sweep_stale_prefixes(site_id, site_prefix_seen.get(site_id, set()))
-        except Exception as e:
-            log("ERROR", f"  prefix sweep failed for site {site_id}: {e}")
-    try:
-        sweep_stale_parents()
-    except Exception as e:
-        log("ERROR", f"  parent prefix sweep failed: {e}")
 
     # ── Mark unreachable devices offline ─────────────────────────────────────
     # A device must be missing from OFFLINE_THRESHOLD consecutive scans before
