@@ -232,24 +232,55 @@ def _prefix_masklen(prefix_str):
     return ipaddress.ip_network(prefix_str, strict=False).prefixlen
 
 
+def _prefix_scope_kwargs(site_id):
+    """NetBox 4.x prefixes scope generically (scope_type/scope_id); 3.x used
+    a direct site FK (handled by the fallback paths below)."""
+    return {"scope_type": "dcim.site", "scope_id": site_id}
+
+
+def _prefix_site_id(p):
+    """Site id of a prefix across API variants: scope_id (4.x) or site.id."""
+    sid = getattr(p, "scope_id", None)
+    if sid is not None:
+        return sid
+    site = getattr(p, "site", None)
+    return getattr(site, "id", None) if site is not None else None
+
+
 def ensure_prefix(prefix_str, site_id, vlan_id, hostname, iface_name,
                   status="active"):
     """Get-or-create a prefix in IPAM. Marker-owned records are refreshed
-    (site/vlan/description); manual records are reused untouched. Parents
+    (scope/vlan/description); manual records are reused untouched. Parents
     use status='container', discovered prefixes 'active'."""
     api = netbox.get_netbox()
-    payload = {"site": site_id,
-               "status": status,
-               "description": f"{IPAM_PREFIX_MARKER}{hostname} {iface_name}"}
+    payload = {"status": status,
+               "description": f"{IPAM_PREFIX_MARKER}{hostname} {iface_name}",
+               **_prefix_scope_kwargs(site_id)}
     if vlan_id:
         payload["vlan"] = vlan_id
     existing = api.ipam.prefixes.get(prefix=prefix_str)
     if existing:
         if (getattr(existing, "description", None) or "").startswith("netbox-sync:"):
-            api.ipam.prefixes.update([{"id": existing.id, **payload}])
+            try:
+                api.ipam.prefixes.update([{"id": existing.id, **payload}])
+            except Exception as exc:
+                if "scope" in str(exc) or "site" in str(exc):
+                    legacy = {k: v for k, v in payload.items()
+                              if k not in ("scope_type", "scope_id")}
+                    legacy["site"] = site_id
+                    api.ipam.prefixes.update([{"id": existing.id, **legacy}])
+                else:
+                    raise
         return existing.id
-    return api.ipam.prefixes.create(
-        {"prefix": prefix_str, **payload}).id
+    try:
+        return api.ipam.prefixes.create({"prefix": prefix_str, **payload}).id
+    except Exception as exc:
+        if "scope" in str(exc) or "site" in str(exc):
+            legacy = {k: v for k, v in payload.items()
+                      if k not in ("scope_type", "scope_id")}
+            legacy["site"] = site_id
+            return api.ipam.prefixes.create({"prefix": prefix_str, **legacy}).id
+        raise
 
 
 def sync_parent_prefixes():
@@ -332,9 +363,12 @@ def ensure_host_ip(dev_id, address, iface_name, hostname, iface_label):
 
 def sweep_stale_prefixes(site_id, seen_prefixes):
     """Delete marker-owned prefixes at the site that were not seen this
-    run. Manual prefixes are never touched."""
+    run. Manual prefixes are never touched. Site matching is client-side
+    (scope_id on 4.x, site FK on 3.x)."""
     api = netbox.get_netbox()
-    for p in list(api.ipam.prefixes.filter(site_id=site_id)):
+    for p in list(api.ipam.prefixes.filter()):
+        if _prefix_site_id(p) != site_id:
+            continue
         if not (getattr(p, "description", None) or "").startswith("netbox-sync:"):
             continue
         if p.prefix not in seen_prefixes:

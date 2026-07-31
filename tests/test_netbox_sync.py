@@ -727,22 +727,23 @@ def test_ensure_prefix_create_refresh_and_manual(monkeypatch):
     api = _prefix_api([marked, manual])
     monkeypatch.setattr(nbx, "get_netbox", lambda: api)
 
-    # marked existing -> refreshed with site+vlan
+    # marked existing -> refreshed with scope+vlan
     pid = ipam.ensure_prefix("10.0.0.0/24", 3, 110, "FGT-DC-01", "VLAN10")
     assert pid == 50
     assert {u["id"] for u in api.ipam.prefixes.updated} == {50}
     assert api.ipam.prefixes.updated[0]["vlan"] == 110
-    assert api.ipam.prefixes.updated[0]["site"] == 3
+    assert api.ipam.prefixes.updated[0]["scope_id"] == 3
+    assert api.ipam.prefixes.updated[0]["scope_type"] == "dcim.site"
 
     # manual existing -> reused untouched
     pid = ipam.ensure_prefix("10.1.0.0/24", 3, 111, "FGT-DC-01", "VLAN11")
     assert pid == 51
     assert len(api.ipam.prefixes.updated) == 1   # no update for manual
 
-    # missing -> created marked with site+vlan
+    # missing -> created marked with scope+vlan
     pid = ipam.ensure_prefix("10.2.0.0/24", 3, 112, "FGT-DC-01", "VLAN12")
     assert api.ipam.prefixes.created[0]["prefix"] == "10.2.0.0/24"
-    assert api.ipam.prefixes.created[0]["site"] == 3
+    assert api.ipam.prefixes.created[0]["scope_id"] == 3
     assert api.ipam.prefixes.created[0]["vlan"] == 112
     assert api.ipam.prefixes.created[0]["description"].startswith("netbox-sync:")
 
@@ -759,7 +760,8 @@ def test_parent_prefixes_container_and_sweep(monkeypatch):
     created = api.ipam.prefixes.created[0]
     assert created["prefix"] == "172.31.0.0/16"
     assert created["status"] == "container"
-    assert created["site"] == 3
+    assert created["scope_id"] == 3
+    assert created["scope_type"] == "dcim.site"
     assert seen == {3: {"172.31.0.0/16"}}
 
     # entry removed from map -> parent swept
@@ -824,13 +826,15 @@ def test_containing_prefix_longest_match(monkeypatch):
 
 def test_sweep_stale_prefixes(monkeypatch):
     import netbox_sync.ipam as ipam
-    seen = FakeRecord(50, prefix="10.0.0.0/24", site_id=3,
+    seen = FakeRecord(50, prefix="10.0.0.0/24", scope_id=3,
                       description="netbox-sync: last seen SW1")
-    stale = FakeRecord(51, prefix="10.1.0.0/24", site_id=3,
+    stale = FakeRecord(51, prefix="10.1.0.0/24", scope_id=3,
                        description="netbox-sync: last seen SW1")
-    manual = FakeRecord(52, prefix="10.2.0.0/24", site_id=3,
+    other_site = FakeRecord(54, prefix="10.4.0.0/24", scope_id=9,
+                            description="netbox-sync: last seen SW1")
+    manual = FakeRecord(52, prefix="10.2.0.0/24", scope_id=3,
                         description="manual prefix")
-    api = _prefix_api([seen, stale, manual])
+    api = _prefix_api([seen, stale, other_site, manual])
     monkeypatch.setattr(nbx, "get_netbox", lambda: api)
 
     ipam.sweep_stale_prefixes(3, {"10.0.0.0/24", "10.9.0.0/24"})
