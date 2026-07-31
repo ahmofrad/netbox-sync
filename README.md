@@ -179,6 +179,13 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `FORTIGATE_TOKEN_FILE` | ❌ | `fortigate_tokens.txt` | Per-device API tokens: `<ip[:port]> <token>` per line (`#` comments). Gitignored. |
 | `FORTIGATE_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for FortiGates. Empty = family disabled. |
 | `DEFAULT_FORTIGATE_ROLE` | ❌ | `Firewall` | NetBox device role for FortiGates. |
+| `RUCKUS_USER` | ❌* | — | SSH username for Ruckus ZDs (required when `RUCKUS_RANGES` is set). |
+| `RUCKUS_PASS` | ❌* | — | SSH password for Ruckus ZDs. |
+| `RUCKUS_PORT` | ❌ | `22` | SSH port for Ruckus ZDs. |
+| `RUCKUS_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for Ruckus ZDs (VIPs and/or unit addresses). Empty = family disabled. |
+| `RUCKUS_HA_MAP` | ❌ | — | HA pairs: `vip:primary,secondary` per pair, pairs separated by `;`. Merges a pair into one cluster device. |
+| `DEFAULT_RUCKUS_ROLE` | ❌ | `Wireless Controller` | NetBox device role for controllers. |
+| `DEFAULT_AP_ROLE` | ❌ | `Access Point` | NetBox device role for APs. |
 
 > *The shipped defaults in `netbox_sync/config.py` are **documentation-only** placeholder CIDRs (`192.0.2.0/27` = TEST-NET). Set the ranges in `.env` to your real networks — or set a range **empty** (e.g. `BMC_RANGES=`) to disable that family entirely (no scanning and no offline marking for it).
 
@@ -371,6 +378,13 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 - Catalyst 2960X / 3650 / 3850 / 9200 / 9300 families (classic IOS and IOS-XE dialects).
 - Connects via SSH and runs `show version`, `show inventory`, `show interfaces status`, `show vlan brief`, `show interfaces trunk`, `show cdp neighbors detail` (with `show lldp neighbors detail` as fallback).
 - The Cisco family is **opt-in**: it only activates when `CISCO_RANGES` is set.
+
+**Wireless controllers (Ruckus ZoneDirector, SSH):**
+- ZD1200-class controllers via an interactive shell login (two-step `login:`/`Password:` + `enable`) — `show sysinfo` (identity), `show ap all` (APs), `show wlan all` (SSIDs).
+- Controller device with `wlc_*` custom fields; each AP becomes an `Access Point` device (MAC is the identity — `wap_mac`), linked to its controller (`wap_wlc`) and group (`wap_group`); vanished APs are marked offline, never deleted.
+- WLANs become native **Wireless LANs** (SSID + auth type + VLAN link from the site's groups). **Passphrases are never synced.**
+- **HA pairs:** `RUCKUS_HA_MAP=vip:primary,secondary` (per pair, `;`-separated) merges a pair into one cluster device — identity from VIP/primary probes only, secondary probes update liveness only; primary IPv4 = the VIP.
+- **Opt-in**: activates only when `RUCKUS_RANGES` is set.
 
 **Firewalls (FortiGate, REST API + SSH extras):**
 - FortiGate 40F / 60F / 80F / 100F / 200F class (FortiOS 6/7). Queries `/api/v2/monitor/system/status`, `/api/v2/monitor/system/interface`, `/api/v2/cmdb/system/interface` (VDOM `root`).
@@ -583,6 +597,13 @@ pip install -r requirements.txt
 | `FORTIGATE_TOKEN_FILE` | ❌ | `fortigate_tokens.txt` | توکن‌های API به‌صورت per-device: در هر خط `<ip[:port]> <token>` (کامنت با `#`). این فایل در gitignore قرار دارد. |
 | `FORTIGATE_RANGES` | ❌ | *(خالی)* | بازه‌های CIDR جداشده با کاما برای FortiGateها. خالی = خانواده غیرفعال. |
 | `DEFAULT_FORTIGATE_ROLE` | ❌ | `Firewall` | نقش دستگاه در NetBox برای FortiGateها. |
+| `RUCKUS_USER` | ❌* | — | نام کاربری SSH برای کنترلرهای Ruckus (وقتی `RUCKUS_RANGES` تنظیم شده الزامی است). |
+| `RUCKUS_PASS` | ❌* | — | رمز عبور SSH برای کنترلرهای Ruckus. |
+| `RUCKUS_PORT` | ❌ | `22` | پورت SSH برای کنترلرهای Ruckus. |
+| `RUCKUS_RANGES` | ❌ | *(خالی)* | بازه‌های CIDR جداشده با کاما برای کنترلرهای Ruckus (VIP و/یا آدرس واحدها). خالی = خانواده غیرفعال. |
+| `RUCKUS_HA_MAP` | ❌ | — | جفت‌های HA: به‌صورت `vip:primary,secondary` برای هر جفت، جداشده با `;`. یک جفت را به یک دستگاه خوشه ادغام می‌کند. |
+| `DEFAULT_RUCKUS_ROLE` | ❌ | `Wireless Controller` | نقش دستگاه در NetBox برای کنترلرها. |
+| `DEFAULT_AP_ROLE` | ❌ | `Access Point` | نقش دستگاه در NetBox برای APها. |
 
 > *پیش‌فرض‌های موجود در `netbox_sync/config.py` صرفاً CIDR‌های **نمونه/تست** هستند (`192.0.2.0/27` = TEST-NET). بازه‌های واقعی خود را در `.env` تنظیم کنید — یا برای غیرفعال‌کردن کامل یک خانواده، مقدار آن را **خالی** بگذارید (مثلاً `BMC_RANGES=`)؛ در این صورت نه اسکنی انجام می‌شود و نه علامت‌گذاری آفلاین برای آن خانواده.
 
@@ -775,6 +796,13 @@ python -m pytest tests/
 - خانواده‌های Catalyst 2960X / 3650 / 3850 / 9200 / 9300 (هر دو گویش IOS کلاسیک و IOS-XE).
 - اتصال از طریق SSH و اجرای `show version`، `show inventory`، `show interfaces status`، `show vlan brief`، `show interfaces trunk`، `show cdp neighbors detail` (با `show lldp neighbors detail` به‌عنوان جایگزین).
 - خانواده سیسکو **اختیاری** است: فقط وقتی `CISCO_RANGES` تنظیم شود فعال می‌شود.
+
+**کنترلرهای بی‌سیم (Ruckus ZoneDirector، SSH):**
+- کنترلرهای خانواده ZD1200 از طریق shell تعاملی (ورود دو مرحله‌ای `login:`/`Password:` به‌علاوه `enable`) — `show sysinfo` (هویت)، `show ap all` (APها)، `show wlan all` (SSIDها).
+- دستگاه کنترلر با فیلدهای سفارشی `wlc_*`؛ هر AP به دستگاهی با نقش `Access Point` تبدیل می‌شود (هویت بر اساس MAC — فیلد `wap_mac`) و به کنترلر (`wap_wlc`) و گروه (`wap_group`) خود پیوند می‌خورد؛ APهای ناپدیدشده آفلاین علامت می‌خورند و هرگز حذف نمی‌شوند.
+- WLANها به **Wireless LANهای** بومی NetBox تبدیل می‌شوند (SSID + نوع احراز هویت + پیوند VLAN از گروه‌های سایت). **عبارات عبور (passphrase) هرگز همگام‌سازی نمی‌شوند.**
+- **جفت‌های HA:** با `RUCKUS_HA_MAP=vip:primary,secondary` (به‌ازای هر جفت، جداشده با `;`) یک جفت به یک دستگاه خوشه ادغام می‌شود — هویت فقط از بررسی VIP/primary گرفته می‌شود و بررسی‌های secondary فقط زنده‌بودن را به‌روزرسانی می‌کنند؛ primary IPv4 همان VIP است.
+- **اختیاری**: فقط وقتی `RUCKUS_RANGES` تنظیم شود فعال می‌شود.
 
 **فایروالها (FortiGate، REST API + SSH):**
 - خانواده FortiGate 40F / 60F / 80F / 100F / 200F (FortiOS 6/7). کوئری‌های `/api/v2/monitor/system/status`، `/api/v2/monitor/system/interface`، `/api/v2/cmdb/system/interface` (VDOM سِ `root`).

@@ -520,6 +520,17 @@ def mark_ap_offline(dev_id, dev_name):
         log("ERROR", f"  Could not mark AP offline {dev_name}: {e}")
 
 
+def mark_ruckus_offline(dev_id, dev_name):
+    try:
+        get_netbox().dcim.devices.update([{
+            "id": dev_id, "status": "offline",
+            "custom_fields": {"wlc_enabled": False},
+        }])
+        log("WARN", f"  ZD marked offline: {dev_name} (id={dev_id})")
+    except Exception as e:
+        log("ERROR", f"  Could not mark ZD offline {dev_name}: {e}")
+
+
 _WLAN_AUTH_MAP = {"open": "open", "wpa2": "wpa-personal",
                   "802.1x": "wpa-enterprise"}
 

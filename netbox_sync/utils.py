@@ -15,6 +15,7 @@ def slugify(s):
 
 def normalize_model(model, model_map):
     if not model: return None
+    if not model_map: return model.strip()
     return model_map.get(model.strip().lower(), model.strip())
 
 def resolve_site(hostname, ip):

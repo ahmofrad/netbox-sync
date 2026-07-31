@@ -167,6 +167,37 @@ def _parse_ap_all(text):
     return aps
 
 
+def probe_ruckus(ip, retries=2, retry_delay=3):
+    for attempt in range(1, retries + 1):
+        if not is_port_open(ip, RUCKUS_PORT, timeout=3, retries=1):
+            if attempt < retries: time.sleep(retry_delay); continue
+            return None
+        sess = RuckusSession(ip)
+        try:
+            sess.login()
+            info = _parse_sysinfo(sess.run("show sysinfo"))
+            if not (info.get("serial") or info.get("model")):
+                raise RuntimeError("sysinfo yielded no serial/model")
+            return {
+                "ip": ip,
+                "host": f"{ip}:{RUCKUS_PORT}",
+                "serial": info.get("serial"),
+                "model": info.get("model"),
+                "hostname": info.get("name") or f"ruckus-{ip.replace('.', '-')}",
+                "reported_ip": info.get("ip"),
+                "mac": info.get("mac"),
+                "manufacturer": "Ruckus",
+                "firmware": info.get("version"),
+            }
+        except Exception:
+            if attempt < retries: time.sleep(retry_delay); continue
+            return None
+        finally:
+            try: sess.logout()
+            except Exception: pass
+    return None
+
+
 def _parse_wlan_all(text):
     """Parse `show wlan all` ID blocks -> WLANs (ssid/auth/encryption/vlan).
     Passphrases are deliberately never captured."""

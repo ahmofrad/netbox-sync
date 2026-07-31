@@ -15,6 +15,8 @@ def test_normalize_model_known_and_unknown():
     # Unknown models pass through unchanged (stripped)
     assert mod.normalize_model("ProLiant DL999 Gen99", SERVER_MODEL_MAP) == "ProLiant DL999 Gen99"
     assert mod.normalize_model("", SERVER_MODEL_MAP) is None
+    # No map at all -> stripped passthrough
+    assert mod.normalize_model(" ZD1200 ", None) == "ZD1200"
 
 
 def test_invalid_serial():

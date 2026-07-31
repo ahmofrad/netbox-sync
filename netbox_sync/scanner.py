@@ -7,8 +7,9 @@ from netbox_sync.collectors.cisco import probe_cisco_switch
 from netbox_sync.collectors.fortigate import probe_fortigate
 from netbox_sync.collectors.msa import probe_storage
 from netbox_sync.collectors.redfish import probe_redfish
+from netbox_sync.collectors.ruckus import probe_ruckus
 from netbox_sync.config import (BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
-                                CISCO_RANGES, FORTIGATE_RANGES,
+                                CISCO_RANGES, FORTIGATE_RANGES, RUCKUS_RANGES,
                                 SCAN_WORKERS, log)
 from netbox_sync.utils import expand_ranges
 
@@ -30,7 +31,7 @@ def _drain_pool(ex, futures, on_hit):
 
 def scan_all():
     all_found = {"servers": [], "storage": [], "san_switches": [], "cisco_switches": [],
-                 "fortigates": []}
+                 "fortigates": [], "ruckus": []}
 
     bmc_ips = expand_ranges(BMC_RANGES)
     if bmc_ips:
@@ -126,5 +127,24 @@ def scan_all():
             log("INFO", "No FortiGate IPs to scan (all excluded).")
     else:
         log("INFO", "FortiGate ranges not configured — skipping FortiGate scan.")
+
+    # ── Ruckus ZoneDirectors (SSH, opt-in family) ───────────────────────────
+    if RUCKUS_RANGES:
+        used_ips = used_ips | {h["ip"] for h in all_found["fortigates"]}
+        all_ruckus_ips = expand_ranges(RUCKUS_RANGES)
+        ruckus_ips = [ip for ip in all_ruckus_ips if ip not in used_ips]
+        if ruckus_ips:
+            log("INFO", f"Scanning {len(ruckus_ips)} IPs for Ruckus ZDs (SSH) ...")
+            ex = ThreadPoolExecutor(max_workers=SCAN_WORKERS)
+            futures = {ex.submit(probe_ruckus, ip): ip for ip in ruckus_ips}
+            def _on_ruckus(r):
+                log("INFO", f"  + RUCKUS {r['ip']}  {r['model']}  s/n={r['serial']}")
+                all_found["ruckus"].append(r)
+            _drain_pool(ex, futures, _on_ruckus)
+            log("INFO", f"Ruckus scan done: {len(all_found['ruckus'])} found.")
+        else:
+            log("INFO", "No Ruckus IPs to scan (all excluded).")
+    else:
+        log("INFO", "Ruckus ranges not configured — skipping Ruckus scan.")
 
     return all_found

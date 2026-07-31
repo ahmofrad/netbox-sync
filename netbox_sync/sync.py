@@ -23,8 +23,12 @@ from netbox_sync.collectors.fortigate import (fortigate_collect,
                                               _fortigate_iface_mac)
 from netbox_sync.collectors.msa import storage_collect_inventory
 from netbox_sync.collectors.redfish import rf_collect_inventory
+from netbox_sync.collectors.ruckus import (ruckus_collect, probe_ruckus,
+                                           _ruckus_role_and_cluster,
+                                           _parse_ha_map)
 from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
-                                CISCO_RANGES, FORTIGATE_RANGES)
+                                CISCO_RANGES, FORTIGATE_RANGES, RUCKUS_RANGES,
+                                RUCKUS_HA_MAP)
 from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
                               ensure_prefix, ensure_host_ip,
                               _containing_prefix, _prefix_masklen,
@@ -35,10 +39,13 @@ from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
 from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_storage_device, ensure_san_switch_device,
                                 ensure_cisco_device, ensure_fortigate_device,
+                                ensure_ruckus_device, ensure_ap_device,
                                 ensure_primary_ip,
                                 mark_server_offline, mark_storage_offline,
                                 mark_san_offline, mark_cisco_offline,
-                                mark_fortigate_offline,
+                                mark_fortigate_offline, mark_ap_offline,
+                                mark_ruckus_offline,
+                                sync_wireless_lans, sweep_wireless_lans,
                                 _check_offline,
                                 sync_inventory)
 from netbox_sync.scanner import scan_all
@@ -573,6 +580,127 @@ def run_sync():
             sweep_nat_ips(nat_seen)
         except Exception as e:
             log("ERROR", f"  NAT IP sweep failed: {e}")
+
+    # ── Process Ruckus ZoneDirectors ──────────────────────────────────────────
+    live_ruckus_ips = {h["ip"] for h in found["ruckus"]}
+    ruckus_ha_map = _parse_ha_map(RUCKUS_HA_MAP)
+    for probe in found["ruckus"]:
+        ip = probe["ip"]
+        log("INFO", f"Processing RUCKUS {ip}  ({probe.get('model')} / {probe.get('serial')})")
+        role, vip = _ruckus_role_and_cluster(ip, ruckus_ha_map)
+        try:
+            data = ruckus_collect(ip)
+        except KeyboardInterrupt: raise
+        except Exception as e:
+            log("ERROR", f"  Ruckus collection failed for {ip}: {e}"); continue
+
+        # cluster identity comes only from vip/primary probes
+        eff_probe = probe if role != "secondary" else dict(probe, serial="")
+        try:
+            dev_id = ensure_ruckus_device(eff_probe, role, vip)
+        except Exception as e:
+            log("ERROR", f"  ensure_ruckus_device failed for {ip}: {e}"); continue
+
+        wlc_name = (data["summary"].get("name") or probe.get("hostname") or ip)
+        try:
+            cf = {"wlc_ip": ip, "wlc_enabled": True,
+                  "wlc_model": data["summary"].get("model") or probe.get("model"),
+                  "wlc_firmware": data["summary"].get("version") or probe.get("firmware"),
+                  "wlc_ap_count": len(data["aps"]),
+                  "wlc_ha_role": role}
+            if vip:
+                cf["wlc_vip"] = vip
+            payload = {"id": dev_id, "status": "active", "custom_fields": cf}
+            if role != "secondary" and data["summary"].get("serial"):
+                payload["serial"] = data["summary"]["serial"]
+            api.dcim.devices.update([payload])
+        except Exception as e:
+            log("ERROR", f"  ZD update failed for {ip}: {e}")
+
+        try:
+            ensure_primary_ip(dev_id, vip or probe.get("reported_ip") or ip,
+                              wlc_name)
+        except Exception as e:
+            log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
+
+        seen_macs = set()
+        for ap in data["aps"]:
+            try:
+                ap_dev = ensure_ap_device(ap, wlc_name)
+                seen_macs.add(ap["mac"])
+                if ap.get("ip"):
+                    try:
+                        ensure_primary_ip(ap_dev, ap["ip"], ap.get("name"))
+                    except Exception as e:
+                        log("WARN", f"  AP {ap.get('name')} primary IP failed: {e}")
+            except Exception as e:
+                log("ERROR", f"  AP sync failed for {ap.get('mac')}: {e}")
+        try:
+            for d in list(api.dcim.devices.filter(cf_wap_wlc=wlc_name,
+                                                  cf_wap_enabled=True)):
+                mac = (d.custom_fields or {}).get("wap_mac")
+                if mac and mac not in seen_macs:
+                    mark_ap_offline(d.id, d.name)
+        except Exception as e:
+            log("ERROR", f"  AP offline sweep failed for {ip}: {e}")
+
+        try:
+            dev_rec = api.dcim.devices.get(id=dev_id)
+            site_id = getattr(getattr(dev_rec, "site", None), "id", None)
+        except Exception:
+            site_id = None
+        if site_id:
+            try:
+                site_index = site_indexes.get(site_id)
+                if site_index is None:
+                    site_index = _site_vlan_index(site_id)
+                    site_indexes[site_id] = site_index
+                vid_map = {}
+                missing = []
+                for w in data["wlans"]:
+                    vid = w.get("vlan_id")
+                    if not vid:
+                        continue
+                    matches = site_index.get(vid, [])
+                    if len(matches) == 1:
+                        vid_map[vid] = matches[0][1]
+                    else:
+                        missing.append({"vid": vid,
+                                        "name": w.get("name") or f"VLAN{vid:04d}",
+                                        "status": "active"})
+                if missing:
+                    group_id = ensure_vlan_group(site_id, wlc_name)
+                    created = sync_cisco_vlans(group_id, wlc_name, missing)
+                    vid_map.update(created)
+                    group_vlan_seen.setdefault(group_id, set()).update(created.keys())
+                    legacy_sites.add(site_id)
+                seen_ssids = sync_wireless_lans(wlc_name, data["wlans"], vid_map)
+                sweep_wireless_lans(wlc_name, seen_ssids)
+                log("INFO", f"  [OK] Ruckus {ip} — {len(data['aps'])} APs, "
+                            f"{len(seen_ssids)} WLANs synced")
+            except Exception as e:
+                log("ERROR", f"  Ruckus WLAN sync failed for {ip}: {e}")
+        else:
+            log("WARN", f"  no site on device for {ip} — skipping WLAN sync")
+
+    # ZD offline: a cluster is offline only when the VIP AND all its units
+    # are unreachable; standalone ZDs go offline when their IP is missing.
+    if RUCKUS_RANGES:
+        try:
+            for dev in list(api.dcim.devices.filter(cf_wlc_enabled=True)):
+                cf = dev.custom_fields or {}
+                vip = cf.get("wlc_vip")
+                if vip:
+                    units = ruckus_ha_map.get(vip, {})
+                    live = vip in live_ruckus_ips \
+                        or units.get("primary") in live_ruckus_ips \
+                        or units.get("secondary") in live_ruckus_ips
+                    if not live:
+                        mark_ruckus_offline(dev.id, dev.name)
+                elif cf.get("wlc_ip") and cf["wlc_ip"] not in live_ruckus_ips:
+                    mark_ruckus_offline(dev.id, dev.name)
+        except Exception as e:
+            log("ERROR", f"  Ruckus offline sweep failed: {e}")
 
     # ── IPAM parent prefixes from SITE_IP_MAP (containers for discovered ones)
     try:
