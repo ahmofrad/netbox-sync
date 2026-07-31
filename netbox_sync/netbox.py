@@ -519,6 +519,116 @@ def mark_ap_offline(dev_id, dev_name):
     except Exception as e:
         log("ERROR", f"  Could not mark AP offline {dev_name}: {e}")
 
+
+_WLAN_AUTH_MAP = {"open": "open", "wpa2": "wpa-personal",
+                  "802.1x": "wpa-enterprise"}
+
+
+def ensure_wireless_lan_group(name):
+    api = get_netbox()
+    g = api.wireless.wireless_lan_groups.get(name=name)
+    if g:
+        return g.id
+    return api.wireless.wireless_lan_groups.create(
+        {"name": name, "slug": slugify(name),
+         "description": f"netbox-sync: {name}"}).id
+
+
+def sync_wireless_lans(wlc_name, wlans, vid_map):
+    """Sync ZD WLANs as NetBox Wireless LANs (ssid/auth/vlan). Passphrases
+    are never written. Returns the set of SSIDs seen (for sweeping)."""
+    api = get_netbox()
+    group_id = ensure_wireless_lan_group(f"ZD {wlc_name}")
+    seen = set()
+    for w in wlans:
+        ssid = (w.get("ssid") or w.get("name") or "").strip()[:32]
+        if not ssid:
+            continue
+        seen.add(ssid)
+        payload = {
+            "ssid": ssid,
+            "group": group_id,
+            "auth_type": _WLAN_AUTH_MAP.get((w.get("auth") or "").lower(), "open"),
+            "status": "active",
+            "description": f"netbox-sync: {wlc_name} {w.get('name')}"[:200],
+        }
+        if w.get("vlan_id") and w["vlan_id"] in vid_map:
+            payload["vlan"] = vid_map[w["vlan_id"]]
+        existing = next(iter(api.wireless.wireless_lans.filter(ssid=ssid)), None)
+        if existing:
+            api.wireless.wireless_lans.update([{"id": existing.id, **payload}])
+        else:
+            try:
+                api.wireless.wireless_lans.create(payload)
+            except Exception as exc:
+                log("WARN", f"  wlan {ssid}: create failed: {exc}")
+    return seen
+
+
+def sweep_wireless_lans(wlc_name, seen_ssids):
+    """Delete marker-owned Wireless LANs of the controller not seen this run."""
+    api = get_netbox()
+    for wl in list(api.wireless.wireless_lans.filter()):
+        desc = getattr(wl, "description", None) or ""
+        if not desc.startswith(f"netbox-sync: {wlc_name}"):
+            continue
+        if wl.ssid not in seen_ssids:
+            try:
+                wl.delete()
+                log("INFO", f"  wireless lan {wl.ssid} deleted — no longer seen")
+            except Exception as exc:
+                log("WARN", f"  could not delete wireless lan {wl.ssid}: {exc}")
+
+
+def ensure_ruckus_device(probe, role, vip):
+    """Ensure the NetBox device for a Ruckus ZoneDirector. For HA pairs the
+    device represents the CLUSTER (matched by wlc_vip); secondary-unit probes
+    only update liveness/role, never cluster identity."""
+    from netbox_sync.config import RUCKUS_ROLE
+    serial = (probe.get("serial") or "").strip()
+    mfr_id = get_or_create_manufacturer("Ruckus")
+    role_id = get_or_create_role(RUCKUS_ROLE, "8e44ad")
+    site_name = resolve_site(probe.get("hostname") or "",
+                             probe.get("reported_ip") or probe["ip"])
+    site_id = get_or_create_site(site_name)
+    dtype_id = get_or_create_device_type(probe.get("model") or "ZoneDirector",
+                                         mfr_id)
+    name = (probe.get("hostname") or f"ruckus-{probe['ip'].replace('.', '-')}")[:64]
+    api = get_netbox()
+    dev = None
+    if vip:
+        dev = next(iter(api.dcim.devices.filter(cf_wlc_vip=vip)), None)
+    if dev is None and not _invalid_serial(serial):
+        dev = find_device(serial, role_name=RUCKUS_ROLE)
+    if dev is None:
+        cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
+                                             role_id=role_id))
+        dev = cands[0] if cands else None
+        if dev:
+            log("INFO", f"  Found ZD by name+site: {name} (id={dev.id})")
+    cf = {"wlc_ip": probe["ip"], "wlc_enabled": True,
+          "wlc_model": probe.get("model"),
+          "wlc_firmware": probe.get("firmware"),
+          "wlc_ha_role": role}
+    if vip:
+        cf["wlc_vip"] = vip
+    payload = {"name": name, "status": "active", "site": site_id,
+               "device_type": dtype_id, "role": role_id,
+               "custom_fields": cf,
+               **({"serial": serial} if not _invalid_serial(serial) else {})}
+    if dev:
+        if role == "secondary":
+            # never overwrite cluster identity from a secondary-unit probe
+            api.dcim.devices.update([{"id": dev.id, "status": "active",
+                                      "custom_fields": cf}])
+        else:
+            api.dcim.devices.update([{"id": dev.id, **payload}])
+        log("INFO", f"  ZD updated: {name} (id={dev.id})")
+        return dev.id
+    new = api.dcim.devices.create(payload)
+    log("INFO", f"  ZD created: {name} (id={new.id})")
+    return new.id
+
 # ── Consecutive-failure tracking (prevents flapping) ─────────────────────────
 # A device must fail to appear in the scan for OFFLINE_THRESHOLD consecutive
 # runs before being marked offline. The counter persists across scheduled runs

@@ -631,6 +631,120 @@ def test_mark_ap_offline(monkeypatch):
     assert devices_ep.updated[0]["custom_fields"]["wap_enabled"] is False
 
 
+# ── Ruckus WLAN sync ─────────────────────────────────────────────────────────
+
+WLAN_ALL = """WLAN Service:
+  ID:
+    1:
+      NAME = Smart Plug
+      SSID = Smart Plug
+      Authentication = open
+      Encryption = wpa2
+      VLAN-ID = 109
+    2:
+      NAME = CorpNet
+      SSID = CorpNet
+      Authentication = 802.1x
+      Encryption = wpa2
+      VLAN-ID = 10
+"""
+
+
+def test_parse_wlan_all():
+    import netbox_sync.collectors.ruckus as ruckus
+    wlans = ruckus._parse_wlan_all(WLAN_ALL)
+    assert wlans == [
+        {"name": "Smart Plug", "ssid": "Smart Plug", "auth": "open",
+         "encryption": "wpa2", "vlan_id": 109},
+        {"name": "CorpNet", "ssid": "CorpNet", "auth": "802.1x",
+         "encryption": "wpa2", "vlan_id": 10},
+    ]
+
+
+def _wireless_api(lan_items=None, group_items=None):
+    return SimpleNamespace(
+        dcim=SimpleNamespace(interfaces=FakeEndpoint()),
+        ipam=SimpleNamespace(vlans=FakeEndpoint()),
+        wireless=SimpleNamespace(
+            wireless_lans=FakeEndpoint(lan_items or []),
+            wireless_lan_groups=FakeEndpoint(group_items or [])))
+
+
+def test_sync_wireless_lans_creates_with_auth_map_and_vlan(monkeypatch):
+    api = _wireless_api()
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+    wlans = [{"name": "Smart Plug", "ssid": "Smart Plug", "auth": "open",
+              "encryption": "wpa2", "vlan_id": 109},
+             {"name": "CorpNet", "ssid": "CorpNet", "auth": "802.1x",
+              "encryption": "wpa2", "vlan_id": 10}]
+
+    seen = nbx.sync_wireless_lans("Ruckus-Controller_02", wlans, {109: 500, 10: 501})
+
+    groups = api.wireless.wireless_lan_groups.created
+    assert groups[0]["name"] == "ZD Ruckus-Controller_02"
+    by_ssid = {w["ssid"]: w for w in api.wireless.wireless_lans.created}
+    assert by_ssid["Smart Plug"]["auth_type"] == "open"
+    assert by_ssid["Smart Plug"]["vlan"] == 500
+    assert by_ssid["CorpNet"]["auth_type"] == "wpa-enterprise"
+    assert by_ssid["CorpNet"]["vlan"] == 501
+    assert seen == {"Smart Plug", "CorpNet"}
+
+
+def test_sweep_wireless_lans(monkeypatch):
+    stale = FakeRecord(50, ssid="OldNet",
+                       description="netbox-sync: Ruckus-Controller_02 OldNet")
+    keep = FakeRecord(51, ssid="Smart Plug",
+                      description="netbox-sync: Ruckus-Controller_02 Smart Plug")
+    manual = FakeRecord(52, ssid="ManualNet", description="manual")
+    api = _wireless_api([stale, keep, manual])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    nbx.sweep_wireless_lans("Ruckus-Controller_02", {"Smart Plug"})
+    assert api.wireless.wireless_lans.deleted_ids == [50]
+
+
+# ── Ruckus HA resolution + controller device ─────────────────────────────────
+
+def test_ruckus_role_and_cluster():
+    import netbox_sync.collectors.ruckus as ruckus
+    ha_map = {"172.31.2.202": {"primary": "172.31.2.201", "secondary": "172.31.2.200"}}
+    assert ruckus._ruckus_role_and_cluster("172.31.2.202", ha_map) == ("vip", "172.31.2.202")
+    assert ruckus._ruckus_role_and_cluster("172.31.2.201", ha_map) == ("primary", "172.31.2.202")
+    assert ruckus._ruckus_role_and_cluster("172.31.2.200", ha_map) == ("secondary", "172.31.2.202")
+    assert ruckus._ruckus_role_and_cluster("10.0.0.9", ha_map) == ("standalone", None)
+
+
+def test_ensure_ruckus_device_cluster_and_secondary_preserves(monkeypatch):
+    devices_ep = FakeEndpoint()
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(devices=devices_ep))
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda n: 11)
+    monkeypatch.setattr(nbx, "get_or_create_role", lambda n, *a: 12)
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda n: 13)
+    monkeypatch.setattr(nbx, "get_or_create_device_type", lambda *a, **k: 14)
+    monkeypatch.setattr(nbx, "find_device", lambda *a, **k: None)
+
+    vip_probe = {"ip": "172.31.2.202", "serial": "352138000988",
+                 "model": "ZD1200", "hostname": "Ruckus-Controller_02",
+                 "reported_ip": "172.31.2.201", "mac": "38:45:3b:33:a9:40",
+                 "manufacturer": "Ruckus", "firmware": "10.5.1.0 build 276"}
+    dev_id = nbx.ensure_ruckus_device(vip_probe, "vip", "172.31.2.202")
+    payload = devices_ep.created[0]
+    assert payload["name"] == "Ruckus-Controller_02"
+    assert payload["serial"] == "352138000988"
+    assert payload["custom_fields"]["wlc_vip"] == "172.31.2.202"
+    assert payload["custom_fields"]["wlc_ha_role"] == "vip"
+
+    # a probe from the SECONDARY unit must not overwrite cluster identity
+    sec_probe = dict(vip_probe, ip="172.31.2.200",
+                     serial="999999999999", hostname="Ruckus-Controller_03")
+    dev_id2 = nbx.ensure_ruckus_device(sec_probe, "secondary", "172.31.2.202")
+    assert dev_id2 == dev_id
+    assert len(devices_ep.created) == 1
+    upd = devices_ep.updated[0]
+    assert "name" not in upd and "serial" not in upd
+    assert upd["custom_fields"]["wlc_ha_role"] == "secondary"
+
+
 # ── FortiGate device + interfaces ────────────────────────────────────────────
 
 def test_ensure_fortigate_device_creates(monkeypatch):

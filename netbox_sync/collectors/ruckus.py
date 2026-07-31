@@ -204,6 +204,41 @@ def _parse_wlan_all(text):
         w.setdefault("auth", "")
         w.setdefault("encryption", "")
     return wlans
+
+
+def _ruckus_role_and_cluster(ip, ha_map):
+    """Classify a probed address: VIP (cluster), primary/secondary unit of a
+    VIP pair, or standalone. Returns (role, vip_or_None)."""
+    if ip in ha_map:
+        return "vip", ip
+    for vip, units in ha_map.items():
+        if ip == units.get("primary"):
+            return "primary", vip
+        if ip == units.get("secondary"):
+            return "secondary", vip
+    return "standalone", None
+
+
+def ruckus_collect(ip):
+    """Full collection: sysinfo identity + AP list + WLAN list."""
+    sess = RuckusSession(ip)
+    sess.login()
+    try:
+        info = _parse_sysinfo(sess.run("show sysinfo"))
+        aps = _parse_ap_all(sess.run("show ap all"))
+        wlans = _parse_wlan_all(sess.run("show wlan all"))
+        log("INFO", f"  ruckus: {len(aps)} APs, {len(wlans)} WLANs")
+        return {
+            "summary": {
+                "name": info.get("name"), "reported_ip": info.get("ip"),
+                "mac": info.get("mac"), "model": info.get("model"),
+                "serial": info.get("serial"), "version": info.get("version"),
+            },
+            "aps": aps,
+            "wlans": wlans,
+        }
+    finally:
+        sess.logout()
     for attempt in range(1, retries + 1):
         if not is_port_open(ip, RUCKUS_PORT, timeout=3, retries=1):
             if attempt < retries: time.sleep(retry_delay); continue
