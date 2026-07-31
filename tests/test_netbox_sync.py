@@ -672,6 +672,94 @@ def test_ensure_prefix_create_refresh_and_manual(monkeypatch):
     assert api.ipam.prefixes.created[0]["description"].startswith("netbox-sync:")
 
 
+def _host_ip_api(ip_items, iface_items, prefix_items=None):
+    return SimpleNamespace(
+        dcim=SimpleNamespace(interfaces=FakeEndpoint(iface_items)),
+        ipam=SimpleNamespace(ip_addresses=FakeEndpoint(ip_items),
+                             prefixes=FakeEndpoint(prefix_items or [])))
+
+
+def test_ensure_host_ip_create_with_mask_and_assignment(monkeypatch):
+    import netbox_sync.ipam as ipam
+    svi = FakeRecord(70, name="MGMT54", device_id=7)
+    api = _host_ip_api([], [svi])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    ip_id = ipam.ensure_host_ip(7, "172.31.2.1/24", "MGMT54",
+                                "FGT-DC-01", "AP MGMT")
+
+    created = api.ipam.ip_addresses.created[0]
+    assert created["address"] == "172.31.2.1/24"
+    assert created["status"] == "active"
+    assert created["description"].startswith("netbox-sync: if ")
+    assert created["assigned_object_type"] == "dcim.interface"
+    assert created["assigned_object_id"] == 70
+    assert api.ipam.ip_addresses.updated == []   # created with assignment
+    assert ip_id is not None
+
+
+def test_ensure_host_ip_reuses_existing(monkeypatch):
+    import netbox_sync.ipam as ipam
+    svi = FakeRecord(70, name="MGMT54", device_id=7)
+    existing = FakeRecord(50, address="172.31.2.1",
+                        assigned_object_type=None, assigned_object_id=None)
+    api = _host_ip_api([existing], [svi])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    ip_id = ipam.ensure_host_ip(7, "172.31.2.1/24", "MGMT54",
+                                "FGT-DC-01", "AP MGMT")
+    assert ip_id == 50
+    assert api.ipam.ip_addresses.created == []
+    assert api.ipam.ip_addresses.updated[0]["assigned_object_id"] == 70
+
+
+def test_containing_prefix_longest_match(monkeypatch):
+    import netbox_sync.ipam as ipam
+    broad = FakeRecord(50, prefix="172.31.0.0/16")
+    specific = FakeRecord(51, prefix="172.31.2.0/24")
+    api = _host_ip_api([], [], [broad, specific])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    p = ipam._containing_prefix("172.31.2.44")
+    assert p.id == 51
+
+    assert ipam._containing_prefix("10.9.9.9") is None
+
+
+def test_sweep_stale_prefixes(monkeypatch):
+    import netbox_sync.ipam as ipam
+    seen = FakeRecord(50, prefix="10.0.0.0/24", site_id=3,
+                      description="netbox-sync: last seen SW1")
+    stale = FakeRecord(51, prefix="10.1.0.0/24", site_id=3,
+                       description="netbox-sync: last seen SW1")
+    manual = FakeRecord(52, prefix="10.2.0.0/24", site_id=3,
+                        description="manual prefix")
+    api = _prefix_api([seen, stale, manual])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    ipam.sweep_stale_prefixes(3, {"10.0.0.0/24", "10.9.0.0/24"})
+
+    assert api.ipam.prefixes.deleted_ids == [51]
+
+
+def test_sweep_stale_host_ips(monkeypatch):
+    import netbox_sync.ipam as ipam
+    seen = FakeRecord(50, address="172.31.2.1/24", device_id=7,
+                      description="netbox-sync: if FGT AP MGMT")
+    stale = FakeRecord(51, address="172.31.9.9/24", device_id=7,
+                       description="netbox-sync: if FGT OLD")
+    mgmt = FakeRecord(52, address="172.31.5.1/32", device_id=7,
+                      description="netbox-sync: mgmt")
+    manual = FakeRecord(53, address="10.1.1.1/24", device_id=7,
+                        description="manual")
+    api = _host_ip_api([seen, stale, mgmt, manual], [])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    ipam.sweep_stale_host_ips(7, {"172.31.2.1"})
+
+    assert api.ipam.ip_addresses.deleted_ids == [51]
+
+
 def test_site_vlan_index(monkeypatch):
     import netbox_sync.collectors.cisco as cisco
     g = FakeRecord(8, name="BD1", description="netbox-sync: vtp=snapp",

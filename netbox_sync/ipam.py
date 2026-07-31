@@ -93,3 +93,35 @@ def ensure_host_ip(dev_id, address, iface_name, hostname, iface_label):
         "address": address, "status": "active", "description": desc,
         "assigned_object_type": "dcim.interface",
         "assigned_object_id": iface.id}).id
+
+
+def sweep_stale_prefixes(site_id, seen_prefixes):
+    """Delete marker-owned prefixes at the site that were not seen this
+    run. Manual prefixes are never touched."""
+    api = netbox.get_netbox()
+    for p in list(api.ipam.prefixes.filter(site_id=site_id)):
+        if not (getattr(p, "description", None) or "").startswith("netbox-sync:"):
+            continue
+        if p.prefix not in seen_prefixes:
+            try:
+                p.delete()
+                log("INFO", f"  prefix {p.prefix} (site {site_id}) deleted — no longer seen")
+            except Exception as exc:
+                log("WARN", f"  could not delete prefix {p.prefix}: {exc}")
+
+
+def sweep_stale_host_ips(dev_id, seen_addresses):
+    """Delete marker-owned host addresses ('netbox-sync: if ') on the
+    device not seen this run. 'netbox-sync: mgmt' addresses and manual
+    ones are never touched."""
+    api = netbox.get_netbox()
+    for ip in list(api.ipam.ip_addresses.filter(device_id=dev_id)):
+        desc = getattr(ip, "description", None) or ""
+        if not desc.startswith(IPAM_HOST_MARKER):
+            continue
+        if str(ip.address).split("/")[0] not in seen_addresses:
+            try:
+                ip.delete()
+                log("INFO", f"  host IP {ip.address} (device {dev_id}) deleted — no longer seen")
+            except Exception as exc:
+                log("WARN", f"  could not delete host IP {ip.address}: {exc}")
