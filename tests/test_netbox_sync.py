@@ -625,6 +625,53 @@ def test_ensure_svi_interface_non_vlan_name(monkeypatch):
     assert "untagged_vlan" not in ifaces_ep.created[0]
 
 
+# ── IPAM prefix sync ─────────────────────────────────────────────────────────
+
+def test_prefix_from_ip():
+    import netbox_sync.ipam as ipam
+    assert ipam._prefix_from_ip("172.31.2.1 255.255.255.0") == "172.31.2.0/24"
+    assert ipam._prefix_from_ip("10.19.128.1 255.255.255.0") == "10.19.128.0/24"
+    assert ipam._prefix_from_ip("79.127.120.184 255.255.255.240") == "79.127.120.176/28"
+    assert ipam._prefix_from_ip("0.0.0.0 0.0.0.0") is None
+    assert ipam._prefix_from_ip("") is None
+    assert ipam._prefix_from_ip(None) is None
+
+
+def _prefix_api(prefix_items):
+    return SimpleNamespace(
+        dcim=SimpleNamespace(interfaces=FakeEndpoint()),
+        ipam=SimpleNamespace(prefixes=FakeEndpoint(prefix_items),
+                             ip_addresses=FakeEndpoint()))
+
+
+def test_ensure_prefix_create_refresh_and_manual(monkeypatch):
+    import netbox_sync.ipam as ipam
+    marked = FakeRecord(50, prefix="10.0.0.0/24",
+                        description="netbox-sync: last seen OLD")
+    manual = FakeRecord(51, prefix="10.1.0.0/24", description="manual prefix")
+    api = _prefix_api([marked, manual])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    # marked existing -> refreshed with site+vlan
+    pid = ipam.ensure_prefix("10.0.0.0/24", 3, 110, "FGT-DC-01", "VLAN10")
+    assert pid == 50
+    assert {u["id"] for u in api.ipam.prefixes.updated} == {50}
+    assert api.ipam.prefixes.updated[0]["vlan"] == 110
+    assert api.ipam.prefixes.updated[0]["site"] == 3
+
+    # manual existing -> reused untouched
+    pid = ipam.ensure_prefix("10.1.0.0/24", 3, 111, "FGT-DC-01", "VLAN11")
+    assert pid == 51
+    assert len(api.ipam.prefixes.updated) == 1   # no update for manual
+
+    # missing -> created marked with site+vlan
+    pid = ipam.ensure_prefix("10.2.0.0/24", 3, 112, "FGT-DC-01", "VLAN12")
+    assert api.ipam.prefixes.created[0]["prefix"] == "10.2.0.0/24"
+    assert api.ipam.prefixes.created[0]["site"] == 3
+    assert api.ipam.prefixes.created[0]["vlan"] == 112
+    assert api.ipam.prefixes.created[0]["description"].startswith("netbox-sync:")
+
+
 def test_site_vlan_index(monkeypatch):
     import netbox_sync.collectors.cisco as cisco
     g = FakeRecord(8, name="BD1", description="netbox-sync: vtp=snapp",
