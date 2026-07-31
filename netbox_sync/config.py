@@ -36,6 +36,9 @@ CISCO_PASS = os.getenv("CISCO_PASS")
 FORTIGATE_USER = os.getenv("FORTIGATE_USER")
 FORTIGATE_PASS = os.getenv("FORTIGATE_PASS")
 
+RUCKUS_USER = os.getenv("RUCKUS_USER")
+RUCKUS_PASS = os.getenv("RUCKUS_PASS")
+
 REQUIRED_ENV_VARS = ("NETBOX_URL", "NETBOX_TOKEN",
                      "REDFISH_USER", "REDFISH_PASS",
                      "STORAGE_USER", "STORAGE_PASS",
@@ -56,6 +59,10 @@ def _validate_config():
         token_path = os.getenv("FORTIGATE_TOKEN_FILE", FORTIGATE_TOKEN_FILE)
         if not _load_fortigate_tokens(token_path):
             missing.append(f"FortiGate token file missing or empty ({token_path})")
+    # Ruckus family is opt-in; SSH creds required only when ranges are set.
+    if os.getenv("RUCKUS_RANGES") and (not os.getenv("RUCKUS_USER")
+                                       or not os.getenv("RUCKUS_PASS")):
+        missing.append("RUCKUS_USER/RUCKUS_PASS (required when RUCKUS_RANGES is set)")
     if missing:
         raise RuntimeError(f"Missing required .env variables: {', '.join(missing)}")
 
@@ -95,9 +102,16 @@ CISCO_RANGES = _parse_ranges("CISCO_RANGES", [])
 # FortiGate family is opt-in: empty default means "disabled".
 FORTIGATE_RANGES = _parse_ranges("FORTIGATE_RANGES", [])
 
+# Ruckus family is opt-in: empty default means "disabled".
+RUCKUS_RANGES = _parse_ranges("RUCKUS_RANGES", [])
+RUCKUS_HA_MAP = os.getenv("RUCKUS_HA_MAP", "")
+
 FORTIGATE_PORT     = int(os.getenv("FORTIGATE_PORT", "443"))
 FORTIGATE_SSH_PORT = int(os.getenv("FORTIGATE_SSH_PORT", "22"))
 FORTIGATE_ROLE     = os.getenv("DEFAULT_FORTIGATE_ROLE", "Firewall")
+RUCKUS_PORT        = int(os.getenv("RUCKUS_PORT", "22"))
+RUCKUS_ROLE        = os.getenv("DEFAULT_RUCKUS_ROLE", "Wireless Controller")
+AP_ROLE            = os.getenv("DEFAULT_AP_ROLE", "Access Point")
 FORTIGATE_TOKEN_FILE = os.getenv(
     "FORTIGATE_TOKEN_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fortigate_tokens.txt"))

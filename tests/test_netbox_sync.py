@@ -514,6 +514,39 @@ def test_validate_config_fortigate_requirements(monkeypatch, tmp_path):
     cfg._validate_config()   # creds + non-empty token file -> passes
 
 
+# ── Ruckus config + sysinfo parser ───────────────────────────────────────────
+
+def test_ruckus_ha_map_parsing():
+    import netbox_sync.collectors.ruckus as ruckus
+    out = ruckus._parse_ha_map("172.31.2.202:172.31.2.201,172.31.2.200")
+    assert out == {"172.31.2.202": {"primary": "172.31.2.201",
+                                    "secondary": "172.31.2.200"}}
+    out2 = ruckus._parse_ha_map("10.0.0.5:10.0.0.6,10.0.0.7;10.1.0.5:10.1.0.6,10.1.0.7")
+    assert out2["10.1.0.5"] == {"primary": "10.1.0.6", "secondary": "10.1.0.7"}
+    assert ruckus._parse_ha_map("") == {}
+
+
+SYSINFO = """System Overview:
+  Name= Ruckus-Controller_02
+  IP Address= 172.31.2.201
+  IPv6 Address= fc00::2
+  MAC Address= 38:45:3b:33:a9:40
+  Uptime= 39d 5h 56m
+  Model= ZD1200
+  Licensed APs= 48
+  Serial Number= 352138000988
+  Version= 10.5.1.0 build 276
+"""
+
+
+def test_parse_sysinfo():
+    import netbox_sync.collectors.ruckus as ruckus
+    out = ruckus._parse_sysinfo(SYSINFO)
+    assert out == {"name": "Ruckus-Controller_02", "ip": "172.31.2.201",
+                   "mac": "38:45:3b:33:a9:40", "model": "ZD1200",
+                   "serial": "352138000988", "version": "10.5.1.0 build 276"}
+
+
 # ── FortiGate device + interfaces ────────────────────────────────────────────
 
 def test_ensure_fortigate_device_creates(monkeypatch):
