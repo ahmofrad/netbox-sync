@@ -7,7 +7,7 @@ import ipaddress
 import re
 
 from netbox_sync import netbox
-from netbox_sync.config import log
+from netbox_sync.config import log, SITE_IP_MAP
 
 IPAM_PREFIX_MARKER = "netbox-sync: last seen "
 IPAM_HOST_MARKER = "netbox-sync: if "
@@ -232,22 +232,54 @@ def _prefix_masklen(prefix_str):
     return ipaddress.ip_network(prefix_str, strict=False).prefixlen
 
 
-def ensure_prefix(prefix_str, site_id, vlan_id, hostname, iface_name):
+def ensure_prefix(prefix_str, site_id, vlan_id, hostname, iface_name,
+                  status="active"):
     """Get-or-create a prefix in IPAM. Marker-owned records are refreshed
-    (site/vlan/description); manual records are reused untouched."""
+    (site/vlan/description); manual records are reused untouched. Parents
+    use status='container', discovered prefixes 'active'."""
     api = netbox.get_netbox()
     payload = {"site": site_id,
-               "status": "active",
+               "status": status,
                "description": f"{IPAM_PREFIX_MARKER}{hostname} {iface_name}"}
     if vlan_id:
         payload["vlan"] = vlan_id
     existing = api.ipam.prefixes.get(prefix=prefix_str)
     if existing:
-        if (existing.description or "").startswith("netbox-sync:"):
+        if (getattr(existing, "description", None) or "").startswith("netbox-sync:"):
             api.ipam.prefixes.update([{"id": existing.id, **payload}])
         return existing.id
     return api.ipam.prefixes.create(
         {"prefix": prefix_str, **payload}).id
+
+
+def sync_parent_prefixes():
+    """Create/update one 'container' prefix per SITE_IP_MAP entry (the
+    parents that discovered prefixes nest under). Returns
+    {site_id: {prefix_str}} for sweep-seen bookkeeping."""
+    seen = {}
+    for net, site_name in SITE_IP_MAP:
+        site_id = netbox.get_or_create_site(site_name)
+        ensure_prefix(str(net), site_id, None, "parent", site_name,
+                      status="container")
+        seen.setdefault(site_id, set()).add(str(net))
+    return seen
+
+
+def sweep_stale_parents():
+    """Delete marker-owned parent (container) prefixes whose SITE_IP_MAP
+    entry no longer exists."""
+    api = netbox.get_netbox()
+    valid = {str(n) for n, _ in SITE_IP_MAP}
+    for p in list(api.ipam.prefixes.filter(status="container")):
+        desc = getattr(p, "description", None) or ""
+        if not desc.startswith(f"{IPAM_PREFIX_MARKER}parent"):
+            continue
+        if p.prefix not in valid:
+            try:
+                p.delete()
+                log("INFO", f"  parent prefix {p.prefix} deleted — removed from SITE_IP_MAP")
+            except Exception as exc:
+                log("WARN", f"  could not delete parent prefix {p.prefix}: {exc}")
 
 
 def _containing_prefix(ip):

@@ -435,7 +435,7 @@ VLANs from `show vlan brief` are created/updated in IPAM grouped by **broadcast 
 
 ## IPAM prefixes & host addresses
 
-**Prefixes** are derived from FortiGate interface IPs (`ip + mask` in cmdb config — real masks, e.g. `172.31.2.0/24`, `79.127.120.176/28`) and created/updated in IPAM with site and VLAN links (marker `netbox-sync:`). **Gateway/host addresses**: FortiGate subinterface IPs are assigned to their subinterfaces; Cisco SVI IPs (`show ip interface brief`) are placed inside their longest matching prefix and assigned to their SVI (created as virtual interfaces when missing). Marker-owned prefixes and host IPs no longer reported are swept after each run; manual IPAM entries and `netbox-sync: mgmt` addresses are never touched.
+**Prefixes** are derived from FortiGate interface IPs (`ip + mask` in cmdb config — real masks, e.g. `172.31.2.0/24`, `79.127.120.176/28`) and created/updated in IPAM with site and VLAN links (marker `netbox-sync:`). Each `SITE_IP_MAP` CIDR is also synced as a **container** parent prefix (marker `netbox-sync: last seen parent <site>`), so discovered subnets nest into a clean hierarchy; parents are swept if their map entry is removed. **Gateway/host addresses**: FortiGate subinterface IPs are assigned to their subinterfaces; Cisco SVI IPs (`show ip interface brief`) are placed inside their longest matching prefix and assigned to their SVI (created as virtual interfaces when missing). Marker-owned prefixes and host IPs no longer reported are swept after each run; manual IPAM entries and `netbox-sync: mgmt` addresses are never touched.
 
 ## Offline detection
 
@@ -839,7 +839,7 @@ VLANهای `show vlan brief` بر اساس **دامنه broadcast مشتق از 
 
 ## پیشوندها و آدرس‌های IPAM
 
-**پیشوندها (prefix)** از IP رابط‌های FortiGate استخراج می‌شوند (`ip + mask` در پیکربندی cmdb — ماسک واقعی، مثل `172.31.2.0/24` و `79.127.120.176/28`) و با پیوند سایت و VLAN در IPAM ساخته/به‌روزرسانی می‌شوند (علامت `netbox-sync:`). **آدرس‌های gateway/host**: IPهای زیررابط FortiGate به زیررابط‌هایشان تخصیص می‌یابند؛ IPهای SVI سیسکو (`show ip interface brief`) داخل طولانی‌ترین پیشوند منطبق قرار می‌گیرند و به SVI خود تخصیص می‌یابند (در صورت نبود، به‌صورت رابط مجازی ساخته می‌شوند). پیشوندها و آدرس‌های علامت‌داری که دیگر گزارش نشوند پس از هر اجرا حذف می‌شوند؛ ورودی‌های دستی IPAM و آدرس‌های `netbox-sync: mgmt` هرگز دست نمی‌خورند.
+**پیشوندها (prefix)** از IP رابط‌های FortiGate استخراج می‌شوند (`ip + mask` در پیکربندی cmdb — ماسک واقعی، مثل `172.31.2.0/24` و `79.127.120.176/28`) و با پیوند سایت و VLAN در IPAM ساخته/به‌روزرسانی می‌شوند (علامت `netbox-sync:`). هر CIDR در `SITE_IP_MAP` نیز به‌عنوان پیشوند **container** والد همگام‌سازی می‌شود (علامت `netbox-sync: last seen parent <site>`) تا زیرشبکه‌های کشف‌شده در یک سلسله‌مراتب تمیز قرار گیرند؛ والدهایی که ورودی‌شان از نگاشت حذف شود پاک می‌شوند. **آدرس‌های gateway/host**: IPهای زیررابط FortiGate به زیررابط‌هایشان تخصیص می‌یابند؛ IPهای SVI سیسکو (`show ip interface brief`) داخل طولانی‌ترین پیشوند منطبق قرار می‌گیرند و به SVI خود تخصیص می‌یابند (در صورت نبود، به‌صورت رابط مجازی ساخته می‌شوند). پیشوندها و آدرس‌های علامت‌داری که دیگر گزارش نشوند پس از هر اجرا حذف می‌شوند؛ ورودی‌های دستی IPAM و آدرس‌های `netbox-sync: mgmt` هرگز دست نمی‌خورند.
 
 ## تشخیص آفلاین
 

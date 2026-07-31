@@ -747,6 +747,27 @@ def test_ensure_prefix_create_refresh_and_manual(monkeypatch):
     assert api.ipam.prefixes.created[0]["description"].startswith("netbox-sync:")
 
 
+def test_parent_prefixes_container_and_sweep(monkeypatch):
+    import netbox_sync.ipam as ipam
+    monkeypatch.setattr(ipam, "SITE_IP_MAP",
+                        [(ipam.ipaddress.ip_network("172.31.0.0/16"), "HQ")])
+    api = _prefix_api([])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda n: 3)
+
+    seen = ipam.sync_parent_prefixes()
+    created = api.ipam.prefixes.created[0]
+    assert created["prefix"] == "172.31.0.0/16"
+    assert created["status"] == "container"
+    assert created["site"] == 3
+    assert seen == {3: {"172.31.0.0/16"}}
+
+    # entry removed from map -> parent swept
+    monkeypatch.setattr(ipam, "SITE_IP_MAP", [])
+    ipam.sweep_stale_parents()
+    assert api.ipam.prefixes.deleted_ids == [api.ipam.prefixes.items[0].id]
+
+
 def _host_ip_api(ip_items, iface_items, prefix_items=None):
     return SimpleNamespace(
         dcim=SimpleNamespace(interfaces=FakeEndpoint(iface_items)),

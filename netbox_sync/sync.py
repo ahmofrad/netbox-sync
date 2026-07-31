@@ -30,7 +30,8 @@ from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
                               _containing_prefix,
                               sweep_stale_prefixes, sweep_stale_host_ips,
                               sync_nat_ips, sweep_nat_ips,
-                              sync_nat_services, sweep_nat_services)
+                              sync_nat_services, sweep_nat_services,
+                              sync_parent_prefixes, sweep_stale_parents)
 from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_storage_device, ensure_san_switch_device,
                                 ensure_cisco_device, ensure_fortigate_device,
@@ -573,6 +574,16 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  NAT IP sweep failed: {e}")
 
+    # ── IPAM parent prefixes from SITE_IP_MAP (containers for discovered ones)
+    try:
+        parent_seen = sync_parent_prefixes()
+        for site_id, pfxs in parent_seen.items():
+            site_prefix_seen.setdefault(site_id, set()).update(pfxs)
+        if parent_seen:
+            log("INFO", f"  IPAM parent prefixes synced for {len(parent_seen)} site(s)")
+    except Exception as e:
+        log("WARN", f"  parent prefix sync failed: {e}")
+
     # ── Sweep stale marker-owned VLANs per group + legacy site VLANs ─────────
     for group_id, seen in group_vlan_seen.items():
         try:
@@ -592,6 +603,10 @@ def run_sync():
             sweep_stale_prefixes(site_id, site_prefix_seen.get(site_id, set()))
         except Exception as e:
             log("ERROR", f"  prefix sweep failed for site {site_id}: {e}")
+    try:
+        sweep_stale_parents()
+    except Exception as e:
+        log("ERROR", f"  parent prefix sweep failed: {e}")
 
     # ── Mark unreachable devices offline ─────────────────────────────────────
     # A device must be missing from OFFLINE_THRESHOLD consecutive scans before
