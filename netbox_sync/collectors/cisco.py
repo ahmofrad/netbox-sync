@@ -499,6 +499,9 @@ def sync_cisco_interfaces(dev_id, ports):
         if name not in seen:
             if getattr(iface, "mgmt_only", False):
                 continue   # never delete management interfaces
+            desc = getattr(iface, "description", None) or ""
+            if desc.startswith("netbox-sync: SVI"):
+                continue   # our SVIs are reconciled by the SVI section
             try: iface.delete()
             except Exception: pass
 
@@ -516,6 +519,8 @@ def ensure_svi_interface(dev_id, name, vid_map, mgmt_only=True):
     m = re.match(r'^Vlan(\d+)$', name)
     if m and int(m.group(1)) in vid_map:
         payload["untagged_vlan"] = vid_map[int(m.group(1))]
+        # NetBox requires a mode before untagged_vlan is accepted
+        payload["mode"] = "access"
     return api.dcim.interfaces.create(payload).id
 
 # ── broadcast-domain topology (CDP connected components) ─────────────────────

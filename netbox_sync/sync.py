@@ -358,8 +358,8 @@ def run_sync():
                     try:
                         ensure_svi_interface(dev_id, iface_name, vid_map,
                                              mgmt_only=False)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log("WARN", f"  SVI {iface_name} creation failed for {ip}: {e}")
                 masklen = _prefix_masklen(pfx_rec.prefix)
                 ip_id = ensure_host_ip(dev_id, f"{addr}/{masklen}", iface_name,
                                        probe.get("hostname") or ip, iface_name)

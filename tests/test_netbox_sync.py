@@ -675,6 +675,7 @@ def test_ensure_svi_interface_creates_virtual_with_vlan(monkeypatch):
     assert created["name"] == "Vlan50"
     assert created["type"] == "virtual"
     assert created["untagged_vlan"] == 500
+    assert created["mode"] == "access"   # required by NetBox for untagged_vlan
     assert created["mgmt_only"] is True
     assert iid is not None
 
