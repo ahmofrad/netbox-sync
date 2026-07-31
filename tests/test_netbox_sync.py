@@ -453,6 +453,23 @@ def test_cdp_cable_deletes_stale_marked(monkeypatch):
     assert api.dcim.cables.deleted_ids == [9]
 
 
+class _GLO:
+    """Stand-in for pynetbox GenericListObject (attribute access only)."""
+    def __init__(self, object_id, object_type="dcim.interface"):
+        self.object_id = object_id
+        self.object_type = object_type
+
+
+def test_cable_iface_ids_handles_generic_objects():
+    """pynetbox returns GenericListObject terminations, not dicts — the
+    dedupe must parse them (this was the cable-flap root cause)."""
+    import netbox_sync.collectors.cisco as cisco
+    cable = SimpleNamespace(
+        a_terminations=[{"object_id": 1}, _GLO(2)],
+        b_terminations=[_GLO(3), {"object_id": 4, "object_type": "x"}])
+    assert sorted(cisco._cable_iface_ids(cable)) == [1, 2, 3, 4]
+
+
 # ── FortiGate token file ─────────────────────────────────────────────────────
 
 def test_fortigate_token_file_parsing(tmp_path):

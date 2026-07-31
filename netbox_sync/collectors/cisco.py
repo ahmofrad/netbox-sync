@@ -742,7 +742,9 @@ CABLE_MARKER = "netbox-sync:"
 def _cable_iface_ids(cable):
     for t in (getattr(cable, "a_terminations", None) or []) + \
              (getattr(cable, "b_terminations", None) or []):
-        oid = t.get("object_id") if isinstance(t, dict) else None
+        # pynetbox returns GenericListObject (attribute access), tests use dicts
+        oid = t.get("object_id") if isinstance(t, dict) \
+              else getattr(t, "object_id", None)
         if oid is not None:
             yield oid
 
