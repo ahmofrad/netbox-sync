@@ -128,7 +128,82 @@ def _parse_sysinfo(text):
     return out
 
 
-def probe_ruckus(ip, retries=2, retry_delay=3):
+def _parse_ap_all(text):
+    """Parse `show ap all` ID blocks -> per-AP dicts (MAC is the identity)."""
+    aps = []
+    cur = None
+    for line in text.splitlines():
+        if re.match(r'^\s+\d+:\s*$', line):
+            if cur and cur.get("mac"):
+                aps.append(cur)
+            cur = {}
+            continue
+        if cur is None:
+            continue
+        m = re.match(r'^\s*([^=]+?)\s*=\s*(.*)$', line)
+        if not m:
+            continue
+        key, val = m.group(1).strip().lower(), m.group(2).strip()
+        if key == "mac address":
+            cur["mac"] = val
+        elif key == "model":
+            cur["model"] = val
+        elif key == "device name":
+            cur["name"] = val
+        elif key == "group name":
+            cur["group"] = val
+        elif key == "ip address" and "ip" not in cur:
+            cur["ip"] = val
+        elif key == "approved":
+            cur["approved"] = val.lower() == "yes"
+    if cur and cur.get("mac"):
+        aps.append(cur)
+    for ap in aps:
+        ap.setdefault("name", ap["mac"])
+        ap.setdefault("approved", False)
+        ap.setdefault("group", "")
+        ap.setdefault("model", "")
+        ap.setdefault("ip", None)
+    return aps
+
+
+def _parse_wlan_all(text):
+    """Parse `show wlan all` ID blocks -> WLANs (ssid/auth/encryption/vlan).
+    Passphrases are deliberately never captured."""
+    wlans = []
+    cur = None
+    for line in text.splitlines():
+        if re.match(r'^\s+\d+:\s*$', line):
+            if cur and (cur.get("name") or cur.get("ssid")):
+                wlans.append(cur)
+            cur = {}
+            continue
+        if cur is None:
+            continue
+        m = re.match(r'^\s*([^=]+?)\s*=\s*(.*)$', line)
+        if not m:
+            continue
+        key, val = m.group(1).strip().lower(), m.group(2).strip()
+        if key == "name":
+            cur["name"] = val
+        elif key == "ssid":
+            cur["ssid"] = val
+        elif key == "authentication":
+            cur["auth"] = val
+        elif key == "encryption":
+            cur["encryption"] = val
+        elif key == "vlan-id":
+            try:
+                cur["vlan_id"] = int(val)
+            except ValueError:
+                pass
+    if cur and (cur.get("name") or cur.get("ssid")):
+        wlans.append(cur)
+    for w in wlans:
+        w.setdefault("vlan_id", None)
+        w.setdefault("auth", "")
+        w.setdefault("encryption", "")
+    return wlans
     for attempt in range(1, retries + 1):
         if not is_port_open(ip, RUCKUS_PORT, timeout=3, retries=1):
             if attempt < retries: time.sleep(retry_delay); continue
