@@ -423,6 +423,16 @@ def run_sync():
                                           or (probe.get("serial") or "")
                                           == (ha.get("primary_serial") or "")):
                 payload["serial"] = summary["serial"]
+            # Firewall data is config-synced across the cluster — write it
+            # from whichever unit answered (full rewrite each run).
+            fw = data.get("firewall") or {}
+            payload["custom_fields"].update({
+                "firewall_policies": fw.get("policies") or [],
+                "firewall_addresses": (fw.get("addresses") or [])
+                                       + (fw.get("groups") or []),
+                "firewall_nat": (fw.get("vips") or [])
+                                 + (fw.get("ippools") or []),
+            })
             api.dcim.devices.update([payload])
         except Exception as e:
             log("ERROR", f"  FortiGate update failed for {ip}: {e}")

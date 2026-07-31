@@ -302,6 +302,11 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 | `fortigate_ha_mode` | Text | HA mode (a-p / a-a) |
 | `fortigate_ha_peer` | Text | HA peer units |
 | `fortigate_ha_role` | Text | Role of the probed unit |
+| `firewall_policies` | JSON | Firewall policies |
+| `firewall_addresses` | JSON | Address objects + groups |
+| `firewall_nat` | JSON | NAT VIPs + IP pools |
+
+**Firewall data:** policies, address objects/groups, and NAT (VIPs + IP pools) are synced from the cmdb API into three JSON custom fields on the cluster device — fully rewritten each run so the fields always reflect the current configuration (trimmed, readable shapes: interface/address names, services, actions, status, comments).
 
 **HA clusters:** a FortiGate HA pair (active-passive or active-active) becomes **one NetBox device** named and serialized after the primary unit — resolvable by any unit serial, so listing both units never duplicates. Peer units are recorded in the `fortigate_ha_*` fields, and the primary IPv4 follows the primary unit (a secondary probe never repoints it).
 
@@ -705,6 +710,11 @@ DEFAULT_SWITCH_ROLE=SAN Switch
 | `fortigate_ha_mode` | Text | حالت HA (a-p / a-a) |
 | `fortigate_ha_peer` | Text | واحدهای peer سِ HA |
 | `fortigate_ha_role` | Text | نقش واحد بررسی‌شده |
+| `firewall_policies` | JSON | سیاست‌های فایروال |
+| `firewall_addresses` | JSON | اشیای آدرس + گروه‌ها |
+| `firewall_nat` | JSON | ورودی‌های NAT (VIPها + poolها) |
+
+**داده‌های فایروال:** سیاست‌ها، اشیای آدرس/گروه‌ها و NAT (VIPها و poolهای IP) از API سِ cmdb در سه فیلد سفارشی JSON روی دستگاه خوشه همگام‌سازی می‌شوند — در هر اجرا کاملاً بازنویسی می‌شوند تا همیشه وضعیت فعلی پیکربندی را منعکس کنند (ساختارهای خوانا: نام رابط‌ها/آدرس‌ها، سرویس‌ها، action، وضعیت، توضیحات).
 
 **خوشه‌های HA:** یک جفت FortiGate در حالت HA (فعال-غیرفعال یا فعال-فعال) به **یک دستگاه** در NetBox تبدیل می‌شود که نام و سریال آن از واحد primary گرفته می‌شود — با هر سریال واحد قابل شناسایی است، بنابراین لیست‌کردن هر دو واحد هرگز دستگاه تکراری نمی‌سازد. واحدهای peer در فیلدهای `fortigate_ha_*` ثبت می‌شوند و primary IPv4 از واحد primary پیروی می‌کند (بررسی واحد secondary هرگز آن را تغییر نمی‌دهد).
 

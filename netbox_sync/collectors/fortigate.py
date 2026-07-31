@@ -359,6 +359,24 @@ def fortigate_collect(ip):
               "primary_serial": None, "primary_hostname": None, "units": []}
         log("WARN", f"  ha status collection failed: {exc}")
 
+    firewall = {"policies": [], "addresses": [], "groups": [],
+                "vips": [], "ippools": []}
+    for path, key, mapper in (
+            ("/api/v2/cmdb/firewall/policy", "policies", _fg_firewall_policies),
+            ("/api/v2/cmdb/firewall/address", "addresses", _fg_firewall_addresses),
+            ("/api/v2/cmdb/firewall/addrgrp", "groups", _fg_firewall_addrgrps),
+            ("/api/v2/cmdb/firewall/vip", "vips", _fg_firewall_vips),
+            ("/api/v2/cmdb/firewall/ippool", "ippools", _fg_firewall_ippools)):
+        try:
+            firewall[key] = mapper(fg.get(f"{path}?vdom=root"))
+        except Exception as exc:
+            log("WARN", f"  firewall {key} collection failed: {exc}")
+    log("INFO", f"  firewall: {len(firewall['policies'])} policies, "
+                f"{len(firewall['addresses'])} addresses, "
+                f"{len(firewall['groups'])} groups, "
+                f"{len(firewall['vips'])} vips, "
+                f"{len(firewall['ippools'])} pools")
+
     neighbors = []
     inventory = {}
     sess = FortiGateSSHSession(ip)
@@ -395,7 +413,8 @@ def fortigate_collect(ip):
         "port_count": len(ports),
     }
     return {"summary": summary, "ports": ports, "vlans": vlans,
-            "neighbors": neighbors, "inventory": inventory, "ha": ha}
+            "neighbors": neighbors, "inventory": inventory, "ha": ha,
+            "firewall": firewall}
 
 def _fortigate_iface_mac(ip, iface_name):
     """Fetch ONE interface's MAC via fnsysctl ifconfig "<name>".
