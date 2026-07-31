@@ -357,30 +357,60 @@ def ensure_cisco_device(probe):
     log("INFO", f"  Cisco switch created: {name} (id={new.id})")
     return new.id
 
-def ensure_fortigate_device(probe):
+def ensure_fortigate_device(probe, ha=None):
+    """Ensure the NetBox device for a FortiGate. When the unit belongs to an
+    HA cluster, the device represents the CLUSTER: named and serialized after
+    the primary unit, resolvable by ANY unit serial, peers recorded in custom
+    fields instead of as separate devices."""
+    ha = ha or {}
     serial = (probe.get("serial") or "").strip()
+    clustered = bool(ha.get("clustered") and ha.get("primary_hostname"))
+    if clustered:
+        eff_serial = (ha.get("primary_serial") or serial).strip()
+        name = ha["primary_hostname"][:64]
+        find_serials = [eff_serial] + [u.get("serial") for u in ha.get("units", [])
+                                       if u.get("serial") and u.get("serial") != eff_serial]
+    else:
+        eff_serial = serial
+        name = _device_name(probe, prefix="fortigate")
+        find_serials = [eff_serial] if eff_serial else []
     mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Fortinet")
     role_id = get_or_create_role(FORTIGATE_ROLE, "c62828")
     site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
     site_id = get_or_create_site(site_name)
     dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, FORTIGATE_MODEL_MAP)
-    name = _device_name(probe, prefix="fortigate")
     api = get_netbox()
-    dev = find_device(serial, role_name=FORTIGATE_ROLE)
+    dev = None
+    for s in find_serials:
+        if _invalid_serial(s):
+            continue
+        dev = find_device(s, role_name=FORTIGATE_ROLE)
+        if dev:
+            break
     if dev is None:
         cands = list(api.dcim.devices.filter(name=name, site_id=site_id, role_id=role_id))
         dev = cands[0] if cands else None
         if dev: log("INFO", f"  Found fortigate by name+site: {name} (id={dev.id})")
+    cf = {
+        "fortigate_ip":       probe["ip"],
+        "fortigate_enabled":  True,
+        "fortigate_firmware": probe.get("firmware"),
+        "fortigate_model":    probe.get("model"),
+    }
+    if clustered:
+        cf.update({
+            "fortigate_ha_group": ha.get("group_name"),
+            "fortigate_ha_mode":  ha.get("mode"),
+            "fortigate_ha_peer":  "; ".join(
+                f"{u['hostname']} ({u['serial']})"
+                for u in ha.get("units", []) if not u.get("is_primary")),
+            "fortigate_ha_role":  "primary" if serial == eff_serial else "secondary",
+        })
     payload = {
         "name": name, "status": "active", "site": site_id,
         "device_type": dtype_id, "role": role_id,
-        "custom_fields": {
-            "fortigate_ip":       probe["ip"],
-            "fortigate_enabled":  True,
-            "fortigate_firmware": probe.get("firmware"),
-            "fortigate_model":    probe.get("model"),
-        },
-        **({"serial": serial} if not _invalid_serial(serial) else {}),
+        "custom_fields": cf,
+        **({"serial": eff_serial} if not _invalid_serial(eff_serial) else {}),
     }
     if dev:
         api.dcim.devices.update([{"id": dev.id, **payload}])

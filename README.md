@@ -298,6 +298,12 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 | `fortigate_firmware` | Text | FortiOS version |
 | `fortigate_model` | Text | Model |
 | `fortigate_port_count` | Integer | Port count |
+| `fortigate_ha_group` | Text | HA cluster group name |
+| `fortigate_ha_mode` | Text | HA mode (a-p / a-a) |
+| `fortigate_ha_peer` | Text | HA peer units |
+| `fortigate_ha_role` | Text | Role of the probed unit |
+
+**HA clusters:** a FortiGate HA pair (active-passive or active-active) becomes **one NetBox device** named and serialized after the primary unit — resolvable by any unit serial, so listing both units never duplicates. Peer units are recorded in the `fortigate_ha_*` fields, and the primary IPv4 follows the primary unit (a secondary probe never repoints it).
 
 > The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` (NetBox custom-field filter syntax).
 
@@ -695,6 +701,12 @@ DEFAULT_SWITCH_ROLE=SAN Switch
 | `fortigate_firmware` | Text | نسخه FortiOS |
 | `fortigate_model` | Text | مدل |
 | `fortigate_port_count` | Integer | تعداد پورت‌ها |
+| `fortigate_ha_group` | Text | نام گروه خوشه HA |
+| `fortigate_ha_mode` | Text | حالت HA (a-p / a-a) |
+| `fortigate_ha_peer` | Text | واحدهای peer سِ HA |
+| `fortigate_ha_role` | Text | نقش واحد بررسی‌شده |
+
+**خوشه‌های HA:** یک جفت FortiGate در حالت HA (فعال-غیرفعال یا فعال-فعال) به **یک دستگاه** در NetBox تبدیل می‌شود که نام و سریال آن از واحد primary گرفته می‌شود — با هر سریال واحد قابل شناسایی است، بنابراین لیست‌کردن هر دو واحد هرگز دستگاه تکراری نمی‌سازد. واحدهای peer در فیلدهای `fortigate_ha_*` ثبت می‌شوند و primary IPv4 از واحد primary پیروی می‌کند (بررسی واحد secondary هرگز آن را تغییر نمی‌دهد).
 
 > حلقه تشخیص آفلاین، دستگاه‌ها را با فیلتر `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` فیلتر می‌کند (سینتکس فیلتر custom field در NetBox).
 

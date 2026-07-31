@@ -389,15 +389,16 @@ def run_sync():
         log("INFO", f"Processing FORTIGATE {ip}  ({probe.get('model')} / {probe.get('serial')})")
 
         try:
-            dev_id = ensure_fortigate_device(probe)
-        except Exception as e:
-            log("ERROR", f"  ensure_fortigate_device failed for {ip}: {e}"); continue
-
-        try:
             data = fortigate_collect(ip)
         except KeyboardInterrupt: raise
         except Exception as e:
             log("ERROR", f"  FortiGate inventory collection failed for {ip}: {e}"); continue
+
+        ha = data.get("ha") or {}
+        try:
+            dev_id = ensure_fortigate_device(probe, ha=ha)
+        except Exception as e:
+            log("ERROR", f"  ensure_fortigate_device failed for {ip}: {e}"); continue
 
         summary = data["summary"]
         ports = data["ports"]
@@ -417,7 +418,11 @@ def run_sync():
                     "fortigate_port_count": summary.get("port_count"),
                 },
             }
-            if summary.get("serial"): payload["serial"] = summary["serial"]
+            # Only the primary unit may stamp the cluster device serial
+            if summary.get("serial") and (not ha.get("clustered")
+                                          or (probe.get("serial") or "")
+                                          == (ha.get("primary_serial") or "")):
+                payload["serial"] = summary["serial"]
             api.dcim.devices.update([payload])
         except Exception as e:
             log("ERROR", f"  FortiGate update failed for {ip}: {e}")
@@ -516,16 +521,24 @@ def run_sync():
 
         # Primary IPv4 goes on the real carrier subinterface (matched from
         # cmdb interface IPs) when identifiable; synthetic mgmt fallback.
-        carrier = None
-        for p in ports:
-            if (p.get("ip") or "").split(" ")[0] == ip:
-                carrier = p["name"]
-                break
-        try:
-            ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"),
-                              iface_name=carrier)
-        except Exception as e:
-            log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
+        # On HA clusters, only the primary unit may set the cluster's primary
+        # IPv4 — a secondary probe never repoints it.
+        _is_primary_probe = (not ha.get("clustered")
+                             or (probe.get("serial") or "")
+                             == (ha.get("primary_serial") or ""))
+        if _is_primary_probe:
+            carrier = None
+            for p in ports:
+                if (p.get("ip") or "").split(" ")[0] == ip:
+                    carrier = p["name"]
+                    break
+            try:
+                ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"),
+                                  iface_name=carrier)
+            except Exception as e:
+                log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
+        else:
+            log("INFO", f"  {ip} is the secondary HA unit — primary IPv4 follows the primary")
 
         try:
             sync_inventory(dev_id, inv)
