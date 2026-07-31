@@ -302,11 +302,7 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 | `fortigate_ha_mode` | Text | HA mode (a-p / a-a) |
 | `fortigate_ha_peer` | Text | HA peer units |
 | `fortigate_ha_role` | Text | Role of the probed unit |
-| `firewall_policies` | JSON | Firewall policies |
-| `firewall_addresses` | JSON | Address objects + groups |
-| `firewall_nat` | JSON | NAT VIPs + IP pools |
-
-**Firewall data:** policies, address objects/groups, and NAT (VIPs + IP pools) are synced from the cmdb API into three JSON custom fields on the cluster device — fully rewritten each run so the fields always reflect the current configuration (trimmed, readable shapes: interface/address names, services, actions, status, comments).
+**NAT → IPAM:** FortiGate **VIPs** become IPAM IP addresses for the external IP (`extip`) with NetBox's native **`nat_inside`** pointing at the mapped internal server's address; FortiGate **IP pools** become plain IPAM addresses for the SNAT range. Marker-owned (`netbox-sync: nat …`) NAT addresses no longer reported are swept after each run; manual addresses are never touched. Note: several VIPs can share one `extip` (one IP record per address — the description shows one of the VIPs using it).
 
 **HA clusters:** a FortiGate HA pair (active-passive or active-active) becomes **one NetBox device** named and serialized after the primary unit — resolvable by any unit serial, so listing both units never duplicates. Peer units are recorded in the `fortigate_ha_*` fields, and the primary IPv4 follows the primary unit (a secondary probe never repoints it).
 
