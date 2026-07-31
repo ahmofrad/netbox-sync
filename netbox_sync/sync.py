@@ -25,6 +25,10 @@ from netbox_sync.collectors.msa import storage_collect_inventory
 from netbox_sync.collectors.redfish import rf_collect_inventory
 from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
                                 CISCO_RANGES, FORTIGATE_RANGES)
+from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
+                              ensure_prefix, ensure_host_ip,
+                              _containing_prefix,
+                              sweep_stale_prefixes, sweep_stale_host_ips)
 from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_storage_device, ensure_san_switch_device,
                                 ensure_cisco_device, ensure_fortigate_device,
@@ -212,6 +216,7 @@ def run_sync():
     group_vlan_seen = {}
     switch_group_ips = {}
     site_indexes = {}
+    site_prefix_seen = {}
     legacy_sites = set()
 
     # Pass 1: ensure devices and collect everything — broadcast domains are
@@ -338,6 +343,33 @@ def run_sync():
         except Exception as e:
             log("WARN", f"  primary IPv4 sync failed for {ip}: {e}")
 
+        # IPAM: SVI host addresses inside their containing prefixes
+        seen_host_ips = set()
+        try:
+            for iface_name, addr in ip_brief.items():
+                pfx_rec = _containing_prefix(addr)
+                if not pfx_rec:
+                    log("DEBUG", f"  SVI {iface_name} {addr}: no containing prefix — skipped")
+                    continue
+                if iface_name not in {p["port"] for p in ports} and iface_name != carrier:
+                    try:
+                        ensure_svi_interface(dev_id, iface_name, vid_map,
+                                             mgmt_only=False)
+                    except Exception:
+                        pass
+                masklen = _prefix_masklen(pfx_rec.prefix)
+                ip_id = ensure_host_ip(dev_id, f"{addr}/{masklen}", iface_name,
+                                       probe.get("hostname") or ip, iface_name)
+                if ip_id:
+                    seen_host_ips.add(addr)
+            log("INFO", f"  [OK] Cisco {ip} — {len(seen_host_ips)} SVI host IPs synced")
+        except Exception as e:
+            log("WARN", f"  SVI host IP sync failed for {ip}: {e}")
+        try:
+            sweep_stale_host_ips(dev_id, seen_host_ips | ({ip} if carrier else set()))
+        except Exception as e:
+            log("ERROR", f"  host IP sweep failed for {ip}: {e}")
+
         try:
             sync_inventory(dev_id, inv)
             log("INFO", f"  [OK] Cisco {ip} — {len(inv)} inventory items synced")
@@ -449,6 +481,39 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  FortiGate interface sync failed for {ip}: {e}")
 
+        # IPAM: prefixes from interface IPs (real masks) + gateway addresses
+        if site_id:
+            seen_pfx = site_prefix_seen.setdefault(site_id, set())
+            hostname = probe.get("hostname") or ip
+            try:
+                for p in ports:
+                    pfx = _prefix_from_ip(p.get("ip"))
+                    if not pfx:
+                        continue
+                    ensure_prefix(pfx, site_id, vid_map.get(p.get("vlanid")),
+                                  hostname, p["name"])
+                    seen_pfx.add(pfx)
+                log("INFO", f"  [OK] FortiGate {ip} — {len(seen_pfx)} prefixes synced")
+            except Exception as e:
+                log("WARN", f"  IPAM prefix sync failed for {ip}: {e}")
+            seen_host_ips = set()
+            try:
+                for p in ports:
+                    addr_masked, bare = _iface_addr_with_prefixlen(p.get("ip"))
+                    if not addr_masked:
+                        continue
+                    ip_id = ensure_host_ip(dev_id, addr_masked, p["name"],
+                                           hostname, p["name"])
+                    if ip_id:
+                        seen_host_ips.add(bare)
+                log("INFO", f"  [OK] FortiGate {ip} — {len(seen_host_ips)} gateway IPs synced")
+            except Exception as e:
+                log("WARN", f"  gateway IP sync failed for {ip}: {e}")
+            try:
+                sweep_stale_host_ips(dev_id, seen_host_ips | {ip})
+            except Exception as e:
+                log("ERROR", f"  host IP sweep failed for {ip}: {e}")
+
         # Primary IPv4 goes on the real carrier subinterface (matched from
         # cmdb interface IPs) when identifiable; synthetic mgmt fallback.
         carrier = None
@@ -489,6 +554,10 @@ def run_sync():
             _sweep_stale_groups(site_id, set(group_vlan_seen.keys()), key_by_name)
         except Exception as e:
             log("ERROR", f"  stale group sweep failed for site {site_id}: {e}")
+        try:
+            sweep_stale_prefixes(site_id, site_prefix_seen.get(site_id, set()))
+        except Exception as e:
+            log("ERROR", f"  prefix sweep failed for site {site_id}: {e}")
 
     # ── Mark unreachable devices offline ─────────────────────────────────────
     # A device must be missing from OFFLINE_THRESHOLD consecutive scans before

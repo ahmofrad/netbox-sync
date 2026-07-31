@@ -627,9 +627,18 @@ def test_ensure_svi_interface_non_vlan_name(monkeypatch):
 
 # ── IPAM prefix sync ─────────────────────────────────────────────────────────
 
-def test_prefix_from_ip():
+def test_prefix_from_ip_and_iface_addr():
     import netbox_sync.ipam as ipam
     assert ipam._prefix_from_ip("172.31.2.1 255.255.255.0") == "172.31.2.0/24"
+    assert ipam._prefix_from_ip("10.19.128.1 255.255.255.0") == "10.19.128.0/24"
+    assert ipam._prefix_from_ip("79.127.120.184 255.255.255.240") == "79.127.120.176/28"
+    assert ipam._prefix_from_ip("0.0.0.0 0.0.0.0") is None
+    assert ipam._prefix_from_ip("") is None
+    assert ipam._prefix_from_ip(None) is None
+    assert ipam._iface_addr_with_prefixlen("172.31.2.1 255.255.255.0") == \
+        ("172.31.2.1/24", "172.31.2.1")
+    assert ipam._iface_addr_with_prefixlen("0.0.0.0 0.0.0.0") == (None, None)
+    assert ipam._iface_addr_with_prefixlen("") == (None, None)
     assert ipam._prefix_from_ip("10.19.128.1 255.255.255.0") == "10.19.128.0/24"
     assert ipam._prefix_from_ip("79.127.120.184 255.255.255.240") == "79.127.120.176/28"
     assert ipam._prefix_from_ip("0.0.0.0 0.0.0.0") is None

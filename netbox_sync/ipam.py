@@ -29,6 +29,25 @@ def _prefix_from_ip(ip_field):
         return None
 
 
+def _iface_addr_with_prefixlen(ip_field):
+    """"A.B.C.D M.M.M.M" -> ("A.B.C.D/len", "A.B.C.D"); (None, None) if
+    empty/zero/invalid."""
+    if not ip_field:
+        return None, None
+    parts = str(ip_field).split()
+    if len(parts) < 2 or parts[0] == "0.0.0.0":
+        return None, None
+    try:
+        iface = ipaddress.ip_interface(f"{parts[0]}/{parts[1]}")
+    except ValueError:
+        return None, None
+    return iface.with_prefixlen, str(iface.ip)
+
+
+def _prefix_masklen(prefix_str):
+    return ipaddress.ip_network(prefix_str, strict=False).prefixlen
+
+
 def ensure_prefix(prefix_str, site_id, vlan_id, hostname, iface_name):
     """Get-or-create a prefix in IPAM. Marker-owned records are refreshed
     (site/vlan/description); manual records are reused untouched."""

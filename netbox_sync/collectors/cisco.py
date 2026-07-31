@@ -502,16 +502,17 @@ def sync_cisco_interfaces(dev_id, ports):
             try: iface.delete()
             except Exception: pass
 
-def ensure_svi_interface(dev_id, name, vid_map):
-    """Get-or-create an SVI (e.g. Vlan50) as a virtual mgmt_only interface;
-    untagged_vlan parsed from the VlanNN name when present in vid_map."""
+def ensure_svi_interface(dev_id, name, vid_map, mgmt_only=True):
+    """Get-or-create an SVI (e.g. Vlan50) as a virtual interface;
+    untagged_vlan parsed from the VlanNN name when present in vid_map.
+    mgmt_only is True for the management carrier SVI, False otherwise."""
     api = netbox.get_netbox()
     existing = api.dcim.interfaces.get(device_id=dev_id, name=name)
     if existing:
         return existing.id
     payload = {"device": dev_id, "name": name, "type": "virtual",
-               "enabled": True, "mgmt_only": True,
-               "description": "netbox-sync: SVI (management)"}
+               "enabled": True, "mgmt_only": mgmt_only,
+               "description": "netbox-sync: SVI"}
     m = re.match(r'^Vlan(\d+)$', name)
     if m and int(m.group(1)) in vid_map:
         payload["untagged_vlan"] = vid_map[int(m.group(1))]

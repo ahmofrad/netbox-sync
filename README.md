@@ -426,6 +426,10 @@ For each discovered Cisco switch, the script reads `show cdp neighbors detail` (
 
 VLANs from `show vlan brief` are created/updated in IPAM grouped by **broadcast domain derived from CDP topology**: switches that see each other as CDP neighbors (same-site edges) form connected components, and each component maps to a site-scoped **VLAN group** named `BD1`, `BD2`… The group key (in the description, `netbox-sync: vtp=<key>`) prefers a member's VTP domain (casefolded), else the first hostname — stable across runs. This handles empty-VTP (transparent) switches correctly: an island of CDP-connected switches shares one group instead of one group per switch. Overlapping VLAN IDs at one site coexist in different components' groups. Interfaces get their VLAN linkage (access untagged, trunk native + tagged) as before. Marker-owned (`netbox-sync:`) VLANs no longer reported by any group member, and stale duplicate groups (case variants, abandoned per-switch fallbacks), are deleted after each run; manual VLANs/groups are never modified or deleted.
 
+## IPAM prefixes & host addresses
+
+**Prefixes** are derived from FortiGate interface IPs (`ip + mask` in cmdb config — real masks, e.g. `172.31.2.0/24`, `79.127.120.176/28`) and created/updated in IPAM with site and VLAN links (marker `netbox-sync:`). **Gateway/host addresses**: FortiGate subinterface IPs are assigned to their subinterfaces; Cisco SVI IPs (`show ip interface brief`) are placed inside their longest matching prefix and assigned to their SVI (created as virtual interfaces when missing). Marker-owned prefixes and host IPs no longer reported are swept after each run; manual IPAM entries and `netbox-sync: mgmt` addresses are never touched.
+
 ## Offline detection
 
 After each sync, the script queries NetBox for all devices where `redfish_enabled=True` (servers), `storage_enabled=True` (storage), `san_switch_enabled=True` (SAN switches), or `cisco_enabled=True` (Cisco switches). If a device's stored BMC/storage/SAN IP was **not** seen in the current scan, a miss counter is incremented; only after `OFFLINE_THRESHOLD` **consecutive misses** (default 2) is it marked `status=offline` and its `*_enabled` flag set to `false` — this prevents transient slowness from causing false offline markings. The device is **not** deleted — the next successful scan flips it back to `active` and resets the counter.
@@ -818,6 +822,10 @@ python -m pytest tests/
 ## همگام‌سازی VLAN (سیسکو)
 
 VLANهای `show vlan brief` بر اساس **دامنه broadcast مشتق از توپولوژی CDP** در IPAM گروه‌بندی می‌شوند: سوئیچ‌هایی که یکدیگر را به‌عنوان همسایه CDP می‌بینند (یال‌های درون یک سایت) اجزای متصل را تشکیل می‌دهند و هر جزء به یک **VLAN group** با نام `BD1`، `BD2`… نگاشت می‌شود. کلید گروه (در description، `netbox-sync: vtp=<key>`) دامنه VTP یکی از اعضا را ترجیح می‌دهد (با حروف کوچک)، در غیر این صورت اولین hostname — پایدار بین اجراها. این روش سوئیچ‌های بدون دامنه VTP (transparent) را نیز درست مدیریت می‌کند: جزیره سوئیچ‌های متصل به جای یک گروه per-switch، یک گروه مشترک می‌گیرند. VLANهای با ID هم‌پوشان در یک سایت در گروه‌های اجزای مختلف کنار هم قرار می‌گیرند. اتصال VLAN رابط‌ها (untagged در access، native + tagged در trunk) مانند قبل انجام می‌شود. VLANهای علامت‌دار (`netbox-sync:`) که دیگر هیچ عضوی از گروه گزارش نکند و گروه‌های تکراری قدیمی (انواع حروف بزرگ/کوچک، fallbackهای رها شده per-switch) پس از هر اجرا حذف می‌شوند؛ VLANها/گروه‌های دستی هرگز تغییر یا حذف نمی‌شوند.
+
+## پیشوندها و آدرس‌های IPAM
+
+**پیشوندها (prefix)** از IP رابط‌های FortiGate استخراج می‌شوند (`ip + mask` در پیکربندی cmdb — ماسک واقعی، مثل `172.31.2.0/24` و `79.127.120.176/28`) و با پیوند سایت و VLAN در IPAM ساخته/به‌روزرسانی می‌شوند (علامت `netbox-sync:`). **آدرس‌های gateway/host**: IPهای زیررابط FortiGate به زیررابط‌هایشان تخصیص می‌یابند؛ IPهای SVI سیسکو (`show ip interface brief`) داخل طولانی‌ترین پیشوند منطبق قرار می‌گیرند و به SVI خود تخصیص می‌یابند (در صورت نبود، به‌صورت رابط مجازی ساخته می‌شوند). پیشوندها و آدرس‌های علامت‌داری که دیگر گزارش نشوند پس از هر اجرا حذف می‌شوند؛ ورودی‌های دستی IPAM و آدرس‌های `netbox-sync: mgmt` هرگز دست نمی‌خورند.
 
 ## تشخیص آفلاین
 
