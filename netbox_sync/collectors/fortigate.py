@@ -123,6 +123,35 @@ def _fg_interface_type(speed_mbps):
             10000: "10gbase-t", 25000: "25gbase-x-sfp28",
             40000: "40gbase-x-qsfpp"}.get(speed_mbps, "other")
 
+
+def _fg_ha(stats_data, checksums_data, ha_cfg_data):
+    """Build the HA picture from /monitor/system/ha-statistics (units),
+    /monitor/system/ha-checksums (roles) and /cmdb/system/ha (group/mode)."""
+    cfg = ha_cfg_data.get("results") or {}
+    primary_serials = {r.get("serial_no")
+                       for r in (checksums_data.get("results") or [])
+                       if r.get("is_manage_primary") or r.get("is_root_primary")}
+    units = []
+    primary_hostname = None
+    for r in (stats_data.get("results") or []):
+        serial = r.get("serial_no")
+        is_primary = serial in primary_serials
+        units.append({"hostname": r.get("hostname"), "serial": serial,
+                      "is_primary": is_primary})
+        if is_primary and not primary_hostname:
+            primary_hostname = r.get("hostname")
+    primary_serial = next(iter(primary_serials), None)
+    if primary_serial is None and units:
+        primary_serial = units[0]["serial"]
+    return {
+        "clustered": len(units) > 1,
+        "group_name": cfg.get("group-name") or "",
+        "mode": cfg.get("mode") or "",
+        "primary_serial": primary_serial,
+        "primary_hostname": primary_hostname or (units[0]["hostname"] if units else None),
+        "units": units,
+    }
+
 # ── SSH extras (LLDP + transceivers) ─────────────────────────────────────────
 
 # FortiOS prints command failures INLINE (netmiko sees no exception) —
@@ -257,6 +286,18 @@ def fortigate_collect(ip):
     vlans = _fg_vlans(cmdb)
     log("INFO", f"  fortigate api: {len(ports)} interfaces, {len(vlans)} vlans")
 
+    try:
+        ha = _fg_ha(fg.get("/api/v2/monitor/system/ha-statistics"),
+                    fg.get("/api/v2/monitor/system/ha-checksums"),
+                    fg.get("/api/v2/cmdb/system/ha"))
+        if ha["clustered"]:
+            log("INFO", f"  ha cluster: {ha['group_name']} ({ha['mode']}), "
+                        f"primary={ha['primary_hostname']}")
+    except Exception as exc:
+        ha = {"clustered": False, "group_name": "", "mode": "",
+              "primary_serial": None, "primary_hostname": None, "units": []}
+        log("WARN", f"  ha status collection failed: {exc}")
+
     neighbors = []
     inventory = {}
     sess = FortiGateSSHSession(ip)
@@ -293,7 +334,7 @@ def fortigate_collect(ip):
         "port_count": len(ports),
     }
     return {"summary": summary, "ports": ports, "vlans": vlans,
-            "neighbors": neighbors, "inventory": inventory}
+            "neighbors": neighbors, "inventory": inventory, "ha": ha}
 
 def _fortigate_iface_mac(ip, iface_name):
     """Fetch ONE interface's MAC via fnsysctl ifconfig "<name>".

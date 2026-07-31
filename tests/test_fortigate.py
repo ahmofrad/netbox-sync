@@ -128,6 +128,41 @@ def test_parse_ifconfig_a():
                    "AsiaTech": "00:09:0f:09:00:26"}
 
 
+# Real HA output from the user's FG180F pair (FortiOS 7.2.13)
+HA_STATS = {"results": [
+    {"hostname": "HQ", "serial_no": "FG180FTK21901250", "sessions": 13720},
+    {"hostname": "HQ-Secondary", "serial_no": "FG180FTK22900291", "sessions": 1478},
+]}
+HA_CHECKSUMS = {"results": [
+    {"is_manage_primary": True, "is_root_primary": True,
+     "is_manage_master": 1, "is_root_master": 1,
+     "serial_no": "FG180FTK21901250"},
+    {"is_manage_primary": False, "is_root_primary": False,
+     "is_manage_master": 0, "is_root_master": 0,
+     "serial_no": "FG180FTK22900291"},
+]}
+HA_CFG = {"results": {"group-id": 0, "group-name": "Z-Cluster-FW", "mode": "a-p"}}
+
+
+def test_fg_ha_clustered_real_fixture():
+    ha = mod._fg_ha(HA_STATS, HA_CHECKSUMS, HA_CFG)
+    assert ha["clustered"] is True
+    assert ha["group_name"] == "Z-Cluster-FW"
+    assert ha["mode"] == "a-p"
+    assert ha["primary_serial"] == "FG180FTK21901250"
+    assert ha["primary_hostname"] == "HQ"
+    by_serial = {u["serial"]: u for u in ha["units"]}
+    assert by_serial["FG180FTK21901250"]["is_primary"] is True
+    assert by_serial["FG180FTK22900291"]["is_primary"] is False
+
+
+def test_fg_ha_standalone():
+    ha = mod._fg_ha({"results": [{"hostname": "FGT-1", "serial_no": "S1"}]},
+                    {"results": []}, {"results": {}})
+    assert ha["clustered"] is False
+    assert ha["group_name"] == ""
+
+
 def test_fg_vlans():
     vlans = mod._fg_vlans(CMDB_IFACES)
     assert vlans == [{"vid": 10, "name": "port1.10", "status": "active"}]
