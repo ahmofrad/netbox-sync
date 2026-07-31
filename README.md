@@ -369,6 +369,7 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 - FortiGate 40F / 60F / 80F / 100F / 200F class (FortiOS 6/7). Queries `/api/v2/monitor/system/status`, `/api/v2/monitor/system/interface`, `/api/v2/cmdb/system/interface` (VDOM `root`).
 - API tokens are **per-device** in `fortigate_tokens.txt` (gitignored): `<ip[:port]> <token>` per line, `#` comments allowed.
 - SSH runs `diagnose lldp neighbor-summary` (cables) and `diagnose sys transceiver list` (SFP inventory).
+- Aggregate (port-channel) interfaces are imported from cmdb as NetBox `lag` interfaces; member ports link via `lag`, VLAN subinterfaces link via `parent` to their LAG/parent interface.
 - **Opt-in**: activates only when `FORTIGATE_RANGES` is set.
 - VLAN subinterfaces are **matched to the switches' existing VLANs** instead of duplicated: a vid found in exactly one broadcast domain is reused, FortiGate-only VLANs are created in a per-device group, and overlaps are disambiguated by looking the subinterface's MAC up in the switches' MAC address tables (`fnsysctl ifconfig -a` on the FortiGate, `show mac address-table address <mac>` on the switches).
 
@@ -761,6 +762,7 @@ python -m pytest tests/
 - خانواده FortiGate 40F / 60F / 80F / 100F / 200F (FortiOS 6/7). کوئری‌های `/api/v2/monitor/system/status`، `/api/v2/monitor/system/interface`، `/api/v2/cmdb/system/interface` (VDOM سِ `root`).
 - توکن‌های API به‌صورت **per-device** در `fortigate_tokens.txt` (gitignore‌شده): در هر خط `<ip[:port]> <token>`، کامنت با `#`.
 - SSH برای اجرای `diagnose lldp neighbor-summary` (کابل‌ها) و `diagnose sys transceiver list` (ترانسسیورهای SFP).
+- رابط‌های aggregate (port-channel) از cmdb به‌عنوان رابط `lag` در NetBox وارد می‌شوند؛ پورت‌های عضو با `lag` و زیررابط‌های VLAN با `parent` به رابط LAG/والد خود پیوند می‌خورند.
 - **اختیاری**: فقط وقتی `FORTIGATE_RANGES` تنظیم شود فعال می‌شود.
 - زیررابط‌های VLAN **با VLANهای موجود سوئیچ‌ها تطبیق داده می‌شوند** نه اینکه تکراری ساخته شوند: vid موجود در دقیقاً یک دامنه broadcast استفاده مجدد می‌شود، VLANهای مخصوص FortiGate در یک گروه per-device ساخته می‌شوند، و موارد هم‌پوشان با جستجوی MAC زیررابط در جدول MAC سوئیچ‌ها ابهام‌زدایی می‌شوند (`fnsysctl ifconfig -a` روی FortiGate و `show mac address-table address <mac>` روی سوئیچ‌ها).
 

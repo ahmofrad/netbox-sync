@@ -71,6 +71,7 @@ def _fg_interfaces(monitor_data, cmdb_data):
             "vlanid": c.get("vlanid"),
             "parent": c.get("interface") or "",
             "alias": c.get("alias") or "",
+            "members": [],
         })
     for c in cfg:
         if not isinstance(c, dict): continue
@@ -85,6 +86,25 @@ def _fg_interfaces(monitor_data, cmdb_data):
             "vlanid": c.get("vlanid"),
             "parent": c.get("interface") or "",
             "alias": c.get("alias") or "",
+            "members": [],
+        })
+    # Aggregates are not reported by monitor either — add them from cmdb so
+    # subinterfaces/members have parents to link to.
+    for c in cfg:
+        if not isinstance(c, dict): continue
+        if c.get("type") != "aggregate" or c.get("name") in mon:
+            continue
+        ports.append({
+            "name": c.get("name"),
+            "link": True,
+            "speed_mbps": None,
+            "type": "lag",
+            "ip": c.get("ip") or "",
+            "vlanid": None,
+            "parent": "",
+            "alias": c.get("alias") or "",
+            "members": [m.get("interface-name") for m in (c.get("member") or [])
+                        if m.get("interface-name")],
         })
     return ports
 
@@ -319,14 +339,54 @@ def resolve_fortigate_vlans(site_vlan_index, vlans, get_mac, mac_lookup):
 # ── interfaces ───────────────────────────────────────────────────────────────
 
 def sync_fortigate_interfaces(dev_id, ports, vid_map):
-    """Bulk create/update FortiGate interfaces: physical ports typed by
-    speed, VLAN subinterfaces as virtual with untagged_vlan."""
+    """Two-pass bulk sync: LAG interfaces first (children must exist before
+    they are referenced), then physical ports (with `lag` links) and VLAN
+    subinterfaces (with `parent` links)."""
     api = netbox.get_netbox()
     existing = {str(i.name): i
                 for i in api.dcim.interfaces.filter(device_id=dev_id)}
     seen = set()
+
+    # Pass 1: LAG interfaces
+    lag_updates, lag_creates = [], []
+    for p in ports:
+        if p.get("type") != "lag":
+            continue
+        name = p["name"]
+        seen.add(name)
+        payload = {"device": dev_id, "name": name, "type": "lag",
+                   "enabled": p.get("link", False),
+                   "description": f"type=aggregate ip={p.get('ip')}"[:200],
+                   "mgmt_only": False}
+        if p.get("alias"):
+            payload["label"] = str(p["alias"])[:64]
+        if name in existing:
+            lag_updates.append({"id": existing[name].id, **payload})
+        else:
+            lag_creates.append(payload)
+    if lag_updates:
+        api.dcim.interfaces.update(lag_updates)
+    name_to_id = {name: iface.id for name, iface in existing.items()}
+    if lag_creates:
+        try:
+            recs = api.dcim.interfaces.create(lag_creates)
+            if hasattr(recs, "id"):      # single Record -> wrap
+                recs = [recs]
+            for r in recs:
+                name_to_id[str(r.name)] = r.id
+        except Exception as e:
+            log("WARN", f"  Could not create LAG interfaces: {e}")
+
+    # Pass 2: physical ports (lag membership) + VLAN subinterfaces (parent)
+    lag_of_member = {}
+    for p in ports:
+        if p.get("type") == "lag":
+            for m in p.get("members", []):
+                lag_of_member[m] = p["name"]
     updates, creates = [], []
     for p in ports:
+        if p.get("type") == "lag":
+            continue
         name = p["name"]
         seen.add(name)
         if p.get("type") == "vlan" and p.get("vlanid") is not None:
@@ -334,6 +394,9 @@ def sync_fortigate_interfaces(dev_id, ports, vid_map):
                        "enabled": p.get("link", False),
                        "description": f"vlanid={p['vlanid']} ip={p.get('ip')}"[:200],
                        "mgmt_only": False}
+            parent_id = name_to_id.get(p.get("parent") or "")
+            if parent_id:
+                payload["parent"] = parent_id
             if p["vlanid"] in vid_map:
                 payload["mode"] = "tagged"
                 payload["untagged_vlan"] = vid_map[p["vlanid"]]
@@ -343,6 +406,9 @@ def sync_fortigate_interfaces(dev_id, ports, vid_map):
                        "enabled": bool(p.get("link")),
                        "description": f"type={p.get('type')} ip={p.get('ip')}"[:200],
                        "mgmt_only": False}
+            lag_name = lag_of_member.get(name)
+            if lag_name and name_to_id.get(lag_name):
+                payload["lag"] = name_to_id[lag_name]
         if p.get("alias"):
             payload["label"] = str(p["alias"])[:64]
         if name in existing:

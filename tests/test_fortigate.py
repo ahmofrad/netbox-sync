@@ -82,6 +82,25 @@ def test_fg_interfaces_include_cmdb_vlan_subifs():
     assert ports["AsiaTech"]["vlanid"] == 10
 
 
+def test_fg_interfaces_include_aggregates_with_members():
+    """Aggregates live only in cmdb (not in monitor) and must be added with
+    their member lists for LAG linkage."""
+    mon = {"results": {
+        "port33": {"link": True, "speed": "10000full"},
+        "port34": {"link": True, "speed": "10000full"}}}
+    cmdb = {"results": [
+        {"name": "port33", "type": "physical", "ip": "0.0.0.0 0.0.0.0"},
+        {"name": "port34", "type": "physical", "ip": "0.0.0.0 0.0.0.0"},
+        {"name": "Core Switch", "type": "aggregate",
+         "member": [{"interface-name": "port33"},
+                    {"interface-name": "port34"}]},
+    ]}
+    ports = {p["name"]: p for p in mod._fg_interfaces(mon, cmdb)}
+    assert "Core Switch" in ports
+    assert ports["Core Switch"]["type"] == "lag"
+    assert ports["Core Switch"]["members"] == ["port33", "port34"]
+
+
 def test_ssh_command_failure_detected():
     class FakeSess:
         def run(self, cmd):

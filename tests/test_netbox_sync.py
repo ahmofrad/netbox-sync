@@ -556,9 +556,38 @@ def test_sync_fortigate_interfaces_bulk_and_vlan_subif(monkeypatch):
     assert created["port1.10"]["type"] == "virtual"
     assert created["port1.10"]["untagged_vlan"] == 110
     assert created["port1.10"]["mode"] == "tagged"
+    assert created["port1.10"]["parent"] == 1     # subinterface under its parent
     assert "label" not in created["port1.10"]   # empty alias -> no label key
     assert ifaces_ep.deleted_ids == [2]
     assert ifaces_ep.update_calls == 1 and ifaces_ep.create_calls == 1
+
+
+def test_sync_fortigate_interfaces_lag_and_member_linkage(monkeypatch):
+    import netbox_sync.collectors.fortigate as fg
+    ifaces_ep = FakeEndpoint([
+        FakeRecord(1, name="port33", device_id=7),
+        FakeRecord(2, name="port34", device_id=7),
+    ])
+    api = _fake_api(interfaces=ifaces_ep)
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    ports = [
+        {"name": "port33", "link": True, "speed_mbps": 10000,
+         "type": "physical", "ip": "", "vlanid": None, "parent": "", "alias": ""},
+        {"name": "port34", "link": True, "speed_mbps": 10000,
+         "type": "physical", "ip": "", "vlanid": None, "parent": "", "alias": ""},
+        {"name": "Core Switch", "link": True, "speed_mbps": None,
+         "type": "lag", "members": ["port33", "port34"], "ip": "",
+         "vlanid": None, "parent": "", "alias": ""},
+    ]
+    fg.sync_fortigate_interfaces(7, ports, {})
+
+    created = {c["name"]: c for c in ifaces_ep.created}
+    assert created["Core Switch"]["type"] == "lag"
+    lag_id = next(i.id for i in ifaces_ep.items if i.name == "Core Switch")
+    by_id = {u["id"]: u for u in ifaces_ep.updated}
+    assert by_id[1]["lag"] == lag_id
+    assert by_id[2]["lag"] == lag_id
 
 
 def test_cdp_cables_protocol_label(monkeypatch):
