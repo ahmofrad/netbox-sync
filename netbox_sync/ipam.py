@@ -10,6 +10,88 @@ from netbox_sync.config import log
 
 IPAM_PREFIX_MARKER = "netbox-sync: last seen "
 IPAM_HOST_MARKER = "netbox-sync: if "
+NAT_MARKER = "netbox-sync: nat "
+
+
+def _nat_desc(entry):
+    parts = [f"{NAT_MARKER}{entry.get('name')}"]
+    if entry.get("protocol"):
+        parts.append(str(entry["protocol"]).upper())
+    if entry.get("extport") is not None:
+        parts.append(f"port {entry['extport']}")
+    if entry.get("mappedport") is not None \
+            and entry.get("mappedport") != entry.get("extport"):
+        parts.append(f"-> {entry['mappedport']}")
+    if entry.get("status"):
+        parts.append(str(entry["status"]))
+    return " ".join(parts)[:200]
+
+
+def _ensure_ipam_address(address, description):
+    """Get-or-create a plain IPAM address (any-mask reuse); refresh the
+    description only on marked records."""
+    api = netbox.get_netbox()
+    bare = address.split("/")[0]
+    existing = list(api.ipam.ip_addresses.filter(address=bare))
+    if existing:
+        rec = existing[0]
+        if (getattr(rec, "description", None) or "").startswith("netbox-sync:"):
+            api.ipam.ip_addresses.update([{"id": rec.id,
+                                           "description": description}])
+        return rec
+    return api.ipam.ip_addresses.create({
+        "address": address, "status": "active", "description": description})
+
+
+def sync_nat_ips(vips, pools):
+    """Model FortiGate NAT in IPAM: external VIP addresses with nat_inside
+    pointing at their mapped (inside) addresses; SNAT pools as plain
+    addresses. Returns the set of bare IPs seen (for sweeping)."""
+    api = netbox.get_netbox()
+    seen = set()
+    for v in vips or []:
+        ext_ip = (v.get("extip") or "").strip()
+        if not ext_ip:
+            continue
+        seen.add(ext_ip)
+        inside_id = None
+        mapped = [str(m).strip() for m in (v.get("mappedip") or []) if str(m).strip()]
+        if mapped:
+            inside_ip = mapped[0]
+            inside_id = _ensure_ipam_address(
+                f"{inside_ip}/32",
+                f"{NAT_MARKER}inside {v.get('name')}").id
+            seen.add(inside_ip)
+        ext_rec = _ensure_ipam_address(f"{ext_ip}/32", _nat_desc(v))
+        if inside_id:
+            api.ipam.ip_addresses.update(
+                [{"id": ext_rec.id, "nat_inside": inside_id}])
+    for p in pools or []:
+        sip = (p.get("startip") or "").strip()
+        if not sip:
+            continue
+        seen.add(sip)
+        _ensure_ipam_address(
+            f"{sip}/32",
+            f"{NAT_MARKER}{p.get('name')} (pool {p.get('type')}, "
+            f"{sip}-{p.get('endip')})")
+    return seen
+
+
+def sweep_nat_ips(seen_bare_ips):
+    """Delete marker-owned NAT addresses not seen this run. Global scope —
+    the caller passes the union of all FortiGates' seen IPs."""
+    api = netbox.get_netbox()
+    for ip in list(api.ipam.ip_addresses.filter()):
+        desc = getattr(ip, "description", None) or ""
+        if not desc.startswith(NAT_MARKER):
+            continue
+        if str(ip.address).split("/")[0] not in seen_bare_ips:
+            try:
+                ip.delete()
+                log("INFO", f"  nat IP {ip.address} deleted — no longer seen")
+            except Exception as exc:
+                log("WARN", f"  could not delete nat IP {ip.address}: {exc}")
 
 
 def _prefix_from_ip(ip_field):

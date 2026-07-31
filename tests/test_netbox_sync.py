@@ -78,6 +78,14 @@ class FakeEndpoint:
     def update(self, payload_list):
         self.update_calls += 1
         self.updated.extend(payload_list)
+        # Apply updates to records (NetBox mutates them server-side)
+        by_id = {i.id: i for i in self.items}
+        for p in payload_list:
+            rec = by_id.get(p.get("id"))
+            if rec is not None:
+                for k, v in p.items():
+                    if k != "id":
+                        setattr(rec, k, v)
         return True
 
 
@@ -527,6 +535,64 @@ def test_ensure_fortigate_device_creates(monkeypatch):
     assert payload["custom_fields"]["fortigate_enabled"] is True
 
 
+_HA = {"clustered": True, "group_name": "Z-Cluster-FW", "mode": "a-p",
+       "primary_serial": "FG180FTK21901250", "primary_hostname": "HQ",
+       "units": [
+           {"hostname": "HQ", "serial": "FG180FTK21901250", "is_primary": True},
+           {"hostname": "HQ-Secondary", "serial": "FG180FTK22900291",
+            "is_primary": False}]}
+
+
+def test_ensure_fortigate_device_cluster_creates_with_ha_fields(monkeypatch):
+    devices_ep = FakeEndpoint()
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(devices=devices_ep))
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda n: 11)
+    monkeypatch.setattr(nbx, "get_or_create_role", lambda n, *a: 12)
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda n: 13)
+    monkeypatch.setattr(nbx, "get_or_create_device_type", lambda *a, **k: 14)
+    monkeypatch.setattr(nbx, "find_device", lambda *a, **k: None)
+
+    # probe comes from the SECONDARY unit — device must still be the cluster (HQ)
+    nbx.ensure_fortigate_device({
+        "ip": "192.0.2.71", "serial": "FG180FTK22900291",
+        "model": "FortiGate 1800F", "hostname": "HQ-Secondary",
+        "manufacturer": "Fortinet", "firmware": "v7.2.13"}, ha=_HA)
+
+    payload = devices_ep.created[0]
+    assert payload["name"] == "HQ"                          # cluster name, not unit name
+    assert payload["serial"] == "FG180FTK21901250"          # primary serial
+    cf = payload["custom_fields"]
+    assert cf["fortigate_ha_group"] == "Z-Cluster-FW"
+    assert cf["fortigate_ha_mode"] == "a-p"
+    assert "HQ-Secondary (FG180FTK22900291)" in cf["fortigate_ha_peer"]
+    assert cf["fortigate_ha_role"] == "secondary"           # probed unit's role
+
+
+def test_ensure_fortigate_device_cluster_finds_by_peer_serial(monkeypatch):
+    existing = FakeRecord(7, name="HQ", serial="FG180FTK21901250",
+                          custom_fields={})
+    devices_ep = FakeEndpoint([existing])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(devices=devices_ep))
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda n: 11)
+    monkeypatch.setattr(nbx, "get_or_create_role", lambda n, *a: 12)
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda n: 13)
+    monkeypatch.setattr(nbx, "get_or_create_device_type", lambda *a, **k: 14)
+
+    def _find(serial, role_name=None):
+        if serial == "FG180FTK22900291":
+            return existing       # peer serial resolves to the same cluster
+        return None
+    monkeypatch.setattr(nbx, "find_device", _find)
+
+    dev_id = nbx.ensure_fortigate_device({
+        "ip": "192.0.2.71", "serial": "FG180FTK22900291",
+        "model": "FortiGate 1800F", "hostname": "HQ-Secondary",
+        "manufacturer": "Fortinet", "firmware": "v7.2.13"}, ha=_HA)
+
+    assert dev_id == 7                    # updated, not duplicated
+    assert devices_ep.created == []
+
+
 def test_sync_fortigate_interfaces_bulk_and_vlan_subif(monkeypatch):
     import netbox_sync.collectors.fortigate as fg
     ifaces_ep = FakeEndpoint([
@@ -767,6 +833,38 @@ def test_sweep_stale_host_ips(monkeypatch):
     ipam.sweep_stale_host_ips(7, {"172.31.2.1"})
 
     assert api.ipam.ip_addresses.deleted_ids == [51]
+
+
+def test_sync_nat_ips_vip_pool_and_sweep(monkeypatch):
+    import netbox_sync.ipam as ipam
+    api = _host_ip_api([], [])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    vips = [{"name": "TimeKeeping-443", "extip": "77.104.83.164",
+             "extport": 443, "mappedip": ["172.31.5.53"], "mappedport": 443,
+             "protocol": "tcp", "portforward": "enable", "status": "enable"}]
+    pools = [{"name": "79.127.120.186", "type": "overload",
+              "startip": "79.127.120.186", "endip": "79.127.120.186"}]
+    ipam.sync_nat_ips(vips, pools)
+
+    by_addr = {r.address.split("/")[0]: r for r in api.ipam.ip_addresses.items}
+    ext = by_addr["77.104.83.164"]
+    inside = by_addr["172.31.5.53"]
+    assert ext.nat_inside == inside.id
+    assert "TimeKeeping-443" in ext.description
+    assert "nat inside" in inside.description
+    assert "79.127.120.186" in by_addr
+
+    # sweep: stale marked NAT IPs removed, manual kept
+    manual = FakeRecord(99, address="9.9.9.9", device_id=7, description="manual")
+    stale = FakeRecord(98, address="8.8.8.8", device_id=7,
+                       description="netbox-sync: nat OLD-VIP")
+    for r in (manual, stale):
+        r._endpoint = api.ipam.ip_addresses
+    api.ipam.ip_addresses.items.extend([manual, stale])
+    ipam.sweep_nat_ips({"77.104.83.164", "172.31.5.53", "79.127.120.186"})
+    assert 98 in api.ipam.ip_addresses.deleted_ids
+    assert 99 not in api.ipam.ip_addresses.deleted_ids
 
 
 def test_site_vlan_index(monkeypatch):
