@@ -124,6 +124,67 @@ def _fg_interface_type(speed_mbps):
             40000: "40gbase-x-qsfpp"}.get(speed_mbps, "other")
 
 
+# ── firewall policy / object / NAT mappers ───────────────────────────────────
+
+def _names(objs):
+    return [o.get("name") for o in (objs or []) if isinstance(o, dict) and o.get("name")]
+
+def _fg_firewall_policies(data):
+    out = []
+    for p in (data.get("results") or []):
+        out.append({
+            "id": p.get("policyid"),
+            "name": p.get("name") or "",
+            "srcintf": _names(p.get("srcintf")),
+            "dstintf": _names(p.get("dstintf")),
+            "srcaddr": _names(p.get("srcaddr")),
+            "dstaddr": _names(p.get("dstaddr")),
+            "service": _names(p.get("service")),
+            "action": p.get("action"),
+            "status": p.get("status"),
+            "comment": p.get("comments") or "",
+        })
+    return out
+
+def _fg_firewall_addresses(data):
+    out = []
+    for a in (data.get("results") or []):
+        t = a.get("type")
+        if t == "fqdn":
+            value = a.get("fqdn")
+        elif t == "iprange":
+            value = f"{a.get('start-ip')}-{a.get('end-ip')}"
+        else:
+            value = a.get("subnet") or a.get("fqdn") or ""
+        out.append({"kind": "object", "name": a.get("name"),
+                    "type": t, "value": value})
+    return out
+
+def _fg_firewall_addrgrps(data):
+    return [{"kind": "group", "name": g.get("name"),
+             "members": _names(g.get("member"))}
+            for g in (data.get("results") or [])]
+
+def _fg_firewall_vips(data):
+    out = []
+    for v in (data.get("results") or []):
+        mapped = [m.get("range") for m in (v.get("mappedip") or [])
+                  if isinstance(m, dict)]
+        out.append({
+            "kind": "vip", "name": v.get("name"),
+            "extip": v.get("extip"), "extport": v.get("extport"),
+            "mappedip": mapped, "mappedport": v.get("mappedport"),
+            "protocol": v.get("protocol"),
+            "portforward": v.get("portforward"), "status": v.get("status"),
+        })
+    return out
+
+def _fg_firewall_ippools(data):
+    return [{"kind": "pool", "name": p.get("name"), "type": p.get("type"),
+             "startip": p.get("startip"), "endip": p.get("endip")}
+            for p in (data.get("results") or [])]
+
+
 def _fg_ha(stats_data, checksums_data, ha_cfg_data):
     """Build the HA picture from /monitor/system/ha-statistics (units),
     /monitor/system/ha-checksums (roles) and /cmdb/system/ha (group/mode)."""

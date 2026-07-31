@@ -163,6 +163,76 @@ def test_fg_ha_standalone():
     assert ha["group_name"] == ""
 
 
+# Real-shape firewall fixtures (trimmed from the live FG180F)
+FW_POLICY = {"results": [
+    {"policyid": 813, "status": "enable", "name": "",
+     "srcintf": [{"name": "DMZ"}], "dstintf": [{"name": "SD-WAN"}],
+     "srcaddr": [{"name": "DMZ Range"}], "dstaddr": [],
+     "service": [{"name": "HTTPS"}], "action": "accept", "comments": "edge rule"},
+]}
+
+FW_ADDRESS = {"results": [
+    {"name": "*.asiatech.ir", "type": "fqdn", "fqdn": "*.asiatech.ir"},
+    {"name": "LAN-10", "type": "ipmask", "subnet": "10.0.0.0 255.0.0.0"},
+    {"name": "DMZ Range", "type": "iprange",
+     "start-ip": "172.31.4.10", "end-ip": "172.31.4.99"},
+]}
+
+FW_ADDRGRP = {"results": [
+    {"name": "A-DC-NET", "member": [{"name": "A-DC-6"}, {"name": "A-DC-7"}]},
+]}
+
+FW_VIP = {"results": [
+    {"name": "TimeKeeping-443", "extip": "77.104.83.164", "extport": 443,
+     "mappedip": [{"range": "172.31.5.53"}], "mappedport": 443,
+     "protocol": "tcp", "portforward": "enable", "status": "enable"},
+]}
+
+FW_IPPOOL = {"results": [
+    {"name": "79.127.120.186", "type": "overload",
+     "startip": "79.127.120.186", "endip": "79.127.120.186"},
+]}
+
+
+def test_fg_firewall_policies():
+    out = mod._fg_firewall_policies(FW_POLICY)
+    assert out == [{
+        "id": 813, "name": "", "srcintf": ["DMZ"], "dstintf": ["SD-WAN"],
+        "srcaddr": ["DMZ Range"], "dstaddr": [], "service": ["HTTPS"],
+        "action": "accept", "status": "enable", "comment": "edge rule"}]
+
+
+def test_fg_firewall_addresses():
+    out = mod._fg_firewall_addresses(FW_ADDRESS)
+    by_name = {a["name"]: a for a in out}
+    assert by_name["*.asiatech.ir"]["value"] == "*.asiatech.ir"
+    assert by_name["LAN-10"]["value"] == "10.0.0.0 255.0.0.0"
+    assert by_name["DMZ Range"]["value"] == "172.31.4.10-172.31.4.99"
+    assert all(a["kind"] == "object" for a in out)
+
+
+def test_fg_firewall_addrgrps():
+    out = mod._fg_firewall_addrgrps(FW_ADDRGRP)
+    assert out == [{"kind": "group", "name": "A-DC-NET",
+                    "members": ["A-DC-6", "A-DC-7"]}]
+
+
+def test_fg_firewall_vips():
+    out = mod._fg_firewall_vips(FW_VIP)
+    assert out == [{"kind": "vip", "name": "TimeKeeping-443",
+                    "extip": "77.104.83.164", "extport": 443,
+                    "mappedip": ["172.31.5.53"], "mappedport": 443,
+                    "protocol": "tcp", "portforward": "enable",
+                    "status": "enable"}]
+
+
+def test_fg_firewall_ippools():
+    out = mod._fg_firewall_ippools(FW_IPPOOL)
+    assert out == [{"kind": "pool", "name": "79.127.120.186",
+                    "type": "overload", "startip": "79.127.120.186",
+                    "endip": "79.127.120.186"}]
+
+
 def test_fg_vlans():
     vlans = mod._fg_vlans(CMDB_IFACES)
     assert vlans == [{"vid": 10, "name": "port1.10", "status": "active"}]
