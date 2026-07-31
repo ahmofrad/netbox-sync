@@ -4,6 +4,7 @@ Markers: prefixes carry `netbox-sync: last seen <hostname>` in their
 description; host addresses carry `netbox-sync: if <hostname> <iface>`.
 Only marked objects are ever refreshed or deleted."""
 import ipaddress
+import re
 
 from netbox_sync import netbox
 from netbox_sync.config import log
@@ -27,18 +28,26 @@ def _nat_desc(entry):
     return " ".join(parts)[:200]
 
 
+def _find_ip_by_bare(api, bare):
+    """Find an IPAM address by its bare IP (no mask) — client-side match so
+    it behaves identically on any NetBox address-filter semantics."""
+    for r in api.ipam.ip_addresses.filter():
+        if str(r.address).split("/")[0] == bare:
+            return r
+    return None
+
+
 def _ensure_ipam_address(address, description):
     """Get-or-create a plain IPAM address (any-mask reuse); refresh the
     description only on marked records."""
     api = netbox.get_netbox()
     bare = address.split("/")[0]
-    existing = list(api.ipam.ip_addresses.filter(address=bare))
+    existing = _find_ip_by_bare(api, bare)
     if existing:
-        rec = existing[0]
-        if (getattr(rec, "description", None) or "").startswith("netbox-sync:"):
-            api.ipam.ip_addresses.update([{"id": rec.id,
+        if (getattr(existing, "description", None) or "").startswith("netbox-sync:"):
+            api.ipam.ip_addresses.update([{"id": existing.id,
                                            "description": description}])
-        return rec
+        return existing
     return api.ipam.ip_addresses.create({
         "address": address, "status": "active", "description": description})
 
@@ -92,6 +101,99 @@ def sweep_nat_ips(seen_bare_ips):
                 log("INFO", f"  nat IP {ip.address} deleted — no longer seen")
             except Exception as exc:
                 log("WARN", f"  could not delete nat IP {ip.address}: {exc}")
+
+
+def _svc_ports(extport):
+    """Parse a FortiGate extport (int, range string, or junk) into service
+    port ints. Ranges expand (capped); unparseable -> []."""
+    if extport is None:
+        return []
+    s = str(extport).strip()
+    m = re.match(r'^(\d+)$', s)
+    if m:
+        return [int(m.group(1))]
+    m = re.match(r'^(\d+)\s*-\s*(\d+)$', s)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if hi >= lo and hi - lo <= 64:
+            return list(range(lo, hi + 1))
+    return []
+
+
+def _create_service(api, payload):
+    """Create a service across NetBox API variants: 4.x wants
+    parent_object_type/parent_object_id; 3.x wants plain device FK."""
+    try:
+        return api.ipam.services.create(payload)
+    except Exception as exc:
+        if "parent_object" in str(exc):
+            fallback = {k: v for k, v in payload.items()
+                        if k not in ("parent_object_type", "parent_object_id")}
+            fallback["device"] = payload["parent_object_id"]
+            return api.ipam.services.create(fallback)
+        raise
+
+
+def sync_nat_services(dev_id, vips):
+    """Per-port NAT fidelity: one NetBox Service per VIP (name, protocol,
+    port) linked to the external IP address, mapped backend in the
+    description. Returns the set of service names seen (for sweeping)."""
+    api = netbox.get_netbox()
+    seen = set()
+    for v in vips or []:
+        name = (v.get("name") or "").strip()
+        ext_ip = (v.get("extip") or "").strip()
+        if not name or not ext_ip:
+            continue
+        seen.add(name)
+        ports = _svc_ports(v.get("extport"))
+        if not ports:
+            # Static NAT without port mapping — the address-level nat_inside
+            # (from sync_nat_ips) already models it; no Service needed.
+            log("DEBUG", f"  nat service {name}: no ports — handled via nat_inside")
+            continue
+        mapped = [str(m).strip() for m in (v.get("mappedip") or []) if str(m).strip()]
+        mappedport = v.get("mappedport") or v.get("extport")
+        desc = (f"{NAT_MARKER}{name} -> "
+                f"{mapped[0] if mapped else '?'}:{mappedport}"
+                + (f" ({v.get('status')})" if v.get("status") else ""))[:200]
+        payload = {
+            "parent_object_type": "dcim.device",
+            "parent_object_id": dev_id,
+            "name": name,
+            "protocol": (v.get("protocol") or "tcp").lower(),
+            "ports": ports,
+            "description": desc,
+        }
+        ext_rec = _find_ip_by_bare(api, ext_ip)
+        if ext_rec:
+            payload["ipaddresses"] = [ext_rec.id]
+        existing = api.ipam.services.get(device_id=dev_id, name=name)
+        if existing:
+            update_payload = {k: v for k, v in payload.items()
+                              if k not in ("parent_object_type",
+                                           "parent_object_id", "device")}
+            api.ipam.services.update([{"id": existing.id, **update_payload}])
+        else:
+            try:
+                _create_service(api, payload)
+            except Exception as exc:
+                log("WARN", f"  nat service {name}: create failed: {exc}")
+    return seen
+
+
+def sweep_nat_services(dev_id, seen_names):
+    """Delete marker-owned NAT services on the device not seen this run."""
+    api = netbox.get_netbox()
+    for s in list(api.ipam.services.filter(device_id=dev_id)):
+        if not (getattr(s, "description", None) or "").startswith(NAT_MARKER):
+            continue
+        if s.name not in seen_names:
+            try:
+                s.delete()
+                log("INFO", f"  nat service {s.name} (device {dev_id}) deleted — no longer seen")
+            except Exception as exc:
+                log("WARN", f"  could not delete nat service {s.name}: {exc}")
 
 
 def _prefix_from_ip(ip_field):

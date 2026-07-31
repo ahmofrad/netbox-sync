@@ -29,7 +29,8 @@ from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
                               ensure_prefix, ensure_host_ip,
                               _containing_prefix,
                               sweep_stale_prefixes, sweep_stale_host_ips,
-                              sync_nat_ips, sweep_nat_ips)
+                              sync_nat_ips, sweep_nat_ips,
+                              sync_nat_services, sweep_nat_services)
 from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_storage_device, ensure_san_switch_device,
                                 ensure_cisco_device, ensure_fortigate_device,
@@ -549,12 +550,14 @@ def run_sync():
             log("ERROR", f"  FortiGate inventory sync failed for {ip}: {e}")
 
         # NAT: VIPs become external IPs with nat_inside to their mapped
-        # addresses; SNAT pools become plain IPAM addresses
+        # addresses (per-port fidelity via NetBox Services); pools plain
         fw = data.get("firewall") or {}
         try:
             nat_seen.update(sync_nat_ips(fw.get("vips"), fw.get("ippools")))
+            svc_seen = sync_nat_services(dev_id, fw.get("vips"))
+            sweep_nat_services(dev_id, svc_seen)
             log("INFO", f"  [OK] FortiGate {ip} — {len(fw.get('vips') or [])} vips, "
-                        f"{len(fw.get('ippools') or [])} pools -> IPAM")
+                        f"{len(fw.get('ippools') or [])} pools -> IPAM + services")
         except Exception as e:
             log("ERROR", f"  NAT IPAM sync failed for {ip}: {e}")
 

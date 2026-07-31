@@ -867,6 +867,62 @@ def test_sync_nat_ips_vip_pool_and_sweep(monkeypatch):
     assert 99 not in api.ipam.ip_addresses.deleted_ids
 
 
+def _services_api(service_items, ip_items=None):
+    return SimpleNamespace(
+        dcim=SimpleNamespace(interfaces=FakeEndpoint()),
+        ipam=SimpleNamespace(services=FakeEndpoint(service_items),
+                             ip_addresses=FakeEndpoint(ip_items or [])))
+
+
+def test_sync_nat_services_per_vip(monkeypatch):
+    import netbox_sync.ipam as ipam
+    ext_ip = FakeRecord(50, address="77.104.83.164/32")
+    api = _services_api([], [ext_ip])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    vips = [
+        {"name": "TimeKeeping-443", "extip": "77.104.83.164", "extport": 443,
+         "mappedip": ["172.31.5.53"], "mappedport": 443, "protocol": "tcp",
+         "portforward": "enable", "status": "enable"},
+        {"name": "Avid App-7625", "extip": "77.104.83.164", "extport": 7625,
+         "mappedip": ["172.31.5.60"], "mappedport": 7625, "protocol": "tcp",
+         "portforward": "enable", "status": "enable"},
+    ]
+    seen = ipam.sync_nat_services(7, vips)
+
+    created = {s["name"]: s for s in api.ipam.services.created}
+    assert set(created) == {"TimeKeeping-443", "Avid App-7625"}
+    s1 = created["TimeKeeping-443"]
+    assert s1["protocol"] == "tcp"
+    assert s1["ports"] == [443]
+    assert s1["ipaddresses"] == [50]
+    assert "172.31.5.53" in s1["description"]
+    assert created["Avid App-7625"]["ipaddresses"] == [50]   # shared extip -> separate services
+    assert seen == {"TimeKeeping-443", "Avid App-7625"}
+
+
+def test_svc_ports_parsing():
+    import netbox_sync.ipam as ipam
+    assert ipam._svc_ports(443) == [443]
+    assert ipam._svc_ports("21114-21119") == [21114, 21115, 21116, 21117, 21118, 21119]
+    assert ipam._svc_ports("junk") == []
+    assert ipam._svc_ports(None) == []
+
+
+def test_sweep_nat_services(monkeypatch):
+    import netbox_sync.ipam as ipam
+    stale = FakeRecord(60, name="OLD-SVC", device_id=7,
+                       description="netbox-sync: nat OLD-SVC")
+    keep = FakeRecord(61, name="TimeKeeping-443", device_id=7,
+                      description="netbox-sync: nat TimeKeeping-443")
+    manual = FakeRecord(62, name="my-svc", device_id=7, description="manual")
+    api = _services_api([stale, keep, manual])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    ipam.sweep_nat_services(7, {"TimeKeeping-443"})
+    assert api.ipam.services.deleted_ids == [60]
+
+
 def test_site_vlan_index(monkeypatch):
     import netbox_sync.collectors.cisco as cisco
     g = FakeRecord(8, name="BD1", description="netbox-sync: vtp=snapp",
