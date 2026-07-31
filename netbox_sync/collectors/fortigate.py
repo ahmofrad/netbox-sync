@@ -124,46 +124,10 @@ def _fg_interface_type(speed_mbps):
             40000: "40gbase-x-qsfpp"}.get(speed_mbps, "other")
 
 
-# ── firewall policy / object / NAT mappers ───────────────────────────────────
+# ── firewall NAT mappers (VIPs + IP pools) ───────────────────────────────────
 
 def _names(objs):
     return [o.get("name") for o in (objs or []) if isinstance(o, dict) and o.get("name")]
-
-def _fg_firewall_policies(data):
-    out = []
-    for p in (data.get("results") or []):
-        out.append({
-            "id": p.get("policyid"),
-            "name": p.get("name") or "",
-            "srcintf": _names(p.get("srcintf")),
-            "dstintf": _names(p.get("dstintf")),
-            "srcaddr": _names(p.get("srcaddr")),
-            "dstaddr": _names(p.get("dstaddr")),
-            "service": _names(p.get("service")),
-            "action": p.get("action"),
-            "status": p.get("status"),
-            "comment": p.get("comments") or "",
-        })
-    return out
-
-def _fg_firewall_addresses(data):
-    out = []
-    for a in (data.get("results") or []):
-        t = a.get("type")
-        if t == "fqdn":
-            value = a.get("fqdn")
-        elif t == "iprange":
-            value = f"{a.get('start-ip')}-{a.get('end-ip')}"
-        else:
-            value = a.get("subnet") or a.get("fqdn") or ""
-        out.append({"kind": "object", "name": a.get("name"),
-                    "type": t, "value": value})
-    return out
-
-def _fg_firewall_addrgrps(data):
-    return [{"kind": "group", "name": g.get("name"),
-             "members": _names(g.get("member"))}
-            for g in (data.get("results") or [])]
 
 def _fg_firewall_vips(data):
     out = []
@@ -359,22 +323,15 @@ def fortigate_collect(ip):
               "primary_serial": None, "primary_hostname": None, "units": []}
         log("WARN", f"  ha status collection failed: {exc}")
 
-    firewall = {"policies": [], "addresses": [], "groups": [],
-                "vips": [], "ippools": []}
+    firewall = {"vips": [], "ippools": []}
     for path, key, mapper in (
-            ("/api/v2/cmdb/firewall/policy", "policies", _fg_firewall_policies),
-            ("/api/v2/cmdb/firewall/address", "addresses", _fg_firewall_addresses),
-            ("/api/v2/cmdb/firewall/addrgrp", "groups", _fg_firewall_addrgrps),
             ("/api/v2/cmdb/firewall/vip", "vips", _fg_firewall_vips),
             ("/api/v2/cmdb/firewall/ippool", "ippools", _fg_firewall_ippools)):
         try:
             firewall[key] = mapper(fg.get(f"{path}?vdom=root"))
         except Exception as exc:
             log("WARN", f"  firewall {key} collection failed: {exc}")
-    log("INFO", f"  firewall: {len(firewall['policies'])} policies, "
-                f"{len(firewall['addresses'])} addresses, "
-                f"{len(firewall['groups'])} groups, "
-                f"{len(firewall['vips'])} vips, "
+    log("INFO", f"  firewall: {len(firewall['vips'])} vips, "
                 f"{len(firewall['ippools'])} pools")
 
     neighbors = []

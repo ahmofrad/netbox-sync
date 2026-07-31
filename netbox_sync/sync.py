@@ -28,7 +28,8 @@ from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
 from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
                               ensure_prefix, ensure_host_ip,
                               _containing_prefix,
-                              sweep_stale_prefixes, sweep_stale_host_ips)
+                              sweep_stale_prefixes, sweep_stale_host_ips,
+                              sync_nat_ips, sweep_nat_ips)
 from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_storage_device, ensure_san_switch_device,
                                 ensure_cisco_device, ensure_fortigate_device,
@@ -384,6 +385,7 @@ def run_sync():
 
     # ── Process FortiGates ────────────────────────────────────────────────────
     live_fortigate_ips = {h["ip"] for h in found["fortigates"]}
+    nat_seen = set()
     for probe in found["fortigates"]:
         ip = probe["ip"]
         log("INFO", f"Processing FORTIGATE {ip}  ({probe.get('model')} / {probe.get('serial')})")
@@ -423,16 +425,6 @@ def run_sync():
                                           or (probe.get("serial") or "")
                                           == (ha.get("primary_serial") or "")):
                 payload["serial"] = summary["serial"]
-            # Firewall data is config-synced across the cluster — write it
-            # from whichever unit answered (full rewrite each run).
-            fw = data.get("firewall") or {}
-            payload["custom_fields"].update({
-                "firewall_policies": fw.get("policies") or [],
-                "firewall_addresses": (fw.get("addresses") or [])
-                                       + (fw.get("groups") or []),
-                "firewall_nat": (fw.get("vips") or [])
-                                 + (fw.get("ippools") or []),
-            })
             api.dcim.devices.update([payload])
         except Exception as e:
             log("ERROR", f"  FortiGate update failed for {ip}: {e}")
@@ -556,11 +548,27 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  FortiGate inventory sync failed for {ip}: {e}")
 
+        # NAT: VIPs become external IPs with nat_inside to their mapped
+        # addresses; SNAT pools become plain IPAM addresses
+        fw = data.get("firewall") or {}
+        try:
+            nat_seen.update(sync_nat_ips(fw.get("vips"), fw.get("ippools")))
+            log("INFO", f"  [OK] FortiGate {ip} — {len(fw.get('vips') or [])} vips, "
+                        f"{len(fw.get('ippools') or [])} pools -> IPAM")
+        except Exception as e:
+            log("ERROR", f"  NAT IPAM sync failed for {ip}: {e}")
+
         try:
             sync_cdp_cables(dev_id, neighbors, protocol="lldp")
             log("INFO", f"  [OK] FortiGate {ip} — {len(neighbors)} neighbors processed")
         except Exception as e:
             log("ERROR", f"  FortiGate cable sync failed for {ip}: {e}")
+
+    if found["fortigates"]:
+        try:
+            sweep_nat_ips(nat_seen)
+        except Exception as e:
+            log("ERROR", f"  NAT IP sweep failed: {e}")
 
     # ── Sweep stale marker-owned VLANs per group + legacy site VLANs ─────────
     for group_id, seen in group_vlan_seen.items():
