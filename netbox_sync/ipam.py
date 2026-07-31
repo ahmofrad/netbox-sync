@@ -45,3 +45,51 @@ def ensure_prefix(prefix_str, site_id, vlan_id, hostname, iface_name):
         return existing.id
     return api.ipam.prefixes.create(
         {"prefix": prefix_str, **payload}).id
+
+
+def _containing_prefix(ip):
+    """Longest-prefix match for a bare IP across all IPAM prefixes
+    (client-side; works on any NetBox version)."""
+    api = netbox.get_netbox()
+    try:
+        addr = ipaddress.ip_address(str(ip))
+    except ValueError:
+        return None
+    best = None
+    best_len = -1
+    for p in api.ipam.prefixes.filter():
+        try:
+            net = ipaddress.ip_network(p.prefix, strict=False)
+        except (ValueError, TypeError):
+            continue
+        if addr in net and net.prefixlen > best_len:
+            best, best_len = p, net.prefixlen
+    return best
+
+
+def ensure_host_ip(dev_id, address, iface_name, hostname, iface_label):
+    """Create/update a host address and assign it to the named interface
+    (NetBox requires assignment for primary IPs; description only touches
+    marked-or-created records — manual IPs keep theirs)."""
+    api = netbox.get_netbox()
+    bare = address.split("/")[0]
+    iface = api.dcim.interfaces.get(device_id=dev_id, name=iface_name)
+    if iface is None:
+        log("WARN", f"  host IP {address}: interface {iface_name} not found "
+                    f"on device id={dev_id} — skipped")
+        return None
+    desc = f"{IPAM_HOST_MARKER}{hostname} {iface_label}"
+    existing = list(api.ipam.ip_addresses.filter(address=bare))
+    if existing:
+        ip_id = existing[0].id
+        upd = {"id": ip_id,
+               "assigned_object_type": "dcim.interface",
+               "assigned_object_id": iface.id}
+        if (getattr(existing[0], "description", None) or "").startswith("netbox-sync:"):
+            upd["description"] = desc
+        api.ipam.ip_addresses.update([upd])
+        return ip_id
+    return api.ipam.ip_addresses.create({
+        "address": address, "status": "active", "description": desc,
+        "assigned_object_type": "dcim.interface",
+        "assigned_object_id": iface.id}).id
