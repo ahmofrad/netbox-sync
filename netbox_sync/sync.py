@@ -21,6 +21,7 @@ from netbox_sync.collectors.fortigate import (fortigate_collect,
                                               sync_fortigate_interfaces,
                                               resolve_fortigate_vlans,
                                               _fortigate_iface_mac)
+from netbox_sync.collectors.hikvision import hikvision_collect
 from netbox_sync.collectors.msa import storage_collect_inventory
 from netbox_sync.collectors.redfish import rf_collect_inventory
 from netbox_sync.collectors.ruckus import (ruckus_collect, probe_ruckus,
@@ -28,23 +29,26 @@ from netbox_sync.collectors.ruckus import (ruckus_collect, probe_ruckus,
                                            _parse_ha_map)
 from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
                                 CISCO_RANGES, FORTIGATE_RANGES, RUCKUS_RANGES,
-                                RUCKUS_HA_MAP)
+                                RUCKUS_HA_MAP, HIKVISION_RANGES)
 from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
                               ensure_prefix, ensure_host_ip,
                               _containing_prefix, _prefix_masklen,
                               sweep_stale_prefixes, sweep_stale_host_ips,
                               sync_nat_ips, sweep_nat_ips,
                               sync_nat_services, sweep_nat_services,
-                              sync_parent_prefixes, sweep_stale_parents)
+                              sync_parent_prefixes, sweep_stale_parents,
+                              sync_camera_ips, sweep_camera_ips)
 from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_storage_device, ensure_san_switch_device,
                                 ensure_cisco_device, ensure_fortigate_device,
                                 ensure_ruckus_device, ensure_ap_device,
+                                ensure_hikvision_device,
                                 ensure_primary_ip,
                                 mark_server_offline, mark_storage_offline,
                                 mark_san_offline, mark_cisco_offline,
                                 mark_fortigate_offline, mark_ap_offline,
-                                mark_ruckus_offline,
+                                mark_ruckus_offline, mark_hikvision_offline,
+                                get_or_create_inventory_role,
                                 sync_wireless_lans, sweep_wireless_lans,
                                 _check_offline,
                                 sync_inventory)
@@ -702,6 +706,75 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  Ruckus offline sweep failed: {e}")
 
+    # ── Process Hikvision NVRs ───────────────────────────────────────────────
+    # The NVR is the device; its cameras become inventory items on it. Camera
+    # management IPs are registered in IPAM as marker-owned plain addresses.
+    live_hikvision_ips = {h["ip"] for h in found["hikvision_nvrs"]}
+    seen_camera_ips = set()
+    for probe in found["hikvision_nvrs"]:
+        ip = probe["ip"]
+        log("INFO", f"Processing NVR {ip}  ({probe.get('model')} / {probe.get('serial')})")
+        try:
+            data = hikvision_collect(ip)
+        except KeyboardInterrupt: raise
+        except Exception as e:
+            log("ERROR", f"  Hikvision collection failed for {ip}: {e}"); continue
+
+        try:
+            dev_id = ensure_hikvision_device(probe)
+        except Exception as e:
+            log("ERROR", f"  ensure_hikvision_device failed for {ip}: {e}"); continue
+
+        nvr_name = (data["summary"].get("name") or probe.get("hostname") or ip)
+        try:
+            cf = {"nvr_ip": ip, "nvr_enabled": True,
+                  "nvr_model": data["summary"].get("model") or probe.get("model"),
+                  "nvr_firmware": data["summary"].get("firmware") or probe.get("firmware"),
+                  "nvr_camera_count": len(data["cameras"])}
+            api.dcim.devices.update([{"id": dev_id, "status": "active",
+                                      "custom_fields": cf}])
+        except Exception as e:
+            log("ERROR", f"  NVR update failed for {ip}: {e}")
+
+        try:
+            ensure_primary_ip(dev_id, ip, nvr_name)
+        except Exception as e:
+            log("WARN", f"  NVR primary IPv4 sync failed for {ip}: {e}")
+
+        # Cameras -> inventory items keyed by serial (fall back to channel).
+        camera_items = {}
+        for cam in data["cameras"]:
+            key = (cam.get("serial") or "").strip() or f"ch{cam.get('channel')}"
+            desc_parts = [f"Channel={cam.get('channel')}"]
+            if cam.get("ip"):       desc_parts.append(f"IP={cam['ip']}")
+            if cam.get("firmware"): desc_parts.append(f"FW={cam['firmware']}")
+            desc_parts.append(f"Status={'online' if cam.get('online') else 'offline'}")
+            camera_items[key] = {
+                "name":        (cam.get("name") or f"Camera ch{cam.get('channel')}")[:64],
+                "manufacturer": "Hikvision",
+                "part_number": cam.get("model"),
+                "serial":      (cam.get("serial") or "").strip() or None,
+                "description": " ".join(desc_parts)[:200],
+                "role":        get_or_create_inventory_role("Camera"),
+            }
+        try:
+            sync_inventory(dev_id, camera_items)
+        except Exception as e:
+            log("ERROR", f"  camera inventory sync failed for {ip}: {e}")
+
+        try:
+            seen_camera_ips |= sync_camera_ips(nvr_name, data["cameras"])
+        except Exception as e:
+            log("ERROR", f"  camera IP sync failed for {ip}: {e}")
+
+        log("INFO", f"  [OK] NVR {ip} — {len(data['cameras'])} cameras synced")
+
+    if HIKVISION_RANGES:
+        try:
+            sweep_camera_ips(seen_camera_ips)
+        except Exception as e:
+            log("ERROR", f"  camera IP sweep failed: {e}")
+
     # ── IPAM parent prefixes from SITE_IP_MAP (containers for discovered ones)
     try:
         parent_seen = sync_parent_prefixes()
@@ -754,6 +827,8 @@ def run_sync():
                    live_cisco_ips, mark_cisco_offline, "Cisco switches")
     _offline_sweep(api, bool(FORTIGATE_RANGES), "cf_fortigate_enabled", "fortigate_ip",
                    live_fortigate_ips, mark_fortigate_offline, "FortiGates")
+    _offline_sweep(api, bool(HIKVISION_RANGES), "cf_nvr_enabled", "nvr_ip",
+                   live_hikvision_ips, mark_hikvision_offline, "Hikvision NVRs")
 
     log("INFO", "Unified sync complete")
     log("INFO", "=" * 60)

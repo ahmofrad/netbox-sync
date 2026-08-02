@@ -5,12 +5,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from netbox_sync.collectors.brocade import probe_san_switch
 from netbox_sync.collectors.cisco import probe_cisco_switch
 from netbox_sync.collectors.fortigate import probe_fortigate
+from netbox_sync.collectors.hikvision import probe_hikvision
 from netbox_sync.collectors.msa import probe_storage
 from netbox_sync.collectors.redfish import probe_redfish
 from netbox_sync.collectors.ruckus import probe_ruckus
 from netbox_sync.config import (BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
                                 CISCO_RANGES, FORTIGATE_RANGES, RUCKUS_RANGES,
-                                SCAN_WORKERS, log)
+                                HIKVISION_RANGES, SCAN_WORKERS, log)
 from netbox_sync.utils import expand_ranges
 
 
@@ -31,7 +32,7 @@ def _drain_pool(ex, futures, on_hit):
 
 def scan_all():
     all_found = {"servers": [], "storage": [], "san_switches": [], "cisco_switches": [],
-                 "fortigates": [], "ruckus": []}
+                 "fortigates": [], "ruckus": [], "hikvision_nvrs": []}
 
     bmc_ips = expand_ranges(BMC_RANGES)
     if bmc_ips:
@@ -146,5 +147,24 @@ def scan_all():
             log("INFO", "No Ruckus IPs to scan (all excluded).")
     else:
         log("INFO", "Ruckus ranges not configured — skipping Ruckus scan.")
+
+    # ── Hikvision NVRs (HTTP ISAPI, opt-in family) ──────────────────────────
+    if HIKVISION_RANGES:
+        used_ips = used_ips | {h["ip"] for h in all_found["ruckus"]}
+        all_nvr_ips = expand_ranges(HIKVISION_RANGES)
+        nvr_ips = [ip for ip in all_nvr_ips if ip not in used_ips]
+        if nvr_ips:
+            log("INFO", f"Scanning {len(nvr_ips)} IPs for Hikvision NVRs (HTTP) ...")
+            ex = ThreadPoolExecutor(max_workers=SCAN_WORKERS)
+            futures = {ex.submit(probe_hikvision, ip): ip for ip in nvr_ips}
+            def _on_nvr(r):
+                log("INFO", f"  + NVR {r['ip']}  {r['model']}  s/n={r['serial']}")
+                all_found["hikvision_nvrs"].append(r)
+            _drain_pool(ex, futures, _on_nvr)
+            log("INFO", f"Hikvision scan done: {len(all_found['hikvision_nvrs'])} found.")
+        else:
+            log("INFO", "No Hikvision IPs to scan (all excluded).")
+    else:
+        log("INFO", "Hikvision ranges not configured — skipping Hikvision scan.")
 
     return all_found

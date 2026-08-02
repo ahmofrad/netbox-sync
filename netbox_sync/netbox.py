@@ -531,6 +531,56 @@ def mark_ruckus_offline(dev_id, dev_name):
         log("ERROR", f"  Could not mark ZD offline {dev_name}: {e}")
 
 
+def ensure_hikvision_device(probe):
+    """Ensure the NetBox device for a Hikvision NVR. Match by serial first,
+    then name+site+role. Cameras are NOT devices — they live as inventory
+    items on this NVR via sync_inventory()."""
+    from netbox_sync.config import HIKVISION_ROLE
+    serial = (probe.get("serial") or "").strip()
+    mfr_id = get_or_create_manufacturer("Hikvision")
+    role_id = get_or_create_role(HIKVISION_ROLE, "7b1fa2")
+    site_name = resolve_site(probe.get("hostname") or "",
+                             probe.get("reported_ip") or probe["ip"])
+    site_id = get_or_create_site(site_name)
+    dtype_id = get_or_create_device_type(probe.get("model") or "NVR", mfr_id)
+    name = (probe.get("hostname") or f"nvr-{probe['ip'].replace('.', '-')}")[:64]
+    api = get_netbox()
+    dev = None
+    if not _invalid_serial(serial):
+        dev = find_device(serial, role_name=HIKVISION_ROLE)
+    if dev is None:
+        cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
+                                             role_id=role_id))
+        dev = cands[0] if cands else None
+        if dev:
+            log("INFO", f"  Found NVR by name+site: {name} (id={dev.id})")
+    cf = {"nvr_ip": probe["ip"], "nvr_enabled": True,
+          "nvr_model": probe.get("model"),
+          "nvr_firmware": probe.get("firmware")}
+    payload = {"name": name, "status": "active", "site": site_id,
+               "device_type": dtype_id, "role": role_id,
+               "custom_fields": cf,
+               **({"serial": serial} if not _invalid_serial(serial) else {})}
+    if dev:
+        api.dcim.devices.update([{"id": dev.id, **payload}])
+        log("INFO", f"  NVR updated: {name} (id={dev.id})")
+        return dev.id
+    new = api.dcim.devices.create(payload)
+    log("INFO", f"  NVR created: {name} (id={new.id})")
+    return new.id
+
+
+def mark_hikvision_offline(dev_id, dev_name):
+    try:
+        get_netbox().dcim.devices.update([{
+            "id": dev_id, "status": "offline",
+            "custom_fields": {"nvr_enabled": False},
+        }])
+        log("WARN", f"  NVR marked offline: {dev_name} (id={dev_id})")
+    except Exception as e:
+        log("ERROR", f"  Could not mark NVR offline {dev_name}: {e}")
+
+
 _WLAN_AUTH_MAP = {"open": "open", "wpa2": "wpa-personal",
                   "802.1x": "wpa-enterprise"}
 
