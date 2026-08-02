@@ -1,0 +1,81 @@
+"""Tests for the unified scanner: family skipping and the probe pool."""
+import pytest
+
+import netbox_sync.scanner as scanner
+
+
+def _fail_probe(ip):
+    raise AssertionError(f"probe must not be called for {ip}")
+
+
+@pytest.fixture
+def no_families(monkeypatch):
+    for attr in ("BMC_RANGES", "STORAGE_RANGES", "SAN_RANGES", "CISCO_RANGES",
+                 "FORTIGATE_RANGES", "RUCKUS_RANGES"):
+        monkeypatch.setattr(scanner, attr, [])
+    for fn in ("probe_redfish", "probe_storage", "probe_san_switch",
+               "probe_cisco_switch", "probe_fortigate", "probe_ruckus"):
+        monkeypatch.setattr(scanner, fn, _fail_probe)
+
+
+def test_scan_all_skips_disabled_families(no_families):
+    found = scanner.scan_all()
+    assert found == {"servers": [], "storage": [], "san_switches": [],
+                     "cisco_switches": [], "fortigates": [], "ruckus": []}
+
+
+def test_scan_all_collects_found_devices(monkeypatch, no_families):
+    monkeypatch.setattr(scanner, "BMC_RANGES", ["192.0.2.0/30"])
+    def fake_probe(ip):
+        if ip == "192.0.2.1":
+            return {"ip": ip, "host": f"{ip}:443", "serial": "S1",
+                    "model": "HPE DL360 G10", "hostname": "srv1",
+                    "manufacturer": "HPE"}
+        return None
+    monkeypatch.setattr(scanner, "probe_redfish", fake_probe)
+
+    found = scanner.scan_all()
+    assert [s["ip"] for s in found["servers"]] == ["192.0.2.1"]
+    assert found["storage"] == []
+
+
+# ── offline sweep gating ─────────────────────────────────────────────────────
+
+import netbox_sync.sync as sync_mod
+import netbox_sync.netbox as nbx
+from tests.test_netbox_sync import FakeEndpoint, FakeRecord, _fake_api
+
+
+def test_offline_sweep_skipped_when_family_disabled(monkeypatch):
+    """A disabled family (empty ranges) must not touch its NetBox devices —
+    otherwise disabling a family would offline its fleet after
+    OFFLINE_THRESHOLD runs."""
+    devices_ep = FakeEndpoint([
+        FakeRecord(1, cf_redfish_enabled=True,
+                   custom_fields={"bmc_ip": "192.0.2.5"}),
+    ])
+    calls = []
+    monkeypatch.setattr(sync_mod, "_check_offline", lambda *a: calls.append(a))
+
+    sync_mod._offline_sweep(_fake_api(devices=devices_ep), False,
+                            "cf_redfish_enabled", "bmc_ip", set(),
+                            nbx.mark_server_offline, "Server")
+    assert calls == []
+
+
+def test_offline_sweep_processes_devices_when_enabled(monkeypatch):
+    devices_ep = FakeEndpoint([
+        FakeRecord(1, name="srv1", cf_redfish_enabled=True,
+                   custom_fields={"bmc_ip": "192.0.2.5"}),
+        FakeRecord(2, name="srv2", cf_redfish_enabled=True,
+                   custom_fields={"bmc_ip": "192.0.2.6/32"}),
+    ])
+    calls = []
+    monkeypatch.setattr(sync_mod, "_check_offline", lambda *a: calls.append(a))
+
+    sync_mod._offline_sweep(_fake_api(devices=devices_ep), True,
+                            "cf_redfish_enabled", "bmc_ip", {"192.0.2.5"},
+                            nbx.mark_server_offline, "Server")
+    # both devices examined; the /32 suffix is stripped to a bare IP
+    assert [c[0] for c in calls] == ["192.0.2.5", "192.0.2.6"]
+    assert {c[2] for c in calls} == {1, 2}   # dev ids

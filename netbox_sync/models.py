@@ -1,10 +1,11 @@
 """Device model normalization maps for the NetBox sync tool.
 
 HPE ProLiant server, HPE MSA storage and HPE B-Series (Brocade OEM) SAN
-switch model-name aliases live here so the sync script can stay
+switch model-name aliases live here so the sync collectors can stay
 product-agnostic. Import via:
 
-    from models import SERVER_MODEL_MAP, STORAGE_MODEL_MAP, SWITCH_MODEL_MAP
+    from netbox_sync.models import (SERVER_MODEL_MAP, STORAGE_MODEL_MAP,
+                                    SWITCH_MODEL_MAP, CISCO_MODEL_MAP)
 
 Keys are the raw vendor strings (lowercased) as returned by Redfish
 (servers), the MSA XML API (storage) or the Brocade CLI `switchshow`
@@ -76,4 +77,30 @@ SWITCH_MODEL_MAP = {
     "6505":                     "HPE B-series 6505",
     "6510":                     "HPE B-series 6510",
     "6520":                     "HPE B-series 6520",
+}
+
+# ── Cisco Catalyst switches ──────────────────────────────────────────────────
+# Keys: raw `show version` model string, lowercased. Cisco PIDs are nearly
+# canonical already; keep aliases for common reporting variants.
+CISCO_MODEL_MAP = {
+    "ws-c2960x-48fps-l": "Cisco WS-C2960X-48FPS-L",
+    "ws-c2960x-24ps-l":  "Cisco WS-C2960X-24PS-L",
+    "c9300-48u":         "Cisco C9300-48U",
+    "c9300-48p":         "Cisco C9300-48P",
+    "c9300-24t":         "Cisco C9300-24T",
+    "c9200l-48p-4g":     "Cisco C9200L-48P-4G",
+    "c9200l-48t-4x":     "Cisco C9200L-48T-4X",
+    "c9200-48p":         "Cisco C9200-48P",
+    "c3850-48p":         "Cisco WS-C3850-48P",
+    "ws-c3850-48p":      "Cisco WS-C3850-48P",
+}
+
+# ── FortiGate firewalls ──────────────────────────────────────────────────────
+# Keys: raw /monitor/system/status "model" string, lowercased.
+FORTIGATE_MODEL_MAP = {
+    "fortigate-60f":  "FortiGate 60F",
+    "fortigate-100f": "FortiGate 100F",
+    "fortigate-200f": "FortiGate 200F",
+    "fortigate-40f":  "FortiGate 40F",
+    "fortigate-80f":  "FortiGate 80F",
 }

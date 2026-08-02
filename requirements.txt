@@ -1,5 +1,5 @@
 requests>=2.31.0
 pynetbox>=7.3.0
-schedule>=1.2.0
 python-dotenv>=1.0.0
 paramiko>=3.4.0
+netmiko>=4.3.0
