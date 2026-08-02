@@ -108,7 +108,7 @@ A Python automation tool that automatically discovers **HPE ProLiant servers** (
 | File | Purpose |
 |------|---------|
 | `sync_all_to_netbox.py` | Thin entry point — validates config and runs the scheduler (`python sync_all_to_netbox.py` works exactly as before). |
-| `netbox_sync/` | The implementation package: `config` (.env/credentials/logging), `utils` (naming helpers, IP tools), `netbox` (NetBox API layer: CRUD, device ensure/offline, inventory sync), `collectors/` (`redfish`, `msa`, `brocade`, `cisco`, `fortigate` sessions + inventory collection), `scanner` (parallel IP probing), `sync` (the `run_sync` orchestrator). |
+| `netbox_sync/` | The implementation package: `config` (.env/credentials/logging), `utils` (naming helpers, IP tools), `netbox` (NetBox API layer: CRUD, device ensure/offline, inventory sync), `collectors/` (`redfish`, `msa`, `brocade`, `cisco`, `fortigate`, `ruckus`, `hikvision` sessions + inventory collection), `scanner` (parallel IP probing), `sync` (the `run_sync` orchestrator). |
 | `netbox_sync/collectors/cisco.py` | Cisco Catalyst collector — netmiko SSH, IOS/IOS-XE CLI parsers, CDP/LLDP cable reconciliation. |
 | `netbox_sync/collectors/fortigate.py` | FortiGate collector — REST API session + SSH extras (LLDP cables, SFP transceivers). |
 | `netbox_sync/models.py` | Server (`SERVER_MODEL_MAP`), storage (`STORAGE_MODEL_MAP`), and SAN switch (`SWITCH_MODEL_MAP`) model-name normalization maps. Maps vendor strings (e.g. `proliant dl360 gen10`) to canonical NetBox device-type names (e.g. `HPE DL360 G10`). |
@@ -186,6 +186,11 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `RUCKUS_HA_MAP` | ❌ | — | HA pairs: `vip:primary,secondary` per pair, pairs separated by `;`. Merges a pair into one cluster device. |
 | `DEFAULT_RUCKUS_ROLE` | ❌ | `Wireless Controller` | NetBox device role for controllers. |
 | `DEFAULT_AP_ROLE` | ❌ | `Access Point` | NetBox device role for APs. |
+| `HIKVISION_USER` | ❌* | — | HTTP digest username for Hikvision NVRs (required when `HIKVISION_RANGES` is set). |
+| `HIKVISION_PASS` | ❌* | — | HTTP digest password for Hikvision NVRs. |
+| `HIKVISION_PORT` | ❌ | `80` | HTTP ISAPI port for Hikvision NVRs. |
+| `HIKVISION_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for Hikvision NVRs. Empty = family disabled. |
+| `DEFAULT_HIKVISION_ROLE` | ❌ | `NVR` | NetBox device role for NVRs. |
 
 > *The shipped defaults in `netbox_sync/config.py` are **documentation-only** placeholder CIDRs (`192.0.2.0/27` = TEST-NET). Set the ranges in `.env` to your real networks — or set a range **empty** (e.g. `BMC_RANGES=`) to disable that family entirely (no scanning and no offline marking for it).
 
@@ -240,6 +245,7 @@ Inventory-item **roles** are resolved **by name** and **auto-created** on first 
 | Battery | Smart storage batteries |
 | SAS Exp | SAS expanders / FRUs |
 | SFP | SFP transceivers (SAN switches) |
+| Camera | IP cameras attached to Hikvision NVRs |
 
 > Upgrading from an older version that used hardcoded role IDs (1–12)? As long as your existing roles carry these names, they are found and reused — nothing breaks. Role IDs are DB-sequence-dependent and are no longer referenced anywhere.
 
@@ -313,7 +319,17 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 
 **HA clusters:** a FortiGate HA pair (active-passive or active-active) becomes **one NetBox device** named and serialized after the primary unit — resolvable by any unit serial, so listing both units never duplicates. Peer units are recorded in the `fortigate_ha_*` fields, and the primary IPv4 follows the primary unit (a secondary probe never repoints it).
 
-> The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` (NetBox custom-field filter syntax).
+**For Hikvision NVRs:**
+
+| Custom field | Type | Label |
+|--------------|------|-------|
+| `nvr_ip` | Text | NVR IP |
+| `nvr_enabled` | Boolean | NVR enabled |
+| `nvr_model` | Text | Model |
+| `nvr_firmware` | Text | Firmware version |
+| `nvr_camera_count` | Integer | Number of attached cameras |
+
+> The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` / `cf_nvr_enabled=True` (NetBox custom-field filter syntax).
 
 ### 3. Device roles & sites
 
@@ -393,6 +409,12 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 - Aggregate (port-channel) interfaces are imported from cmdb as NetBox `lag` interfaces; member ports link via `lag`, VLAN subinterfaces link via `parent` to their LAG/parent interface.
 - **Opt-in**: activates only when `FORTIGATE_RANGES` is set.
 - VLAN subinterfaces are **matched to the switches' existing VLANs** instead of duplicated: a vid found in exactly one broadcast domain is reused, FortiGate-only VLANs are created in a per-device group, and overlaps are disambiguated by looking the subinterface's MAC up in the switches' MAC address tables (`fnsysctl ifconfig -a` on the FortiGate, `show mac address-table address <mac>` on the switches).
+
+**NVRs (Hikvision, ISAPI over HTTP digest):**
+- Hikvision NVRs via HTTP digest auth — `GET /ISAPI/System/deviceInfo` (identity), `GET /ISAPI/ContentMgmt/InputProxy/channels` (attached cameras), `GET .../channels/status` (online state).
+- The NVR becomes a **device** with `nvr_*` custom fields (matched by serial). Its cameras become **inventory items** on the NVR (role `Camera`, keyed by serial), each with channel/IP/firmware/online in the description — not separate devices.
+- Camera management IPs are registered in **IPAM** as plain marker-owned addresses (`netbox-sync: cam <nvr> …`); records no longer reported are swept. Cameras that disappear from the NVR drop off the inventory automatically (serial-keyed reconciliation).
+- **Opt-in**: activates only when `HIKVISION_RANGES` is set.
 
 See `netbox_sync/models.py` for the full model alias maps. Add your own models there.
 
