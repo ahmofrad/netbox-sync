@@ -1,12 +1,19 @@
 # Hikvision NVR Source — Design Spec
 
-Date: 2026-08-02
+Date: 2026-08-02 (revised 2026-08-03)
 
 ## Goal
 
-Import Hikvision NVRs into NetBox as **devices**, with their connected IP cameras
-represented as **inventory items** on the parent NVR (not as separate NetBox
-devices). Camera management IPs are registered in IPAM for subnet completeness.
+Import Hikvision NVRs into NetBox as **devices**. Each connected IP camera is
+**its own NetBox device** (not an inventory item on the NVR), linked to the
+parent NVR via a `cam_nvr` custom field. Each camera's management IP is set as
+its primary IPv4.
+
+> **Revision (2026-08-03):** the original design modeled cameras as *inventory
+> items* on the NVR with marker-owned IPAM records. Per user request, cameras
+> are now first-class devices. The `sync_inventory`/`sync_camera_ips` approach
+> was replaced by `ensure_camera_device` + `ensure_primary_ip`, and the `Camera`
+> role moved from an inventory-item role to a device role.
 
 ## Verified facts
 
@@ -53,28 +60,20 @@ Follows the established collector contract (same shape as `msa.py` / `ruckus.py`
   Manufacturer `"Hikvision"`. Writes custom fields
   `nvr_ip`, `nvr_enabled`, `nvr_model`, `nvr_firmware`, `nvr_camera_count`.
 - `mark_hikvision_offline(dev_id, name)` — `status=offline`, `nvr_enabled=False`.
-- Cameras → existing shared `sync_inventory(dev_id, {serial: item})`:
-  - **Key = camera serial** when present; fall back to `ch<channel>` when the
-    NVR reports an empty serial (keeps the item stable per channel).
-  - `name` = camera `name` (e.g. `23092-GF Security`), truncated to 64 chars.
-  - `part_id` = camera `model`; `serial` = camera serial.
-  - `role` = `get_or_create_inventory_role("Camera")`.
-  - `description` = `Channel=N IP=x.x.x.x FW=... Status=online|offline` (≤200).
-  - `sync_inventory` already deletes stale serials → removed cameras drop off
-    automatically. No extra sweep needed.
+- `ensure_camera_device(cam, nvr_name)` → device id. Each camera is its own
+  device; identity is the camera serial (match order: serial → name+site+role).
+  Role from `DEFAULT_HIKVISION_CAMERA_ROLE` (default `"Camera"`). Writes
+  `cam_ip`, `cam_mac`, `cam_enabled` (online), `cam_nvr` (parent NVR name),
+  `cam_channel`, `cam_model`, `cam_serial`. The NVR API does not expose camera
+  MACs, so `cam_mac` stays empty unless supplied.
+- `mark_camera_offline(dev_id, name)` — `status=offline`, `cam_enabled=False`.
+  Cameras no longer reported by an NVR are marked offline, never deleted.
 
-## Camera IPs in IPAM — `ipam.py`
+## Camera IPs — primary IP per camera device
 
-Cameras are not device interfaces, so their IPs are plain IPAM addresses
-(marker-owned, like NAT addresses), **not** assigned to any device interface.
-
-- New marker `CAM_MARKER = "netbox-sync: cam "`.
-- `sync_camera_ips(nvr_name, cameras)` → for each camera with an `ip`, ensure a
-  plain IPAM address `<ip>/32` with description `netbox-sync: cam <nvr_name>
-  <camera name> (ch<N>)`. Reuses existing address records; only touches
-  marker-owned ones. Returns the set of bare camera IPs seen.
-- `sweep_camera_ips(seen_bare_ips)` — delete marker-owned camera IPs not seen
-  this run. Global scope (union across all NVRs).
+Each camera's management IP is set as its **primary IPv4** via the shared
+`ensure_primary_ip(dev_id, ip, name)` (on the synthetic `mgmt` interface), the
+same pattern as Ruckus APs. No separate marker-owned IPAM records are created.
 
 ## Config — `config.py`
 
@@ -83,6 +82,7 @@ Cameras are not device interfaces, so their IPs are plain IPAM addresses
 - `HIKVISION_RANGES = _parse_ranges("HIKVISION_RANGES", [])` (opt-in, disabled
   by default)
 - `DEFAULT_HIKVISION_ROLE = os.getenv("DEFAULT_HIKVISION_ROLE", "NVR")`
+- `DEFAULT_HIKVISION_CAMERA_ROLE = os.getenv("DEFAULT_HIKVISION_CAMERA_ROLE", "Camera")`
 - Validation: when `HIKVISION_RANGES` is set, require `HIKVISION_USER`/`HIKVISION_PASS`.
 
 ## Scanner — `scanner.py`
@@ -100,26 +100,29 @@ Per probe in `found["hikvision_nvrs"]`:
 2. `ensure_hikvision_device(probe)` → `dev_id`.
 3. Device CF update (`nvr_*` fields, `status=active`).
 4. `ensure_primary_ip(dev_id, ip, hostname)`.
-5. `sync_inventory(dev_id, camera_items)`.
-6. `sync_camera_ips(nvr_name, cameras)` → union seen IPs; after all NVRs,
-   `sweep_camera_ips(seen)`.
+5. Per camera: `ensure_camera_device(cam, nvr_name)` → camera device id, then
+   `ensure_primary_ip(cam_dev, cam.ip, cam.name)`. Track seen serials.
+6. Camera offline sweep: cameras under this NVR (`cf_cam_nvr`) whose serial was
+   not seen are marked offline via `mark_camera_offline`.
 7. `_offline_sweep(..., bool(HIKVISION_RANGES), "cf_nvr_enabled", "nvr_ip",
    live_ips, mark_hikvision_offline, "NVR")`.
 
 ## Non-goals
 
-- No per-camera NetBox devices or interfaces.
+- No camera interfaces beyond the synthetic `mgmt` carrier for the primary IP.
 - No camera credential management / ONVIF probing — the NVR is the sole source.
 - No RTSP/stream config, recording state, or storage sync.
 - No basic-auth fallback (digest only); no HTTPS (these NVRs serve plain HTTP).
+- No parent/child device-bay relationship (the NVR is not a chassis); the link
+  is the `cam_nvr` custom field.
 
 ## Files touched
 
 - `netbox_sync/collectors/hikvision.py` (new)
 - `netbox_sync/config.py`
 - `netbox_sync/scanner.py`
-- `netbox_sync/netbox.py` (`ensure_hikvision_device`, `mark_hikvision_offline`)
-- `netbox_sync/ipam.py` (`sync_camera_ips`, `sweep_camera_ips`, `CAM_MARKER`)
-- `netbox_sync/sync.py` (processing block + offline sweep)
-- `.env.example`, `README.md` (config table + custom-field/inventory-role rows)
+- `netbox_sync/netbox.py` (`ensure_hikvision_device`, `mark_hikvision_offline`,
+  `ensure_camera_device`, `mark_camera_offline`)
+- `netbox_sync/sync.py` (processing block + camera/NVR offline sweeps)
+- `.env.example`, `README.md` (config table + custom-field rows)
 - `tests/` (parsers + ensure/sync logic)

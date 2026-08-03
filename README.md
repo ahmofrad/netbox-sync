@@ -191,6 +191,7 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `HIKVISION_PORT` | ❌ | `80` | HTTP ISAPI port for Hikvision NVRs. |
 | `HIKVISION_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for Hikvision NVRs. Empty = family disabled. |
 | `DEFAULT_HIKVISION_ROLE` | ❌ | `NVR` | NetBox device role for NVRs. |
+| `DEFAULT_HIKVISION_CAMERA_ROLE` | ❌ | `Camera` | NetBox device role for cameras. |
 
 > *The shipped defaults in `netbox_sync/config.py` are **documentation-only** placeholder CIDRs (`192.0.2.0/27` = TEST-NET). Set the ranges in `.env` to your real networks — or set a range **empty** (e.g. `BMC_RANGES=`) to disable that family entirely (no scanning and no offline marking for it).
 
@@ -245,7 +246,6 @@ Inventory-item **roles** are resolved **by name** and **auto-created** on first 
 | Battery | Smart storage batteries |
 | SAS Exp | SAS expanders / FRUs |
 | SFP | SFP transceivers (SAN switches) |
-| Camera | IP cameras attached to Hikvision NVRs |
 
 > Upgrading from an older version that used hardcoded role IDs (1–12)? As long as your existing roles carry these names, they are found and reused — nothing breaks. Role IDs are DB-sequence-dependent and are no longer referenced anywhere.
 
@@ -328,6 +328,18 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 | `nvr_model` | Text | Model |
 | `nvr_firmware` | Text | Firmware version |
 | `nvr_camera_count` | Integer | Number of attached cameras |
+
+**For Hikvision cameras (each camera is its own device):**
+
+| Custom field | Type | Label |
+|--------------|------|-------|
+| `cam_ip` | Text | Camera IP |
+| `cam_mac` | Text | Camera MAC (if known) |
+| `cam_enabled` | Boolean | Camera enabled (online) |
+| `cam_nvr` | Text | Parent NVR name |
+| `cam_channel` | Integer | NVR channel number |
+| `cam_model` | Text | Model |
+| `cam_serial` | Text | Camera serial |
 
 > The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` / `cf_nvr_enabled=True` (NetBox custom-field filter syntax).
 
@@ -412,8 +424,8 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 
 **NVRs (Hikvision, ISAPI over HTTP digest):**
 - Hikvision NVRs via HTTP digest auth — `GET /ISAPI/System/deviceInfo` (identity), `GET /ISAPI/ContentMgmt/InputProxy/channels` (attached cameras), `GET .../channels/status` (online state).
-- The NVR becomes a **device** with `nvr_*` custom fields (matched by serial). Its cameras become **inventory items** on the NVR (role `Camera`, keyed by serial), each with channel/IP/firmware/online in the description — not separate devices.
-- Camera management IPs are registered in **IPAM** as plain marker-owned addresses (`netbox-sync: cam <nvr> …`); records no longer reported are swept. Cameras that disappear from the NVR drop off the inventory automatically (serial-keyed reconciliation).
+- The NVR becomes a **device** with `nvr_*` custom fields (matched by serial). Each camera becomes **its own device** (role `Camera`, serial is the identity) with `cam_*` custom fields; the parent NVR is recorded in `cam_nvr`. Each camera's management IP is set as its **primary IPv4** (on a synthetic `mgmt` interface).
+- The NVR does not expose camera MAC addresses (and cameras aren't directly reachable), so `cam_mac` is left empty unless a future collector supplies one. Cameras no longer reported by an NVR are marked **offline**, never deleted.
 - **Opt-in**: activates only when `HIKVISION_RANGES` is set.
 
 See `netbox_sync/models.py` for the full model alias maps. Add your own models there.

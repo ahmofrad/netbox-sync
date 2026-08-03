@@ -12,7 +12,6 @@ from netbox_sync.config import log, SITE_IP_MAP
 IPAM_PREFIX_MARKER = "netbox-sync: last seen "
 IPAM_HOST_MARKER = "netbox-sync: if "
 NAT_MARKER = "netbox-sync: nat "
-CAM_MARKER = "netbox-sync: cam "
 
 
 def _nat_desc(entry):
@@ -395,36 +394,3 @@ def sweep_stale_host_ips(dev_id, seen_addresses):
                 log("INFO", f"  host IP {ip.address} (device {dev_id}) deleted — no longer seen")
             except Exception as exc:
                 log("WARN", f"  could not delete host IP {ip.address}: {exc}")
-
-
-def sync_camera_ips(nvr_name, cameras):
-    """Register camera management IPs in IPAM as plain (unassigned) addresses.
-    Cameras are inventory items on the NVR, not devices, so their IPs are not
-    linked to any interface — they're marker-owned records for subnet
-    completeness. Returns the set of bare camera IPs seen this run."""
-    seen = set()
-    for cam in cameras or []:
-        bare = (cam.get("ip") or "").strip()
-        if not bare:
-            continue
-        seen.add(bare)
-        desc = (f"{CAM_MARKER}{nvr_name} {cam.get('name') or ''} "
-                f"(ch{cam.get('channel')})").strip()[:200]
-        _ensure_ipam_address(f"{bare}/32", desc)
-    return seen
-
-
-def sweep_camera_ips(seen_bare_ips):
-    """Delete marker-owned camera IPs not seen this run. Global scope — the
-    caller passes the union of all NVRs' seen camera IPs."""
-    api = netbox.get_netbox()
-    for ip in list(api.ipam.ip_addresses.filter()):
-        desc = getattr(ip, "description", None) or ""
-        if not desc.startswith(CAM_MARKER):
-            continue
-        if str(ip.address).split("/")[0] not in seen_bare_ips:
-            try:
-                ip.delete()
-                log("INFO", f"  camera IP {ip.address} deleted — no longer seen")
-            except Exception as exc:
-                log("WARN", f"  could not delete camera IP {ip.address}: {exc}")

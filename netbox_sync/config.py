@@ -124,6 +124,7 @@ RUCKUS_ROLE        = os.getenv("DEFAULT_RUCKUS_ROLE", "Wireless Controller")
 AP_ROLE            = os.getenv("DEFAULT_AP_ROLE", "Access Point")
 HIKVISION_PORT     = int(os.getenv("HIKVISION_PORT", "80"))
 HIKVISION_ROLE     = os.getenv("DEFAULT_HIKVISION_ROLE", "NVR")
+HIKVISION_CAMERA_ROLE = os.getenv("DEFAULT_HIKVISION_CAMERA_ROLE", "Camera")
 FORTIGATE_TOKEN_FILE = os.getenv(
     "FORTIGATE_TOKEN_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fortigate_tokens.txt"))

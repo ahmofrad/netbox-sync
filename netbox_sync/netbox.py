@@ -581,6 +581,64 @@ def mark_hikvision_offline(dev_id, dev_name):
         log("ERROR", f"  Could not mark NVR offline {dev_name}: {e}")
 
 
+def ensure_camera_device(cam, nvr_name, role_name=None):
+    """Ensure a NetBox device for a Hikvision camera. Cameras are real devices
+    (not inventory items); identity is the camera serial. The parent NVR is
+    recorded in the cam_nvr custom field. MAC is not exposed by the NVR API, so
+    cam_mac is left empty unless the collector later supplies one."""
+    from netbox_sync.config import HIKVISION_CAMERA_ROLE
+    serial = (cam.get("serial") or "").strip()
+    role = role_name or HIKVISION_CAMERA_ROLE
+    mfr_id = get_or_create_manufacturer("Hikvision")
+    role_id = get_or_create_role(role, "4a90d9")
+    site_name = resolve_site(cam.get("name") or "", cam.get("ip") or "")
+    site_id = get_or_create_site(site_name)
+    dtype_id = get_or_create_device_type(cam.get("model") or "Camera", mfr_id)
+    name = (cam.get("name") or f"camera-ch{cam.get('channel')}")[:64]
+    api = get_netbox()
+    dev = None
+    if not _invalid_serial(serial):
+        dev = find_device(serial, role_name=role)
+    if dev is None:
+        cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
+                                             role_id=role_id))
+        dev = cands[0] if cands else None
+        if dev:
+            log("INFO", f"  Found camera by name+site: {name} (id={dev.id})")
+    cf = {"cam_ip": cam.get("ip"), "cam_enabled": bool(cam.get("online")),
+          "cam_nvr": nvr_name, "cam_model": cam.get("model")}
+    if serial:
+        cf["cam_serial"] = serial
+    ch = cam.get("channel")
+    try:
+        cf["cam_channel"] = int(ch)
+    except (TypeError, ValueError):
+        pass
+    if cam.get("mac"):
+        cf["cam_mac"] = cam["mac"]
+    payload = {"name": name, "status": "active", "site": site_id,
+               "device_type": dtype_id, "role": role_id,
+               "custom_fields": cf,
+               **({"serial": serial} if not _invalid_serial(serial) else {})}
+    if dev:
+        api.dcim.devices.update([{"id": dev.id, **payload}])
+        return dev.id
+    new = api.dcim.devices.create(payload)
+    log("INFO", f"  camera created: {name} (id={new.id})")
+    return new.id
+
+
+def mark_camera_offline(dev_id, dev_name):
+    try:
+        get_netbox().dcim.devices.update([{
+            "id": dev_id, "status": "offline",
+            "custom_fields": {"cam_enabled": False},
+        }])
+        log("WARN", f"  camera marked offline: {dev_name} (id={dev_id})")
+    except Exception as e:
+        log("ERROR", f"  Could not mark camera offline {dev_name}: {e}")
+
+
 _WLAN_AUTH_MAP = {"open": "open", "wpa2": "wpa-personal",
                   "802.1x": "wpa-enterprise"}
 

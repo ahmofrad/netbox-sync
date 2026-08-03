@@ -36,19 +36,18 @@ from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
                               sweep_stale_prefixes, sweep_stale_host_ips,
                               sync_nat_ips, sweep_nat_ips,
                               sync_nat_services, sweep_nat_services,
-                              sync_parent_prefixes, sweep_stale_parents,
-                              sync_camera_ips, sweep_camera_ips)
+                              sync_parent_prefixes, sweep_stale_parents)
 from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_storage_device, ensure_san_switch_device,
                                 ensure_cisco_device, ensure_fortigate_device,
                                 ensure_ruckus_device, ensure_ap_device,
-                                ensure_hikvision_device,
+                                ensure_hikvision_device, ensure_camera_device,
                                 ensure_primary_ip,
                                 mark_server_offline, mark_storage_offline,
                                 mark_san_offline, mark_cisco_offline,
                                 mark_fortigate_offline, mark_ap_offline,
                                 mark_ruckus_offline, mark_hikvision_offline,
-                                get_or_create_inventory_role,
+                                mark_camera_offline,
                                 sync_wireless_lans, sweep_wireless_lans,
                                 _check_offline,
                                 sync_inventory)
@@ -707,10 +706,11 @@ def run_sync():
             log("ERROR", f"  Ruckus offline sweep failed: {e}")
 
     # ── Process Hikvision NVRs ───────────────────────────────────────────────
-    # The NVR is the device; its cameras become inventory items on it. Camera
-    # management IPs are registered in IPAM as marker-owned plain addresses.
+    # The NVR is the device; each camera becomes its own device (serial is the
+    # identity) with the parent NVR recorded in cam_nvr. Camera IPs are set as
+    # primary IPs on the camera device, not separate IPAM records.
     live_hikvision_ips = {h["ip"] for h in found["hikvision_nvrs"]}
-    seen_camera_ips = set()
+    seen_camera_serials = set()
     for probe in found["hikvision_nvrs"]:
         ip = probe["ip"]
         log("INFO", f"Processing NVR {ip}  ({probe.get('model')} / {probe.get('serial')})")
@@ -741,39 +741,35 @@ def run_sync():
         except Exception as e:
             log("WARN", f"  NVR primary IPv4 sync failed for {ip}: {e}")
 
-        # Cameras -> inventory items keyed by serial (fall back to channel).
-        camera_items = {}
+        # Cameras -> separate devices, linked to the NVR via cam_nvr.
         for cam in data["cameras"]:
-            key = (cam.get("serial") or "").strip() or f"ch{cam.get('channel')}"
-            desc_parts = [f"Channel={cam.get('channel')}"]
-            if cam.get("ip"):       desc_parts.append(f"IP={cam['ip']}")
-            if cam.get("firmware"): desc_parts.append(f"FW={cam['firmware']}")
-            desc_parts.append(f"Status={'online' if cam.get('online') else 'offline'}")
-            camera_items[key] = {
-                "name":        (cam.get("name") or f"Camera ch{cam.get('channel')}")[:64],
-                "manufacturer": "Hikvision",
-                "part_number": cam.get("model"),
-                "serial":      (cam.get("serial") or "").strip() or None,
-                "description": " ".join(desc_parts)[:200],
-                "role":        get_or_create_inventory_role("Camera"),
-            }
-        try:
-            sync_inventory(dev_id, camera_items)
-        except Exception as e:
-            log("ERROR", f"  camera inventory sync failed for {ip}: {e}")
+            try:
+                cam_dev = ensure_camera_device(cam, nvr_name)
+                serial = (cam.get("serial") or "").strip()
+                if serial:
+                    seen_camera_serials.add(serial)
+                if cam.get("ip"):
+                    try:
+                        ensure_primary_ip(cam_dev, cam["ip"], cam.get("name"))
+                    except Exception as e:
+                        log("WARN", f"  camera {cam.get('name')} primary IP failed: {e}")
+            except Exception as e:
+                log("ERROR", f"  camera sync failed for ch{cam.get('channel')}: {e}")
 
+        # Cameras no longer reported by this NVR -> offline (never deleted).
         try:
-            seen_camera_ips |= sync_camera_ips(nvr_name, data["cameras"])
+            for d in list(api.dcim.devices.filter(cf_cam_nvr=nvr_name,
+                                                  cf_cam_enabled=True)):
+                serial = (d.custom_fields or {}).get("cam_serial") or ""
+                # fall back to the device serial field when cam_serial unset
+                if not serial:
+                    serial = (d.serial or "").strip()
+                if serial and serial not in seen_camera_serials:
+                    mark_camera_offline(d.id, d.name)
         except Exception as e:
-            log("ERROR", f"  camera IP sync failed for {ip}: {e}")
+            log("ERROR", f"  camera offline sweep failed for {ip}: {e}")
 
         log("INFO", f"  [OK] NVR {ip} — {len(data['cameras'])} cameras synced")
-
-    if HIKVISION_RANGES:
-        try:
-            sweep_camera_ips(seen_camera_ips)
-        except Exception as e:
-            log("ERROR", f"  camera IP sweep failed: {e}")
 
     # ── IPAM parent prefixes from SITE_IP_MAP (containers for discovered ones)
     try:
