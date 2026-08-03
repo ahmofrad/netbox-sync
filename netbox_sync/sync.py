@@ -10,6 +10,8 @@ from netbox_sync.collectors.cisco import (cisco_collect_inventory,
                                           sweep_stale_vlans,
                                           sweep_legacy_site_vlans,
                                           sync_cdp_cables,
+                                          sync_camera_cable,
+                                          build_mac_map,
                                           _site_vlan_index,
                                           _mac_to_cisco,
                                           _cisco_mac_lookup,
@@ -42,6 +44,7 @@ from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_cisco_device, ensure_fortigate_device,
                                 ensure_ruckus_device, ensure_ap_device,
                                 ensure_hikvision_device, ensure_camera_device,
+                                ensure_camera_interface,
                                 ensure_primary_ip,
                                 mark_server_offline, mark_storage_offline,
                                 mark_san_offline, mark_cisco_offline,
@@ -394,6 +397,15 @@ def run_sync():
             log("INFO", f"  [OK] Cisco {ip} — {len(neighbors)} neighbors processed")
         except Exception as e:
             log("ERROR", f"  Cisco cable sync failed for {ip}: {e}")
+
+    # MAC -> switch-port map for camera cabling. Empty when no Cisco
+    # switches were scanned (family disabled) — cabling then no-ops.
+    mac_map = build_mac_map(collected)
+    switch_by_ip = {p["ip"]: {"dev_id": d, "name": p.get("hostname") or p["ip"]}
+                    for p, d, _ in collected}
+    if mac_map:
+        log("INFO", f"  camera cabling: MAC map holds {len(mac_map)} entries "
+                    f"from {len(collected)} switch(es)")
 
     # ── Process FortiGates ────────────────────────────────────────────────────
     live_fortigate_ips = {h["ip"] for h in found["fortigates"]}
@@ -753,6 +765,18 @@ def run_sync():
                         ensure_primary_ip(cam_dev, cam["ip"], cam.get("name"))
                     except Exception as e:
                         log("WARN", f"  camera {cam.get('name')} primary IP failed: {e}")
+                try:
+                    cam_iface = ensure_camera_interface(
+                        cam_dev, bool(cam.get("online")))
+                except Exception as e:
+                    cam_iface = None
+                    log("WARN", f"  camera {cam.get('name')} interface sync failed: {e}")
+                if cam_iface and cam.get("mac") and mac_map:
+                    try:
+                        sync_camera_cable(cam_dev, cam.get("name"), cam_iface,
+                                          cam["mac"], mac_map, switch_by_ip)
+                    except Exception as e:
+                        log("WARN", f"  camera {cam.get('name')} cable sync failed: {e}")
             except Exception as e:
                 log("ERROR", f"  camera sync failed for ch{cam.get('channel')}: {e}")
 
