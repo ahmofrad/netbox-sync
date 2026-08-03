@@ -21,7 +21,8 @@ def no_families(monkeypatch):
 def test_scan_all_skips_disabled_families(no_families):
     found = scanner.scan_all()
     assert found == {"servers": [], "storage": [], "san_switches": [],
-                     "cisco_switches": [], "fortigates": [], "ruckus": []}
+                     "cisco_switches": [], "fortigates": [], "ruckus": [],
+                     "hikvision_nvrs": []}
 
 
 def test_scan_all_collects_found_devices(monkeypatch, no_families):
