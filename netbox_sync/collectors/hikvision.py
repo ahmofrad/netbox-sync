@@ -61,7 +61,8 @@ def _child_text(elem, tag):
 
 
 def _parse_device_info(xml_text):
-    """`GET /ISAPI/System/deviceInfo` -> NVR identity dict."""
+    """`GET /ISAPI/System/deviceInfo` -> NVR identity dict. Also used for the
+    per-channel proxied camera deviceInfo (which carries the camera MAC)."""
     root = _root(xml_text)
     return {
         "name":        _child_text(root, "deviceName"),
@@ -70,6 +71,7 @@ def _parse_device_info(xml_text):
         "mac":         _child_text(root, "macAddress"),
         "firmware":    _child_text(root, "firmwareVersion"),
         "device_type": _child_text(root, "deviceType"),
+        "channel":     _child_text(root, "channelID"),
     }
 
 
@@ -139,7 +141,9 @@ def probe_hikvision(ip, retries=2, retry_delay=3):
 
 
 def hikvision_collect(ip):
-    """Full collection: NVR identity + camera list with online status."""
+    """Full collection: NVR identity + camera list with online status and MAC.
+    Camera MACs are not in the channel list — each camera's MAC is fetched from
+    the NVR-proxied `/ISAPI/ContentMgmt/InputProxy/channels/<id>/deviceInfo`."""
     sess = HikvisionSession(ip)
     try:
         info = _parse_device_info(sess.get("/ISAPI/System/deviceInfo"))
@@ -153,8 +157,22 @@ def hikvision_collect(ip):
             status = {}
         for cam in cameras:
             cam["online"] = status.get(cam["channel"], False)
+            cam["mac"] = None
+            if cam.get("channel"):
+                try:
+                    ci = _parse_device_info(sess.get(
+                        f"/ISAPI/ContentMgmt/InputProxy/channels/"
+                        f"{cam['channel']}/deviceInfo"))
+                    cam["mac"] = ci.get("mac")
+                    # the proxied deviceInfo is authoritative for model/serial/fw
+                    cam["model"] = ci.get("model") or cam.get("model")
+                    cam["serial"] = ci.get("serial") or cam.get("serial")
+                    cam["firmware"] = ci.get("firmware") or cam.get("firmware")
+                except Exception as exc:
+                    log("WARN", f"  camera ch{cam['channel']} deviceInfo failed: {exc}")
         log("INFO", f"  hikvision: {len(cameras)} cameras "
-                    f"({sum(1 for c in cameras if c['online'])} online)")
+                    f"({sum(1 for c in cameras if c['online'])} online, "
+                    f"{sum(1 for c in cameras if c.get('mac'))} with MAC)")
         return {
             "summary": {
                 "name": info.get("name"), "model": info.get("model"),

@@ -425,7 +425,7 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 **NVRs (Hikvision, ISAPI over HTTP digest):**
 - Hikvision NVRs via HTTP digest auth — `GET /ISAPI/System/deviceInfo` (identity), `GET /ISAPI/ContentMgmt/InputProxy/channels` (attached cameras), `GET .../channels/status` (online state).
 - The NVR becomes a **device** with `nvr_*` custom fields (matched by serial). Each camera becomes **its own device** (role `Camera`, serial is the identity) with `cam_*` custom fields; the parent NVR is recorded in `cam_nvr`. Each camera's management IP is set as its **primary IPv4** (on a synthetic `mgmt` interface).
-- The NVR does not expose camera MAC addresses (and cameras aren't directly reachable), so `cam_mac` is left empty unless a future collector supplies one. Cameras no longer reported by an NVR are marked **offline**, never deleted.
+- Camera MACs are collected per channel via the NVR-proxied `.../InputProxy/channels/<id>/deviceInfo` endpoint and stored in `cam_mac` — they feed the camera→switch cabling described below. Cameras no longer reported by an NVR are marked **offline**, never deleted.
 - **Opt-in**: activates only when `HIKVISION_RANGES` is set.
 
 ### Camera → switch cabling
