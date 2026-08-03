@@ -1703,3 +1703,33 @@ def test_interface_syncs_preserve_mgmt_interfaces(monkeypatch):
             sync_fn(7, [port], [])
         assert 1 not in ifaces_ep.deleted_ids   # mgmt preserved
         assert 2 in ifaces_ep.deleted_ids       # stale removed
+
+# ── Camera interface + camera→switch cabling ────────────────────────────────
+
+def test_camera_interface_created_when_missing(monkeypatch):
+    ifaces = FakeEndpoint()
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(interfaces=ifaces))
+
+    iface_id = nbx.ensure_camera_interface(100, online=False)
+
+    assert len(ifaces.created) == 1
+    payload = ifaces.created[0]
+    assert payload["device"] == 100
+    assert payload["name"] == "eth0"
+    assert payload["type"] == "1000base-t"
+    assert payload["enabled"] is False
+    assert payload["description"] == "netbox-sync: camera LAN"
+    assert iface_id is not None
+
+
+def test_camera_interface_refreshes_enabled_only_on_drift(monkeypatch):
+    existing = FakeRecord(11, name="eth0", device_id=100, enabled=True)
+    ifaces = FakeEndpoint([existing])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(interfaces=ifaces))
+
+    assert nbx.ensure_camera_interface(100, online=True) == 11
+    assert ifaces.update_calls == 0          # already in sync -> no write
+
+    assert nbx.ensure_camera_interface(100, online=False) == 11
+    assert ifaces.updated == [{"id": 11, "enabled": False}]
+    assert ifaces.created == []

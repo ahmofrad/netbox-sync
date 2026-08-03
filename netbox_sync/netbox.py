@@ -628,6 +628,26 @@ def ensure_camera_device(cam, nvr_name, role_name=None):
     return new.id
 
 
+CAMERA_IFACE_NAME = "eth0"
+
+
+def ensure_camera_interface(dev_id, online=True):
+    """Get-or-create the camera's single LAN interface — the cable
+    termination point for camera<->switch cabling. Only `enabled` is
+    refreshed on existing interfaces."""
+    api = get_netbox()
+    existing = api.dcim.interfaces.get(device_id=dev_id, name=CAMERA_IFACE_NAME)
+    if existing:
+        if bool(getattr(existing, "enabled", True)) != bool(online):
+            api.dcim.interfaces.update([{"id": existing.id,
+                                         "enabled": bool(online)}])
+        return existing.id
+    return api.dcim.interfaces.create({
+        "device": dev_id, "name": CAMERA_IFACE_NAME, "type": "1000base-t",
+        "enabled": bool(online), "mgmt_only": False,
+        "description": "netbox-sync: camera LAN"}).id
+
+
 def mark_camera_offline(dev_id, dev_name):
     try:
         get_netbox().dcim.devices.update([{
