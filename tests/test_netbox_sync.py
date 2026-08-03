@@ -1844,3 +1844,40 @@ def test_camera_cable_skips_when_switch_iface_missing(monkeypatch):
                             _CAM_MAC_MAP, _CAM_SWITCHES)
 
     assert api.dcim.cables.created == []
+
+
+def test_cdp_sweep_preserves_mac_table_cables(monkeypatch):
+    """Camera cables (netbox-sync: mac-table ...) share the CABLE_MARKER
+    prefix; the CDP reconciler must never sweep or adopt them."""
+    import netbox_sync.collectors.cisco as cisco
+    cam_cable = FakeRecord(10, device_id=7,
+                           description="netbox-sync: mac-table eth0 <-> SW1 Gi1/0/5",
+                           a_terminations=[{"object_type": "dcim.interface", "object_id": 99}],
+                           b_terminations=[{"object_type": "dcim.interface", "object_id": 55}])
+    api = _cisco_cable_api([_LOCAL_IFACE], _PEER, [_PEER_IFACE], [cam_cable])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sync_cdp_cables(7, _NEIGHBORS)
+
+    assert api.dcim.cables.deleted_ids == []
+    assert 10 not in {u["id"] for u in api.dcim.cables.updated}
+
+
+def test_camera_cable_move_blocked_by_manual_cable(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    marked = FakeRecord(9, device_id=100,
+                        description="netbox-sync: mac-table eth0 <-> SW1 Gi1/0/5",
+                        a_terminations=[{"object_type": "dcim.interface", "object_id": 11}],
+                        b_terminations=[{"object_type": "dcim.interface", "object_id": 55}])
+    manual = FakeRecord(8, device_id=100, description="manual doc",
+                        a_terminations=[{"object_type": "dcim.interface", "object_id": 11}],
+                        b_terminations=[{"object_type": "dcim.interface", "object_id": 88}])
+    api = _cam_cable_api([_SW_IFACE, _SW_IFACE2], [marked, manual])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+    moved_map = {"b4:0b:44:12:ab:cd": ("10.0.0.1", "Gi1/0/9", 10)}
+
+    cisco.sync_camera_cable(100, "CAM1", 11, "b4:0b:44:12:ab:cd",
+                            moved_map, _CAM_SWITCHES)
+
+    assert api.dcim.cables.created == []
+    assert api.dcim.cables.updated == []      # move blocked by the manual cable

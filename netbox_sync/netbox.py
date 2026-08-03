@@ -642,10 +642,13 @@ def ensure_camera_interface(dev_id, online=True):
             api.dcim.interfaces.update([{"id": existing.id,
                                          "enabled": bool(online)}])
         return existing.id
-    return api.dcim.interfaces.create({
+    new = api.dcim.interfaces.create({
         "device": dev_id, "name": CAMERA_IFACE_NAME, "type": "1000base-t",
         "enabled": bool(online), "mgmt_only": False,
-        "description": "netbox-sync: camera LAN"}).id
+        "description": "netbox-sync: camera LAN"})
+    log("INFO", f"  camera interface created: {CAMERA_IFACE_NAME} "
+                f"(device id={dev_id})")
+    return new.id
 
 
 def mark_camera_offline(dev_id, dev_name):

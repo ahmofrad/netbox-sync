@@ -229,7 +229,7 @@ def _parse_mac_table_entry(text):
             mac = re.sub(r'[^0-9a-fA-F]', '', m.group(2)).lower()
             rows.append({"vid": int(m.group(1)),
                          "mac": ":".join(mac[i:i+2] for i in range(0, 12, 2)),
-                          "port": m.group(3)})
+                         "port": m.group(3)})
     return rows
 
 def _parse_mac_table(text):
@@ -597,27 +597,37 @@ def _cisco_mac_lookup(ip, cisco_mac):
 def build_mac_map(collected):
     """Build {mac: (switch_ip, port, vid)} from all switches' MAC tables.
 
-    `collected` is the Cisco pass list of (probe, dev_id, data). Ports that
-    carry a CDP/LLDP neighbor (inter-switch links) are skipped: a MAC seen
-    there belongs to a downstream switch, which reports it on a real access
-    port. CDP/LLDP uses long interface names, MAC tables short ones — both
-    sides are normalized through _short_intf. On duplicate MACs the first
-    switch in collection order wins."""
+    `collected` is the Cisco pass list of (probe, dev_id, data). Only access
+    ports (numeric VLAN in the interfaces-status data) are accepted, and
+    ports that carry a CDP/LLDP neighbor are skipped: a camera MAC seen on
+    a trunk or port-channel belongs to a downstream switch, which reports
+    it on a real access port. CDP/LLDP uses long interface names, MAC tables
+    short ones — both sides are normalized through _short_intf. On
+    duplicate MACs the first switch in collection order wins."""
     mac_map = {}
     for probe, _dev_id, data in collected:
         uplinks = {_short_intf(n.get("local_intf"))
                    for n in (data.get("neighbors") or [])}
+        # Only access ports (numeric VLAN column in `show interfaces status`)
+        # may terminate a camera cable: this excludes trunks, routed ports
+        # and port-channels — MACs learned over a LAG uplink are reported on
+        # the Po interface, which never appears in CDP/LLDP neighbor lists.
+        access_ports = {p["port"] for p in (data.get("ports") or [])
+                        if (p.get("vlan") or "").strip().isdigit()}
         for row in (data.get("mac_table") or []):
             port = row.get("port")
             if _short_intf(port) in uplinks:
+                continue
+            if port not in access_ports:
                 continue
             mac = row.get("mac")
             if not mac:
                 continue
             if mac in mac_map:
-                log("WARN", f"  mac {mac} seen on {mac_map[mac][0]}:"
-                            f"{mac_map[mac][1]} and {probe['ip']}:{port}"
-                            " — keeping the first")
+                if mac_map[mac][:2] != (probe["ip"], port):
+                    log("WARN", f"  mac {mac} seen on {mac_map[mac][0]}:"
+                                f"{mac_map[mac][1]} and {probe['ip']}:{port}"
+                                " — keeping the first")
                 continue
             mac_map[mac] = (probe["ip"], port, row.get("vid"))
     return mac_map
@@ -794,6 +804,10 @@ def _sweep_stale_groups(site_id, fed_group_ids, key_by_name):
 # managed (refreshed/deleted) by the sync. Manual cabling is never touched.
 CABLE_MARKER = "netbox-sync:"
 
+# Sub-marker for camera<->switch cables: owned solely by sync_camera_cable —
+# the CDP/LLDP reconciler must never sweep, adopt, or create over them.
+MAC_TABLE_CABLE_MARKER = f"{CABLE_MARKER} mac-table"
+
 def _cable_iface_ids(cable):
     for t in (getattr(cable, "a_terminations", None) or []) + \
              (getattr(cable, "b_terminations", None) or []):
@@ -813,10 +827,15 @@ def sync_cdp_cables(dev_id, neighbors, protocol="cdp"):
     local_ifaces = {str(i.name): i
                     for i in api.dcim.interfaces.filter(device_id=dev_id)}
     existing_cables = list(api.dcim.cables.filter(device_id=dev_id))
-    marked = [c for c in existing_cables
-              if (c.description or "").startswith(CABLE_MARKER)]
-    unmarked = [c for c in existing_cables
-                if not (c.description or "").startswith(CABLE_MARKER)]
+    marked, unmarked = [], []
+    for c in existing_cables:
+        desc = c.description or ""
+        if desc.startswith(MAC_TABLE_CABLE_MARKER):
+            unmarked.append(c)   # camera cables: protected, never CDP-managed
+        elif desc.startswith(CABLE_MARKER):
+            marked.append(c)
+        else:
+            unmarked.append(c)   # manual cables
 
     marked_by_iface = {}
     for c in marked:
@@ -912,29 +931,38 @@ def sync_camera_cable(cam_dev_id, cam_name, cam_iface_id, mac, mac_map,
                     f"{sw['name']} — skipping cable")
         return
 
-    desc = (f"{CABLE_MARKER} mac-table {netbox.CAMERA_IFACE_NAME} <-> "
+    desc = (f"{MAC_TABLE_CABLE_MARKER} {netbox.CAMERA_IFACE_NAME} <-> "
             f"{sw['name']} {port}")
     term_a = [{"object_type": "dcim.interface", "object_id": cam_iface_id}]
     term_b = [{"object_type": "dcim.interface", "object_id": sw_iface.id}]
 
     cables = list(api.dcim.cables.filter(device_id=cam_dev_id))
     marked = [c for c in cables
-              if (c.description or "").startswith(CABLE_MARKER)]
+              if (c.description or "").startswith(MAC_TABLE_CABLE_MARKER)]
     unmarked = [c for c in cables
-                if not (c.description or "").startswith(CABLE_MARKER)]
+                if not (c.description or "").startswith(MAC_TABLE_CABLE_MARKER)]
     mine = next((c for c in marked
                  if cam_iface_id in set(_cable_iface_ids(c))), None)
 
     if mine:
-        if set(_cable_iface_ids(mine)) == {cam_iface_id, sw_iface.id}:
-            api.dcim.cables.update([{"id": mine.id, "description": desc}])
-            return
-        api.dcim.cables.update([{"id": mine.id,
-                                 "a_terminations": term_a,
-                                 "b_terminations": term_b,
-                                 "description": desc}])
-        log("INFO", f"  camera {cam_name}: cable moved to "
-                    f"{sw['name']} {port}")
+        try:
+            if set(_cable_iface_ids(mine)) == {cam_iface_id, sw_iface.id}:
+                api.dcim.cables.update([{"id": mine.id, "description": desc}])
+                return
+            if any(cam_iface_id in set(_cable_iface_ids(c))
+                   or sw_iface.id in set(_cable_iface_ids(c))
+                   for c in unmarked):
+                log("DEBUG", f"  camera {cam_name}: manual cable blocks the "
+                             f"move to {sw['name']} {port}, leaving untouched")
+                return
+            api.dcim.cables.update([{"id": mine.id,
+                                     "a_terminations": term_a,
+                                     "b_terminations": term_b,
+                                     "description": desc}])
+            log("INFO", f"  camera {cam_name}: cable moved to "
+                        f"{sw['name']} {port}")
+        except Exception as exc:
+            log("WARN", f"  camera {cam_name}: cable update failed: {exc}")
         return
 
     if any(cam_iface_id in set(_cable_iface_ids(c))

@@ -344,6 +344,7 @@ def test_build_mac_map_skips_uplink_ports():
             "neighbors": [{"device_id": "SW2", "platform": "", "ip": None,
                            "local_intf": "GigabitEthernet1/0/1",
                            "remote_intf": "Gi0/1"}],
+            "ports": [{"port": "Gi1/0/1", "vlan": "1"}, {"port": "Gi1/0/5", "vlan": "10"}],
             "mac_table": [
                 {"vid": 1, "mac": "00:09:0f:09:00:24", "port": "Gi1/0/1"},
                 {"vid": 10, "mac": "b4:0b:44:12:ab:cd", "port": "Gi1/0/5"},
@@ -357,9 +358,13 @@ def test_build_mac_map_skips_uplink_ports():
 
 def test_build_mac_map_first_switch_wins_on_duplicates():
     collected = [
-        ({"ip": "10.0.0.1"}, 7, {"neighbors": [], "mac_table": [
+        ({"ip": "10.0.0.1"}, 7, {"neighbors": [],
+                                 "ports": [{"port": "Gi1/0/5", "vlan": "10"}],
+                                 "mac_table": [
             {"vid": 10, "mac": "b4:0b:44:12:ab:cd", "port": "Gi1/0/5"}]}),
-        ({"ip": "10.0.0.2"}, 8, {"neighbors": [], "mac_table": [
+        ({"ip": "10.0.0.2"}, 8, {"neighbors": [],
+                                 "ports": [{"port": "Gi2/0/9", "vlan": "10"}],
+                                 "mac_table": [
             {"vid": 10, "mac": "b4:0b:44:12:ab:cd", "port": "Gi2/0/9"}]}),
     ]
     m = mod.build_mac_map(collected)
@@ -370,3 +375,19 @@ def test_build_mac_map_handles_missing_keys():
     assert mod.build_mac_map([]) == {}
     collected = [({"ip": "10.0.0.1"}, 7, {})]   # no neighbors/mac_table keys
     assert mod.build_mac_map(collected) == {}
+
+
+def test_build_mac_map_skips_port_channel_and_trunk():
+    collected = [
+        ({"ip": "10.0.0.1"}, 7, {
+            "neighbors": [],
+            "ports": [{"port": "Po1", "vlan": "trunk"},
+                      {"port": "Gi1/0/5", "vlan": "10"}],
+            "mac_table": [
+                {"vid": 10, "mac": "b4:0b:44:12:ab:cd", "port": "Po1"},
+                {"vid": 10, "mac": "00:09:0f:09:00:24", "port": "Gi1/0/5"},
+            ],
+        }),
+    ]
+    m = mod.build_mac_map(collected)
+    assert m == {"00:09:0f:09:00:24": ("10.0.0.1", "Gi1/0/5", 10)}

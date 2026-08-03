@@ -45,6 +45,7 @@ from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_ruckus_device, ensure_ap_device,
                                 ensure_hikvision_device, ensure_camera_device,
                                 ensure_camera_interface,
+                                CAMERA_IFACE_NAME,
                                 ensure_primary_ip,
                                 mark_server_offline, mark_storage_offline,
                                 mark_san_offline, mark_cisco_offline,
@@ -760,17 +761,20 @@ def run_sync():
                 serial = (cam.get("serial") or "").strip()
                 if serial:
                     seen_camera_serials.add(serial)
+                cam_iface = None
+                if mac_map:
+                    try:
+                        cam_iface = ensure_camera_interface(
+                            cam_dev, bool(cam.get("online")))
+                    except Exception as e:
+                        log("WARN", f"  camera {cam.get('name')} interface sync failed: {e}")
                 if cam.get("ip"):
                     try:
-                        ensure_primary_ip(cam_dev, cam["ip"], cam.get("name"))
+                        ensure_primary_ip(
+                            cam_dev, cam["ip"], cam.get("name"),
+                            iface_name=CAMERA_IFACE_NAME if cam_iface else None)
                     except Exception as e:
                         log("WARN", f"  camera {cam.get('name')} primary IP failed: {e}")
-                try:
-                    cam_iface = ensure_camera_interface(
-                        cam_dev, bool(cam.get("online")))
-                except Exception as e:
-                    cam_iface = None
-                    log("WARN", f"  camera {cam.get('name')} interface sync failed: {e}")
                 if cam_iface and cam.get("mac") and mac_map:
                     try:
                         sync_camera_cable(cam_dev, cam.get("name"), cam_iface,
