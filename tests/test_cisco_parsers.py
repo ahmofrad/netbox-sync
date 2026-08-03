@@ -302,3 +302,29 @@ def test_parse_vtp_status_empty_domain():
     out = mod._parse_vtp_status("VTP Domain Name                 : \n")
     assert out["domain"] is None
     assert out["mode"] is None
+
+
+SHOW_MAC_TABLE = """SW1#show mac address-table
+          Mac Address Table
+-------------------------------------------
+
+Vlan    Mac Address       Type        Ports
+----    -----------       --------    -----
+   1    0009.0f09.0024    DYNAMIC     Gi1/0/5
+  10    b40b.4412.abcd    DYNAMIC     Gi1/0/7
+  10    b40b.4412.abcd    STATIC      CPU
+Total Mac Addresses for this criterion: 3
+"""
+
+
+def test_parse_mac_table():
+    rows = mod._parse_mac_table(SHOW_MAC_TABLE)
+    assert rows == [
+        {"vid": 1, "mac": "00:09:0f:09:00:24", "port": "Gi1/0/5"},
+        {"vid": 10, "mac": "b4:0b:44:12:ab:cd", "port": "Gi1/0/7"},
+        {"vid": 10, "mac": "b4:0b:44:12:ab:cd", "port": "CPU"},
+    ]
+
+
+def test_parse_mac_table_empty():
+    assert mod._parse_mac_table("SW1#show mac address-table\n") == []

@@ -221,8 +221,14 @@ def _parse_mac_table_entry(text):
             mac = re.sub(r'[^0-9a-fA-F]', '', m.group(2)).lower()
             rows.append({"vid": int(m.group(1)),
                          "mac": ":".join(mac[i:i+2] for i in range(0, 12, 2)),
-                         "port": m.group(3)})
+                          "port": m.group(3)})
     return rows
+
+def _parse_mac_table(text):
+    """Parse full `show mac address-table` output -> [{vid, mac, port}].
+    Same row format as the single-address variant; header/footer lines and
+    the 'Total Mac Addresses' line never match the row regex."""
+    return _parse_mac_table_entry(text)
 
 def _parse_vtp_status(text):
     """Parse `show vtp status`: domain name from the header block, operating
@@ -435,6 +441,13 @@ def cisco_collect_inventory(ip):
             ip_brief = {}
             log("WARN", f"  show ip interface brief failed: {exc}")
 
+        try:
+            mac_table = _parse_mac_table(sess.run("show mac address-table"))
+            log("INFO", f"  mac table: {len(mac_table)} entries")
+        except Exception as exc:
+            mac_table = []
+            log("WARN", f"  show mac address-table failed: {exc}")
+
         inventory = {}
         add_item = _make_add_item(inventory)
         for row in inv_rows:
@@ -451,7 +464,7 @@ def cisco_collect_inventory(ip):
         return {"summary": summary, "ports": ports,
                 "neighbors": neighbors, "inventory": inventory,
                 "vlans": vlans, "trunks": trunks, "vtp": vtp,
-                "ip_brief": ip_brief}
+                "ip_brief": ip_brief, "mac_table": mac_table}
     finally:
         sess.logout()
 
