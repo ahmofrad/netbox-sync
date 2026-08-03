@@ -882,3 +882,71 @@ def sync_cdp_cables(dev_id, neighbors, protocol="cdp"):
                 c.delete()
                 log("INFO", f"  cdp: removed stale cable id={c.id}")
             except Exception: pass
+
+def sync_camera_cable(cam_dev_id, cam_name, cam_iface_id, mac, mac_map,
+                      switch_by_ip):
+    """Reconcile one camera<->switch cable from the MAC-table map.
+
+    Keep-on-absence: when the camera MAC is in no switch table this run
+    (aged out / idle camera), existing marked cables are left untouched —
+    a cable is only moved on positive evidence of a new port. Manual
+    (unmarked) cables are never modified or created over."""
+    api = netbox.get_netbox()
+    mac = _norm_mac(mac)
+    if not mac:
+        return
+    hit = mac_map.get(mac)
+    if not hit:
+        log("DEBUG", f"  camera {cam_name}: mac {mac} not in any switch "
+                     "table — keeping existing cable")
+        return
+    sw_ip, port, _vid = hit
+    sw = (switch_by_ip or {}).get(sw_ip)
+    if not sw:
+        log("WARN", f"  camera {cam_name}: switch {sw_ip} has no NetBox "
+                    "device this run — skipping cable")
+        return
+    sw_iface = api.dcim.interfaces.get(device_id=sw["dev_id"], name=port)
+    if not sw_iface:
+        log("WARN", f"  camera {cam_name}: iface {port} not found on "
+                    f"{sw['name']} — skipping cable")
+        return
+
+    desc = (f"{CABLE_MARKER} mac-table {netbox.CAMERA_IFACE_NAME} <-> "
+            f"{sw['name']} {port}")
+    term_a = [{"object_type": "dcim.interface", "object_id": cam_iface_id}]
+    term_b = [{"object_type": "dcim.interface", "object_id": sw_iface.id}]
+
+    cables = list(api.dcim.cables.filter(device_id=cam_dev_id))
+    marked = [c for c in cables
+              if (c.description or "").startswith(CABLE_MARKER)]
+    unmarked = [c for c in cables
+                if not (c.description or "").startswith(CABLE_MARKER)]
+    mine = next((c for c in marked
+                 if cam_iface_id in set(_cable_iface_ids(c))), None)
+
+    if mine:
+        if set(_cable_iface_ids(mine)) == {cam_iface_id, sw_iface.id}:
+            api.dcim.cables.update([{"id": mine.id, "description": desc}])
+            return
+        api.dcim.cables.update([{"id": mine.id,
+                                 "a_terminations": term_a,
+                                 "b_terminations": term_b,
+                                 "description": desc}])
+        log("INFO", f"  camera {cam_name}: cable moved to "
+                    f"{sw['name']} {port}")
+        return
+
+    if any(cam_iface_id in set(_cable_iface_ids(c))
+           or sw_iface.id in set(_cable_iface_ids(c)) for c in unmarked):
+        log("DEBUG", f"  camera {cam_name}: manual cable present on "
+                     f"{netbox.CAMERA_IFACE_NAME} or {port}, leaving untouched")
+        return
+    try:
+        api.dcim.cables.create({"a_terminations": term_a,
+                                "b_terminations": term_b,
+                                "description": desc})
+        log("INFO", f"  camera {cam_name}: cabled "
+                    f"{netbox.CAMERA_IFACE_NAME} <-> {sw['name']} {port}")
+    except Exception as exc:
+        log("WARN", f"  camera {cam_name}: cable create failed: {exc}")

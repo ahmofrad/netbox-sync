@@ -1733,3 +1733,114 @@ def test_camera_interface_refreshes_enabled_only_on_drift(monkeypatch):
     assert nbx.ensure_camera_interface(100, online=False) == 11
     assert ifaces.updated == [{"id": 11, "enabled": False}]
     assert ifaces.created == []
+
+
+_CAM_IFACE = FakeRecord(11, name="eth0", device_id=100)
+_SW_IFACE = FakeRecord(55, name="Gi1/0/5", device_id=7)
+_SW_IFACE2 = FakeRecord(77, name="Gi1/0/9", device_id=7)
+_CAM_MAC_MAP = {"b4:0b:44:12:ab:cd": ("10.0.0.1", "Gi1/0/5", 10)}
+_CAM_SWITCHES = {"10.0.0.1": {"dev_id": 7, "name": "SW1"}}
+
+
+def _cam_cable_api(sw_ifaces, cables):
+    return _fake_api(interfaces=FakeEndpoint([_CAM_IFACE] + sw_ifaces),
+                     cables=FakeEndpoint(cables))
+
+
+def test_camera_cable_created(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    api = _cam_cable_api([_SW_IFACE], [])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sync_camera_cable(100, "CAM1", 11, "b4:0b:44:12:ab:cd",
+                            _CAM_MAC_MAP, _CAM_SWITCHES)
+
+    assert len(api.dcim.cables.created) == 1
+    payload = api.dcim.cables.created[0]
+    assert payload["a_terminations"] == [
+        {"object_type": "dcim.interface", "object_id": 11}]
+    assert payload["b_terminations"] == [
+        {"object_type": "dcim.interface", "object_id": 55}]
+    assert payload["description"] == "netbox-sync: mac-table eth0 <-> SW1 Gi1/0/5"
+
+
+def test_camera_cable_refreshed_when_unchanged(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    marked = FakeRecord(9, device_id=100,
+                        description="netbox-sync: mac-table eth0 <-> SW1 Gi1/0/5",
+                        a_terminations=[{"object_type": "dcim.interface", "object_id": 11}],
+                        b_terminations=[{"object_type": "dcim.interface", "object_id": 55}])
+    api = _cam_cable_api([_SW_IFACE], [marked])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sync_camera_cable(100, "CAM1", 11, "b4:0b:44:12:ab:cd",
+                            _CAM_MAC_MAP, _CAM_SWITCHES)
+
+    assert api.dcim.cables.created == []
+    assert {u["id"] for u in api.dcim.cables.updated} == {9}
+    # refresh only — terminations untouched
+    assert "a_terminations" not in api.dcim.cables.updated[0]
+
+
+def test_camera_cable_moved_when_mac_found_elsewhere(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    marked = FakeRecord(9, device_id=100,
+                        description="netbox-sync: mac-table eth0 <-> SW1 Gi1/0/5",
+                        a_terminations=[{"object_type": "dcim.interface", "object_id": 11}],
+                        b_terminations=[{"object_type": "dcim.interface", "object_id": 55}])
+    api = _cam_cable_api([_SW_IFACE, _SW_IFACE2], [marked])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+    moved_map = {"b4:0b:44:12:ab:cd": ("10.0.0.1", "Gi1/0/9", 10)}
+
+    cisco.sync_camera_cable(100, "CAM1", 11, "b4:0b:44:12:ab:cd",
+                            moved_map, _CAM_SWITCHES)
+
+    assert api.dcim.cables.created == []
+    assert len(api.dcim.cables.updated) == 1
+    upd = api.dcim.cables.updated[0]
+    assert upd["id"] == 9
+    assert upd["b_terminations"] == [
+        {"object_type": "dcim.interface", "object_id": 77}]
+
+
+def test_camera_cable_kept_when_mac_absent(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    marked = FakeRecord(9, device_id=100,
+                        description="netbox-sync: mac-table eth0 <-> SW1 Gi1/0/5",
+                        a_terminations=[{"object_type": "dcim.interface", "object_id": 11}],
+                        b_terminations=[{"object_type": "dcim.interface", "object_id": 55}])
+    api = _cam_cable_api([_SW_IFACE], [marked])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sync_camera_cable(100, "CAM1", 11, "b4:0b:44:12:ab:cd",
+                            {}, _CAM_SWITCHES)   # empty map: aged out
+
+    assert api.dcim.cables.created == []
+    assert api.dcim.cables.updated == []
+    assert api.dcim.cables.deleted_ids == []    # keep-on-absence
+
+
+def test_camera_cable_never_overrides_manual_cable(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    manual = FakeRecord(8, device_id=100, description="manual doc",
+                        a_terminations=[{"object_type": "dcim.interface", "object_id": 11}],
+                        b_terminations=[{"object_type": "dcim.interface", "object_id": 55}])
+    api = _cam_cable_api([_SW_IFACE], [manual])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sync_camera_cable(100, "CAM1", 11, "b4:0b:44:12:ab:cd",
+                            _CAM_MAC_MAP, _CAM_SWITCHES)
+
+    assert api.dcim.cables.created == []
+    assert api.dcim.cables.updated == []
+
+
+def test_camera_cable_skips_when_switch_iface_missing(monkeypatch):
+    import netbox_sync.collectors.cisco as cisco
+    api = _cam_cable_api([], [])   # switch interface not in NetBox
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    cisco.sync_camera_cable(100, "CAM1", 11, "b4:0b:44:12:ab:cd",
+                            _CAM_MAC_MAP, _CAM_SWITCHES)
+
+    assert api.dcim.cables.created == []
