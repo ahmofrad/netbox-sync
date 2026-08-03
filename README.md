@@ -428,6 +428,18 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 - The NVR does not expose camera MAC addresses (and cameras aren't directly reachable), so `cam_mac` is left empty unless a future collector supplies one. Cameras no longer reported by an NVR are marked **offline**, never deleted.
 - **Opt-in**: activates only when `HIKVISION_RANGES` is set.
 
+### Camera → switch cabling
+
+When the Cisco family is also enabled (`CISCO_RANGES` set and reachable),
+each camera with a known MAC is cabled in NetBox to the switch port it is
+learned on: one `eth0` interface per camera and a real cable between it and
+the switch interface (description `netbox-sync: mac-table ...`). Cables are
+managed like CDP cables — only marker-owned ones are touched. Because
+switch MAC tables age out idle entries (~5 min), a cable is never deleted
+when a camera's MAC is momentarily missing; it is only moved when the MAC
+is positively found on a different port. With Cisco disabled, cabling is
+silently skipped.
+
 See `netbox_sync/models.py` for the full model alias maps. Add your own models there.
 
 ## Inventory items collected
