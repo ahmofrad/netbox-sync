@@ -328,3 +328,45 @@ def test_parse_mac_table():
 
 def test_parse_mac_table_empty():
     assert mod._parse_mac_table("SW1#show mac address-table\n") == []
+
+
+def test_norm_mac():
+    assert mod._norm_mac("B4:0B:44:12:AB:CD") == "b4:0b:44:12:ab:cd"
+    assert mod._norm_mac("b40b.4412.abcd") == "b4:0b:44:12:ab:cd"
+    assert mod._norm_mac("not-a-mac") is None
+    assert mod._norm_mac(None) is None
+    assert mod._norm_mac("") is None
+
+
+def test_build_mac_map_skips_uplink_ports():
+    collected = [
+        ({"ip": "10.0.0.1", "hostname": "SW1"}, 7, {
+            "neighbors": [{"device_id": "SW2", "platform": "", "ip": None,
+                           "local_intf": "GigabitEthernet1/0/1",
+                           "remote_intf": "Gi0/1"}],
+            "mac_table": [
+                {"vid": 1, "mac": "00:09:0f:09:00:24", "port": "Gi1/0/1"},
+                {"vid": 10, "mac": "b4:0b:44:12:ab:cd", "port": "Gi1/0/5"},
+            ],
+        }),
+    ]
+    m = mod.build_mac_map(collected)
+    # Gi1/0/1 is a CDP uplink (long name in neighbors) -> excluded
+    assert m == {"b4:0b:44:12:ab:cd": ("10.0.0.1", "Gi1/0/5", 10)}
+
+
+def test_build_mac_map_first_switch_wins_on_duplicates():
+    collected = [
+        ({"ip": "10.0.0.1"}, 7, {"neighbors": [], "mac_table": [
+            {"vid": 10, "mac": "b4:0b:44:12:ab:cd", "port": "Gi1/0/5"}]}),
+        ({"ip": "10.0.0.2"}, 8, {"neighbors": [], "mac_table": [
+            {"vid": 10, "mac": "b4:0b:44:12:ab:cd", "port": "Gi2/0/9"}]}),
+    ]
+    m = mod.build_mac_map(collected)
+    assert m["b4:0b:44:12:ab:cd"] == ("10.0.0.1", "Gi1/0/5", 10)
+
+
+def test_build_mac_map_handles_missing_keys():
+    assert mod.build_mac_map([]) == {}
+    collected = [({"ip": "10.0.0.1"}, 7, {})]   # no neighbors/mac_table keys
+    assert mod.build_mac_map(collected) == {}

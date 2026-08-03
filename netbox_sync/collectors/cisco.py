@@ -211,6 +211,14 @@ def _mac_to_cisco(mac):
     if len(s) != 12: return None
     return f"{s[0:4]}.{s[4:8]}.{s[8:12]}"
 
+def _norm_mac(mac):
+    """Any common MAC form -> lowercase colon form ('b4:0b:44:12:ab:cd');
+    None when the input doesn't hold exactly 12 hex digits."""
+    s = re.sub(r'[^0-9a-fA-F]', '', mac or '').lower()
+    if len(s) != 12:
+        return None
+    return ":".join(s[i:i+2] for i in range(0, 12, 2))
+
 def _parse_mac_table_entry(text):
     """Parse `show mac address-table address <mac>` rows -> [{vid, mac, port}].
     MAC normalized to lowercase colon form."""
@@ -585,6 +593,34 @@ def _cisco_mac_lookup(ip, cisco_mac):
         return {r["vid"] for r in rows}
     finally:
         sess.logout()
+
+def build_mac_map(collected):
+    """Build {mac: (switch_ip, port, vid)} from all switches' MAC tables.
+
+    `collected` is the Cisco pass list of (probe, dev_id, data). Ports that
+    carry a CDP/LLDP neighbor (inter-switch links) are skipped: a MAC seen
+    there belongs to a downstream switch, which reports it on a real access
+    port. CDP/LLDP uses long interface names, MAC tables short ones — both
+    sides are normalized through _short_intf. On duplicate MACs the first
+    switch in collection order wins."""
+    mac_map = {}
+    for probe, _dev_id, data in collected:
+        uplinks = {_short_intf(n.get("local_intf"))
+                   for n in (data.get("neighbors") or [])}
+        for row in (data.get("mac_table") or []):
+            port = row.get("port")
+            if _short_intf(port) in uplinks:
+                continue
+            mac = row.get("mac")
+            if not mac:
+                continue
+            if mac in mac_map:
+                log("WARN", f"  mac {mac} seen on {mac_map[mac][0]}:"
+                            f"{mac_map[mac][1]} and {probe['ip']}:{port}"
+                            " — keeping the first")
+                continue
+            mac_map[mac] = (probe["ip"], port, row.get("vid"))
+    return mac_map
 
 # ── VLANs ────────────────────────────────────────────────────────────────────
 
