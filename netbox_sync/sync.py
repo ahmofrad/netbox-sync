@@ -29,9 +29,10 @@ from netbox_sync.collectors.redfish import rf_collect_inventory
 from netbox_sync.collectors.ruckus import (ruckus_collect, probe_ruckus,
                                            _ruckus_role_and_cluster,
                                            _parse_ha_map)
+from netbox_sync.collectors.unifi import unifi_collect
 from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
                                 CISCO_RANGES, FORTIGATE_RANGES, RUCKUS_RANGES,
-                                RUCKUS_HA_MAP, HIKVISION_RANGES)
+                                RUCKUS_HA_MAP, HIKVISION_RANGES, UNIFI_RANGES)
 from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
                               ensure_prefix, ensure_host_ip,
                               _containing_prefix, _prefix_masklen,
@@ -51,7 +52,8 @@ from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 mark_san_offline, mark_cisco_offline,
                                 mark_fortigate_offline, mark_ap_offline,
                                 mark_ruckus_offline, mark_hikvision_offline,
-                                mark_camera_offline,
+                                mark_camera_offline, mark_unifi_offline,
+                                ensure_unifi_console, get_or_create_site,
                                 sync_wireless_lans, sweep_wireless_lans,
                                 _check_offline,
                                 sync_inventory)
@@ -718,6 +720,124 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  Ruckus offline sweep failed: {e}")
 
+    # ── Process UniFi OS consoles ────────────────────────────────────────────
+    # One console manages many sites. APs reuse the shared AP machinery
+    # (wap_* fields; wap_group = UniFi site desc, wap_wlc = console name).
+    # WLANs are aggregated console-globally (unique SSIDs, first site wins);
+    # VLAN bindings are resolved per site, first unique match wins.
+    live_unifi_ips = {h["ip"] for h in found["unifi"]}
+    for probe in found["unifi"]:
+        ip = probe["ip"]
+        log("INFO", f"Processing UNIFI {ip}  ({probe.get('model')} / {probe.get('serial')})")
+        try:
+            data = unifi_collect(ip)
+        except KeyboardInterrupt: raise
+        except Exception as e:
+            log("ERROR", f"  UniFi collection failed for {ip}: {e}"); continue
+
+        try:
+            dev_id = ensure_unifi_console(probe, ap_count=len(data["aps"]),
+                                          site_count=len(data["sites"]))
+        except Exception as e:
+            log("ERROR", f"  ensure_unifi_console failed for {ip}: {e}"); continue
+
+        console_name = (data["summary"].get("name") or probe.get("hostname") or ip)
+        try:
+            version = data["summary"].get("version") or probe.get("firmware")
+            api.dcim.devices.update([{"id": dev_id, "status": "active",
+                                      "custom_fields": {"unifi_version": version}}])
+        except Exception as e:
+            log("ERROR", f"  UniFi console update failed for {ip}: {e}")
+
+        try:
+            ensure_primary_ip(dev_id, ip, console_name)
+        except Exception as e:
+            log("WARN", f"  UniFi primary IPv4 sync failed for {ip}: {e}")
+
+        # APs: NetBox site = the UniFi site desc (exact name match; created
+        # when genuinely new — the console is one administrative domain and
+        # all of its sites are in scope).
+        site_id_by_desc = {}
+        seen_macs = set()
+        for ap in data["aps"]:
+            desc = ap.get("group") or ""
+            try:
+                if desc and desc not in site_id_by_desc:
+                    site_id_by_desc[desc] = get_or_create_site(desc)
+                ap_dev = ensure_ap_device(ap, console_name,
+                                          manufacturer="Ubiquiti",
+                                          site_name=desc or None)
+                seen_macs.add(ap["mac"])
+                if ap.get("ip"):
+                    try:
+                        ensure_primary_ip(ap_dev, ap["ip"], ap.get("name"))
+                    except Exception as e:
+                        log("WARN", f"  AP {ap.get('name')} primary IP failed: {e}")
+            except Exception as e:
+                log("ERROR", f"  UniFi AP sync failed for {ap.get('mac')}: {e}")
+        try:
+            for d in list(api.dcim.devices.filter(cf_wap_wlc=console_name,
+                                                  cf_wap_enabled=True)):
+                mac = (d.custom_fields or {}).get("wap_mac")
+                if mac and mac not in seen_macs:
+                    mark_ap_offline(d.id, d.name)
+        except Exception as e:
+            log("ERROR", f"  UniFi AP offline sweep failed for {ip}: {e}")
+
+        try:
+            desc_by_name = {s["name"]: s["desc"] for s in data["sites"]}
+            wlan_by_ssid = {}
+            for sname, wlist in (data["wlans"] or {}).items():
+                for w in wlist:
+                    entry = wlan_by_ssid.setdefault(
+                        w["ssid"], dict(w, vlan_id=None, _bindings=[]))
+                    vid = (data["networks"].get(sname) or {}).get(
+                        w.get("networkconf_id"))
+                    if vid:
+                        entry["_bindings"].append((desc_by_name.get(sname), vid))
+            vid_map = {}
+            missing = {}   # first-binding site desc -> [{vid, name, status}]
+            for entry in wlan_by_ssid.values():
+                for desc, vid in entry["_bindings"]:
+                    if not desc:
+                        continue
+                    site_id = site_id_by_desc.get(desc)
+                    if site_id is None:
+                        site_id = get_or_create_site(desc)
+                        site_id_by_desc[desc] = site_id
+                    site_index = site_indexes.get(site_id)
+                    if site_index is None:
+                        site_index = _site_vlan_index(site_id)
+                        site_indexes[site_id] = site_index
+                    matches = site_index.get(vid, [])
+                    if len(matches) == 1:
+                        entry["vlan_id"] = vid
+                        vid_map[vid] = matches[0][1]
+                        break
+                else:
+                    if entry["_bindings"] and entry["_bindings"][0][0]:
+                        desc, vid = entry["_bindings"][0]
+                        entry["vlan_id"] = vid
+                        missing.setdefault(desc, []).append(
+                            {"vid": vid, "name": f"VLAN{vid:04d}",
+                             "status": "active"})
+            for desc, vlans in missing.items():
+                site_id = site_id_by_desc[desc]
+                group_id = ensure_vlan_group(site_id, console_name)
+                created = sync_cisco_vlans(group_id, console_name, vlans)
+                vid_map.update(created)
+                group_vlan_seen.setdefault(group_id, set()).update(created.keys())
+                legacy_sites.add(site_id)
+            seen_ssids = sync_wireless_lans(console_name,
+                                            list(wlan_by_ssid.values()),
+                                            vid_map, group_prefix="UniFi")
+            sweep_wireless_lans(console_name, seen_ssids)
+            log("INFO", f"  [OK] UniFi {ip} — {len(data['aps'])} APs, "
+                        f"{len(seen_ssids)} WLANs, "
+                        f"{len(data['sites'])} sites synced")
+        except Exception as e:
+            log("ERROR", f"  UniFi WLAN sync failed for {ip}: {e}")
+
     # ── Process Hikvision NVRs ───────────────────────────────────────────────
     # The NVR is the device; each camera becomes its own device (serial is the
     # identity) with the parent NVR recorded in cam_nvr. Camera IPs are set as
@@ -853,6 +973,8 @@ def run_sync():
                    live_fortigate_ips, mark_fortigate_offline, "FortiGates")
     _offline_sweep(api, bool(HIKVISION_RANGES), "cf_nvr_enabled", "nvr_ip",
                    live_hikvision_ips, mark_hikvision_offline, "Hikvision NVRs")
+    _offline_sweep(api, bool(UNIFI_RANGES), "cf_unifi_enabled", "unifi_ip",
+                   live_unifi_ips, mark_unifi_offline, "UniFi consoles")
 
     log("INFO", "Unified sync complete")
     log("INFO", "=" * 60)

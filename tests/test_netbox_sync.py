@@ -680,6 +680,78 @@ def test_sweep_wireless_lans(monkeypatch):
     assert api.wireless.wireless_lans.deleted_ids == [50]
 
 
+# ── UniFi session + parsers ──────────────────────────────────────────────────
+
+UNIFI_STATUS = {"meta": {"rc": "ok", "up": True,
+                         "server_version": "10.2.105",
+                         "uuid": "6dd002d7-b9f1-4625-84f2-b7b4f9400c16"},
+                "data": []}
+
+UNIFI_SITES = {"meta": {"rc": "ok"}, "data": [
+    {"name": "default", "desc": "Default", "_id": "588f25805bdbb3cf25db3fe1"},
+    {"name": "08r8os8i", "desc": "SnappPay", "_id": "62f73ef0567d3214303522d7"},
+    {"name": "ressysr4", "desc": "HQ-General", "_id": "64d2169dff7ccc1690b5cea6"},
+]}
+
+UNIFI_DEVICES = {"meta": {"rc": "ok"}, "data": [
+    {"_id": "67a38c6a0cfd72475b8ec7f7", "mac": "f4:e2:c6:13:da:0f",
+     "name": "F5-GamingRoom", "model": "U7PG2", "serial": "F4E2C613DA0F",
+     "ip": "192.168.254.14", "version": "6.6.77.15402", "type": "uap",
+     "state": 0, "adopted": True, "uptime": None},
+    {"_id": "67fa51eb667d7102b6961a55", "mac": "b4:fb:e4:c3:48:4b",
+     "name": "F3-S", "model": "U7PG2", "serial": "B4FBE4C3484B",
+     "ip": "192.168.236.17", "version": "6.8.2.15592", "type": "uap",
+     "state": 1, "adopted": True, "uptime": 954532},
+    {"_id": "6474dfd9ff7ccc11802fa6bb", "mac": "78:45:58:26:96:b4",
+     "name": "usw-mini", "model": "USW-MINI", "serial": "7845582696B4",
+     "ip": "172.31.2.253", "version": "6.6.77.15402", "type": "usw",
+     "state": 1, "adopted": True, "uptime": 1000},
+]}
+
+UNIFI_WLANS = {"meta": {"rc": "ok"}, "data": [
+    {"_id": "w1", "name": "Smart Plug", "security": "wpa2",
+     "wpa_mode": "wpa2", "wpa_enc": "aes", "enabled": True,
+     "hide_ssid": False, "is_guest": False, "networkconf_id": "n1",
+     "site_id": "s1"},
+    {"_id": "w2", "name": "CorpNet", "security": "8021x",
+     "wpa_mode": "wpa3", "wpa_enc": "aes", "enabled": True,
+     "hide_ssid": False, "is_guest": False, "networkconf_id": "n2",
+     "site_id": "s1"},
+]}
+
+UNIFI_NETWORKS = {"meta": {"rc": "ok"}, "data": [
+    {"_id": "n1", "name": "IOT", "vlan": 109, "site_id": "s1"},
+    {"_id": "n2", "name": "Corp", "vlan": 10, "site_id": "s1"},
+]}
+
+
+def test_unifi_parse_sites_devices_wlans_networks():
+    import netbox_sync.collectors.unifi as unifi
+    sites = unifi._parse_sites(UNIFI_SITES)
+    assert sites == [
+        {"name": "default", "desc": "Default"},
+        {"name": "08r8os8i", "desc": "SnappPay"},
+        {"name": "ressysr4", "desc": "HQ-General"},
+    ]
+    aps = unifi._parse_devices(UNIFI_DEVICES)
+    assert aps == [
+        {"mac": "f4:e2:c6:13:da:0f", "model": "U7PG2", "name": "F5-GamingRoom",
+         "group": None, "ip": "192.168.254.14", "approved": True,
+         "firmware": "6.6.77.15402", "state": 0},
+        {"mac": "b4:fb:e4:c3:48:4b", "model": "U7PG2", "name": "F3-S",
+         "group": None, "ip": "192.168.236.17", "approved": True,
+         "firmware": "6.8.2.15592", "state": 1},
+    ]   # type usw filtered out; only uap
+    wlans = unifi._parse_wlans(UNIFI_WLANS)
+    assert wlans[0]["ssid"] == "Smart Plug"
+    assert wlans[0]["security"] == "wpa2"
+    assert wlans[0]["auth"] == "wpa2"        # personal -> shared vocab
+    assert wlans[0]["networkconf_id"] == "n1"
+    assert wlans[1]["auth"] == "802.1x"      # enterprise -> shared vocab
+    nets = unifi._parse_networks(UNIFI_NETWORKS)
+    assert nets == {"n1": 109, "n2": 10}
+
+
 # ── Ruckus HA resolution + controller device ─────────────────────────────────
 
 def test_ruckus_role_and_cluster():

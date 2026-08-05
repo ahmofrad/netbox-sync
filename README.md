@@ -340,7 +340,17 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 | `cam_model` | Text | Model |
 | `cam_serial` | Text | Camera serial |
 
-> The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` / `cf_nvr_enabled=True` (NetBox custom-field filter syntax).
+**For UniFi OS consoles:**
+
+| Custom field | Type | Label |
+|--------------|------|-------|
+| `unifi_ip` | Text | UniFi console IP |
+| `unifi_enabled` | Boolean | UniFi enabled |
+| `unifi_version` | Text | UniFi OS version |
+| `unifi_ap_count` | Integer | Number of managed APs |
+| `unifi_sites` | Integer | Number of sites |
+
+> The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` / `cf_nvr_enabled=True` / `cf_unifi_enabled=True` (NetBox custom-field filter syntax).
 
 ### 3. Device roles & sites
 
@@ -412,6 +422,12 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 - WLANs become native **Wireless LANs** (SSID + auth type + VLAN link from the site's groups). **Passphrases are never synced.**
 - **HA pairs:** `RUCKUS_HA_MAP=vip:primary,secondary` (per pair, `;`-separated) merges a pair into one cluster device — identity from VIP/primary probes only, secondary probes update liveness only; primary IPv4 = the VIP.
 - **Opt-in**: activates only when `RUCKUS_RANGES` is set.
+
+**Wireless controllers (Ubiquiti UniFi OS, HTTPS API):**
+- UniFi OS consoles (UDM / CloudKey / UniFi OS Server, Network Application 10.x) via the legacy session API: `POST /api/login` (session cookie) → `/api/self/sites`, per-site `/api/s/<site>/stat/device` (APs), `/api/s/<site>/rest/wlanconf` (WLANs), `/api/s/<site>/rest/networkconf` (VLAN bindings). Use a dedicated **local** admin account (cloud UI.com accounts break on MFA).
+- The console becomes a **device** with `unifi_*` custom fields (identity = console uuid serial). Each AP reuses the shared AP machinery: `Access Point` role, MAC identity (`wap_mac`), `wap_group` = UniFi site name, `wap_wlc` = console name; the AP's NetBox site is the UniFi site (matched by name, created if genuinely new); vanished APs are marked offline, never deleted.
+- WLANs from **all sites** become native **Wireless LANs** (group `UniFi <console>`), aggregated console-globally by SSID; the VLAN link is resolved per site from the WLAN's network binding (unique match in the site's marker-owned VLAN groups, else created in the site's UniFi group). **Passphrases are never synced.**
+- **Opt-in**: activates only when `UNIFI_RANGES` is set.
 
 **Firewalls (FortiGate, REST API + SSH extras):**
 - FortiGate 40F / 60F / 80F / 100F / 200F class (FortiOS 6/7). Queries `/api/v2/monitor/system/status`, `/api/v2/monitor/system/interface`, `/api/v2/cmdb/system/interface` (VDOM `root`).
@@ -771,11 +787,21 @@ DEFAULT_SWITCH_ROLE=SAN Switch
 | `fortigate_ha_mode` | Text | حالت HA (a-p / a-a) |
 | `fortigate_ha_peer` | Text | واحدهای peer سِ HA |
 | `fortigate_ha_role` | Text | نقش واحد بررسی‌شده |
+
+**برای کنسول‌های UniFi OS:**
+
+| فیلد سفارشی | نوع | برچسب |
+|--------------|------|-------|
+| `unifi_ip` | Text | IP کنسول UniFi |
+| `unifi_enabled` | Boolean | UniFi فعال |
+| `unifi_version` | Text | نسخه UniFi OS |
+| `unifi_ap_count` | Integer | تعداد APهای مدیریت‌شده |
+| `unifi_sites` | Integer | تعداد سایت‌ها |
 **NAT → IPAM:** ورودی‌های **VIP** در FortiGate به آدرس‌های IPAM برای IP خارجی (`extip`) تبدیل می‌شوند با فیلد بومی **`nat_inside`** در NetBox که به آدرس سرور داخلی نگاشت‌شده اشاره دارد؛ **poolهای IP** به آدرس‌های ساده IPAM برای محدوده SNAT تبدیل می‌شوند. هر VIP با port-forwarding همچنین به یک **NetBox Service** (پروتکل + پورت) روی دستگاه تبدیل می‌شود که به IP خارجی پیوند خورده و سرور نگاشت‌شده در توضیح آن ثبت می‌شود — بنابراین VIPهایی که یک `extip` مشترک دارند دقت کامل per-port را حفظ می‌کنند (VIPهای بدون پورت فقط با آدرس نمایش داده می‌شوند). آدرس‌ها/سرویس‌های NAT علامت‌دار (`netbox-sync: nat …`) که دیگر گزارش نشوند پس از هر اجرا حذف می‌شوند؛ ورودی‌های دستی هرگز دست نمی‌خورند.
 
 **خوشه‌های HA:** یک جفت FortiGate در حالت HA (فعال-غیرفعال یا فعال-فعال) به **یک دستگاه** در NetBox تبدیل می‌شود که نام و سریال آن از واحد primary گرفته می‌شود — با هر سریال واحد قابل شناسایی است، بنابراین لیست‌کردن هر دو واحد هرگز دستگاه تکراری نمی‌سازد. واحدهای peer در فیلدهای `fortigate_ha_*` ثبت می‌شوند و primary IPv4 از واحد primary پیروی می‌کند (بررسی واحد secondary هرگز آن را تغییر نمی‌دهد).
 
-> حلقه تشخیص آفلاین، دستگاه‌ها را با فیلتر `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` فیلتر می‌کند (سینتکس فیلتر custom field در NetBox).
+> حلقه تشخیص آفلاین، دستگاه‌ها را با فیلتر `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` / `cf_unifi_enabled=True` فیلتر می‌کند (سینتکس فیلتر custom field در NetBox).
 
 ### ۳. نقش‌ها و سایت‌های دستگاه
 
@@ -847,6 +873,12 @@ python -m pytest tests/
 - WLANها به **Wireless LANهای** بومی NetBox تبدیل می‌شوند (SSID + نوع احراز هویت + پیوند VLAN از گروه‌های سایت). **عبارات عبور (passphrase) هرگز همگام‌سازی نمی‌شوند.**
 - **جفت‌های HA:** با `RUCKUS_HA_MAP=vip:primary,secondary` (به‌ازای هر جفت، جداشده با `;`) یک جفت به یک دستگاه خوشه ادغام می‌شود — هویت فقط از بررسی VIP/primary گرفته می‌شود و بررسی‌های secondary فقط زنده‌بودن را به‌روزرسانی می‌کنند؛ primary IPv4 همان VIP است.
 - **اختیاری**: فقط وقتی `RUCKUS_RANGES` تنظیم شود فعال می‌شود.
+
+**کنترلرهای بی‌سیم (Ubiquiti UniFi OS، API بر بستر HTTPS):**
+- کنسول‌های UniFi OS (UDM / CloudKey / UniFi OS Server با Network Application نسخه ۱۰.x) از طریق API نشست‌محور قدیمی: `POST /api/login` (کوکی نشست) ← `/api/self/sites` و سپس به‌ازای هر سایت `/api/s/<site>/stat/device` (APها)، `/api/s/<site>/rest/wlanconf` (WLANها) و `/api/s/<site>/rest/networkconf` (پیوندهای VLAN). یک حساب ادمین **محلی** اختصاصی بسازید (حساب‌های ابری UI.com به‌خاطر MFA اتوماسیون را می‌شکنند).
+- کنسول به یک **دستگاه** با فیلدهای سفارشی `unifi_*` تبدیل می‌شود (هویت = سریال uuid کنسول). هر AP از ماشین‌آلات مشترک AP استفاده می‌کند: نقش `Access Point`، هویت بر اساس MAC (`wap_mac`)، فیلد `wap_group` = نام سایت UniFi و `wap_wlc` = نام کنسول؛ سایت NetBox هر AP همان سایت UniFi است (تطبیق بر اساس نام، در صورت نبودن ساخته می‌شود)؛ APهای ناپدیدشده آفلاین علامت می‌خورند و هرگز حذف نمی‌شوند.
+- WLANهای **همه سایت‌ها** به **Wireless LANهای** بومی NetBox تبدیل می‌شوند (گروه `UniFi <console>`)، تجمیع سراسری به‌ازای هر SSID؛ پیوند VLAN هر WLAN از روی network binding آن به‌ازای هر سایت حل می‌شود (تطبیق یکتا در گروه‌های VLAN علامت‌دار سایت، وگرنه در گروه UniFi آن سایت ساخته می‌شود). **عبارات عبور (passphrase) هرگز همگام‌سازی نمی‌شوند.**
+- **اختیاری**: فقط وقتی `UNIFI_RANGES` تنظیم شود فعال می‌شود.
 
 **فایروالها (FortiGate، REST API + SSH):**
 - خانواده FortiGate 40F / 60F / 80F / 100F / 200F (FortiOS 6/7). کوئری‌های `/api/v2/monitor/system/status`، `/api/v2/monitor/system/interface`، `/api/v2/cmdb/system/interface` (VDOM سِ `root`).
