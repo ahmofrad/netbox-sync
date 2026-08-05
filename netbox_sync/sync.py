@@ -58,6 +58,7 @@ from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 _check_offline,
                                 sync_inventory)
 from netbox_sync.scanner import scan_all
+from netbox_sync.utils import resolve_site
 
 
 def run_sync():
@@ -754,20 +755,22 @@ def run_sync():
         except Exception as e:
             log("WARN", f"  UniFi primary IPv4 sync failed for {ip}: {e}")
 
-        # APs: NetBox site = the UniFi site desc (exact name match; created
-        # when genuinely new — the console is one administrative domain and
-        # all of its sites are in scope).
-        site_id_by_desc = {}
+        # APs: NetBox site comes from the standard SITE_IP_MAP resolution
+        # (longest-prefix on the AP's IP, then keyword, then default) — the
+        # UniFi site desc is kept only in wap_group. Each UniFi site's
+        # majority AP site is remembered for the VLAN resolution below.
+        desc_site_votes = {}   # unifi site desc -> {netbox site name: count}
         seen_macs = set()
         for ap in data["aps"]:
             desc = ap.get("group") or ""
             try:
-                if desc and desc not in site_id_by_desc:
-                    site_id_by_desc[desc] = get_or_create_site(desc)
                 ap_dev = ensure_ap_device(ap, console_name,
-                                          manufacturer="Ubiquiti",
-                                          site_name=desc or None)
+                                          manufacturer="Ubiquiti")
                 seen_macs.add(ap["mac"])
+                site_name = resolve_site(ap.get("name") or "",
+                                         ap.get("ip") or "")
+                votes = desc_site_votes.setdefault(desc, {})
+                votes[site_name] = votes.get(site_name, 0) + 1
                 if ap.get("ip"):
                     try:
                         ensure_primary_ip(ap_dev, ap["ip"], ap.get("name"))
@@ -786,6 +789,10 @@ def run_sync():
 
         try:
             desc_by_name = {s["name"]: s["desc"] for s in data["sites"]}
+            # UniFi site -> NetBox site: majority of its APs' resolved sites.
+            desc_site = {d: max(v, key=v.get)
+                         for d, v in desc_site_votes.items()}
+            site_id_by_name = {}
             wlan_by_ssid = {}
             for sname, wlist in (data["wlans"] or {}).items():
                 for w in wlist:
@@ -796,15 +803,16 @@ def run_sync():
                     if vid:
                         entry["_bindings"].append((desc_by_name.get(sname), vid))
             vid_map = {}
-            missing = {}   # first-binding site desc -> [{vid, name, status}]
+            missing = {}   # netbox site name -> [{vid, name, status}]
             for entry in wlan_by_ssid.values():
                 for desc, vid in entry["_bindings"]:
-                    if not desc:
-                        continue
-                    site_id = site_id_by_desc.get(desc)
+                    site_name = desc_site.get(desc)
+                    if not site_name:
+                        continue   # no APs at that UniFi site -> can't place
+                    site_id = site_id_by_name.get(site_name)
                     if site_id is None:
-                        site_id = get_or_create_site(desc)
-                        site_id_by_desc[desc] = site_id
+                        site_id = get_or_create_site(site_name)
+                        site_id_by_name[site_name] = site_id
                     site_index = site_indexes.get(site_id)
                     if site_index is None:
                         site_index = _site_vlan_index(site_id)
@@ -815,14 +823,16 @@ def run_sync():
                         vid_map[vid] = matches[0][1]
                         break
                 else:
-                    if entry["_bindings"] and entry["_bindings"][0][0]:
+                    if entry["_bindings"]:
                         desc, vid = entry["_bindings"][0]
-                        entry["vlan_id"] = vid
-                        missing.setdefault(desc, []).append(
-                            {"vid": vid, "name": f"VLAN{vid:04d}",
-                             "status": "active"})
-            for desc, vlans in missing.items():
-                site_id = site_id_by_desc[desc]
+                        site_name = desc_site.get(desc)
+                        if site_name:
+                            entry["vlan_id"] = vid
+                            missing.setdefault(site_name, []).append(
+                                {"vid": vid, "name": f"VLAN{vid:04d}",
+                                 "status": "active"})
+            for site_name, vlans in missing.items():
+                site_id = site_id_by_name[site_name]
                 group_id = ensure_vlan_group(site_id, console_name)
                 created = sync_cisco_vlans(group_id, console_name, vlans)
                 vid_map.update(created)

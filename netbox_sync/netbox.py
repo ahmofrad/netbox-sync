@@ -490,11 +490,24 @@ def ensure_ap_device(ap, wlc_name, role_name=None, manufacturer="Ruckus",
     api = get_netbox()
     dev = next(iter(api.dcim.devices.filter(cf_wap_mac=mac)), None)
     if dev is None:
-        cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
-                                             role_id=role_id))
+        # adopt by name+site+role only when the candidate has no wap_mac of
+        # its own — a device with a DIFFERENT wap_mac is a different AP
+        cands = [d for d in api.dcim.devices.filter(name=name, site_id=site_id,
+                                                    role_id=role_id)
+                 if not (d.custom_fields or {}).get("wap_mac")]
         dev = cands[0] if cands else None
         if dev:
             log("INFO", f"  Found AP by name+site: {name} (id={dev.id})")
+    # NetBox enforces device-name uniqueness per site. AP names are not
+    # unique across controller sites (two "F1"s whose sites resolve to one
+    # NetBox site) — disambiguate with a stable MAC-based suffix when the
+    # plain name is held by any other device. Recomputed every run, so the
+    # name reverts to plain once the clash disappears.
+    clash = any(d.id != (dev.id if dev else None)
+                and (d.custom_fields or {}).get("wap_mac") != mac
+                for d in api.dcim.devices.filter(name=name, site_id=site_id))
+    if clash:
+        name = f"{name} ({mac.replace(':', '')[-4:]})"
     payload = {
         "name": name, "status": "active", "site": site_id,
         "device_type": dtype_id, "role": role_id,

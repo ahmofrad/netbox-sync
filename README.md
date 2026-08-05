@@ -425,7 +425,7 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 
 **Wireless controllers (Ubiquiti UniFi OS, HTTPS API):**
 - UniFi OS consoles (UDM / CloudKey / UniFi OS Server, Network Application 10.x) via the legacy session API: `POST /api/login` (session cookie) → `/api/self/sites`, per-site `/api/s/<site>/stat/device` (APs), `/api/s/<site>/rest/wlanconf` (WLANs), `/api/s/<site>/rest/networkconf` (VLAN bindings). Use a dedicated **local** admin account (cloud UI.com accounts break on MFA).
-- The console becomes a **device** with `unifi_*` custom fields (identity = console uuid serial). Each AP reuses the shared AP machinery: `Access Point` role, MAC identity (`wap_mac`), `wap_group` = UniFi site name, `wap_wlc` = console name; the AP's NetBox site is the UniFi site (matched by name, created if genuinely new); vanished APs are marked offline, never deleted.
+- The console becomes a **device** with `unifi_*` custom fields (identity = console uuid serial). Each AP reuses the shared AP machinery: `Access Point` role, MAC identity (`wap_mac`), `wap_group` = UniFi site name, `wap_wlc` = console name; the AP's NetBox site comes from the standard **SITE_IP_MAP resolution on the AP's IP** (same as every other family); vanished APs are marked offline, never deleted.
 - WLANs from **all sites** become native **Wireless LANs** (group `UniFi <console>`), aggregated console-globally by SSID; the VLAN link is resolved per site from the WLAN's network binding (unique match in the site's marker-owned VLAN groups, else created in the site's UniFi group). **Passphrases are never synced.**
 - **Opt-in**: activates only when `UNIFI_RANGES` is set.
 
@@ -876,7 +876,7 @@ python -m pytest tests/
 
 **کنترلرهای بی‌سیم (Ubiquiti UniFi OS، API بر بستر HTTPS):**
 - کنسول‌های UniFi OS (UDM / CloudKey / UniFi OS Server با Network Application نسخه ۱۰.x) از طریق API نشست‌محور قدیمی: `POST /api/login` (کوکی نشست) ← `/api/self/sites` و سپس به‌ازای هر سایت `/api/s/<site>/stat/device` (APها)، `/api/s/<site>/rest/wlanconf` (WLANها) و `/api/s/<site>/rest/networkconf` (پیوندهای VLAN). یک حساب ادمین **محلی** اختصاصی بسازید (حساب‌های ابری UI.com به‌خاطر MFA اتوماسیون را می‌شکنند).
-- کنسول به یک **دستگاه** با فیلدهای سفارشی `unifi_*` تبدیل می‌شود (هویت = سریال uuid کنسول). هر AP از ماشین‌آلات مشترک AP استفاده می‌کند: نقش `Access Point`، هویت بر اساس MAC (`wap_mac`)، فیلد `wap_group` = نام سایت UniFi و `wap_wlc` = نام کنسول؛ سایت NetBox هر AP همان سایت UniFi است (تطبیق بر اساس نام، در صورت نبودن ساخته می‌شود)؛ APهای ناپدیدشده آفلاین علامت می‌خورند و هرگز حذف نمی‌شوند.
+- کنسول به یک **دستگاه** با فیلدهای سفارشی `unifi_*` تبدیل می‌شود (هویت = سریال uuid کنسول). هر AP از ماشین‌آلات مشترک AP استفاده می‌کند: نقش `Access Point`، هویت بر اساس MAC (`wap_mac`)، فیلد `wap_group` = نام سایت UniFi و `wap_wlc` = نام کنسول؛ سایت NetBox هر AP از **تفکیک استاندارد SITE_IP_MAP روی IP سِ AP** به دست می‌آید (مثل همه خانواده‌های دیگر)؛ APهای ناپدیدشده آفلاین علامت می‌خورند و هرگز حذف نمی‌شوند.
 - WLANهای **همه سایت‌ها** به **Wireless LANهای** بومی NetBox تبدیل می‌شوند (گروه `UniFi <console>`)، تجمیع سراسری به‌ازای هر SSID؛ پیوند VLAN هر WLAN از روی network binding آن به‌ازای هر سایت حل می‌شود (تطبیق یکتا در گروه‌های VLAN علامت‌دار سایت، وگرنه در گروه UniFi آن سایت ساخته می‌شود). **عبارات عبور (passphrase) هرگز همگام‌سازی نمی‌شوند.**
 - **اختیاری**: فقط وقتی `UNIFI_RANGES` تنظیم شود فعال می‌شود.
 

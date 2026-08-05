@@ -28,7 +28,7 @@
 
 **WLANs** — **reuse the Ruckus Wireless LAN machinery**: `sync_wireless_lans` + `sweep_wireless_lans` (marker `netbox-sync: <console name>`). Auth mapping: `security`/`wpa_mode` → open / wpa-personal / wpa-enterprise (guest WLANs noted in description). VLAN linkage: `networkconf_id` → `/api/s/<site>/rest/networkconf` `vlan` id → resolved against the site's groups (unique match → link; else create in a per-site UniFi group? No — reuse existing resolution: unique match → link; otherwise per-device group keyed by console+site name).
 
-**Site mapping** — UniFi site `desc` → NetBox site: exact name match first (get_or_create_site(desc)), else `resolve_site` fallback. APs inherit their UniFi site desc as their site.
+**Site mapping** — AP NetBox site = the **standard `resolve_site` resolution (SITE_IP_MAP longest-prefix on the AP's IP, then keyword, then default)** — identical to every other family. The UniFi site `desc` is kept only in `wap_group`. WLAN→VLAN resolution sites are derived per UniFi site from the **majority of its APs' resolved sites** (a UniFi site with no APs gets no VLAN bindings). ~~Exact name match on desc, else `resolve_site` fallback~~ (superseded 2026-08-05: desc-based sites were wrong — most APs belong to HQ/NXP per SITE_IP_MAP).
 
 **Config** — `UNIFI_RANGES` (console IPs, empty = disabled), `UNIFI_USER/PASS`, `UNIFI_PORT` (8443); creds validated only when ranges set.
 

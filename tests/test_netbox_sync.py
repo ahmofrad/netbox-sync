@@ -78,6 +78,11 @@ class FakeEndpoint:
             # NetBox's device_id filter matches the device relation — model it
             if not hasattr(rec, "device_id") and hasattr(rec, "device"):
                 rec.device_id = rec.device
+            # same for the site/role relation filters
+            if not hasattr(rec, "site_id") and hasattr(rec, "site"):
+                rec.site_id = rec.site
+            if not hasattr(rec, "role_id") and hasattr(rec, "role"):
+                rec.role_id = rec.role
             self.items.append(rec)
             records.append(rec)
         return records if isinstance(payload, list) else records[0]
@@ -596,6 +601,38 @@ def test_ensure_ap_device_creates_and_matches_by_mac(monkeypatch):
     dev_id2 = nbx.ensure_ap_device(ap, "Ruckus-Controller_02")
     assert dev_id2 == dev_id
     assert len(devices_ep.created) == 1
+
+
+def test_ensure_ap_device_disambiguates_duplicate_names(monkeypatch):
+    """Two APs named "F1" whose sites resolve to ONE NetBox site: NetBox
+    enforces name uniqueness per site, so the second gets a stable MAC
+    suffix; a later run keeps names stable and never duplicates."""
+    devices_ep = FakeEndpoint()
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(devices=devices_ep))
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda n: 11)
+    monkeypatch.setattr(nbx, "get_or_create_role", lambda n, *a: 12)
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda n: 13)
+    monkeypatch.setattr(nbx, "get_or_create_device_type", lambda *a, **k: 14)
+
+    ap1 = {"mac": "b4:fb:e4:c3:48:4b", "model": "U7PG2", "name": "F1",
+           "group": "Mollasadra", "ip": "192.168.236.17", "approved": True}
+    ap2 = {"mac": "b4:fb:e4:c3:55:68", "model": "U7PG2", "name": "F1",
+           "group": "Pardis", "ip": "192.168.236.18", "approved": True}
+    nbx.ensure_ap_device(ap1, "unifi-x", manufacturer="Ubiquiti")
+    nbx.ensure_ap_device(ap2, "unifi-x", manufacturer="Ubiquiti")
+    assert [p["name"] for p in devices_ep.created] == ["F1", "F1 (5568)"]
+
+    # repeat run: matched by wap_mac, suffixed name stays, nothing duplicated
+    nbx.ensure_ap_device(ap2, "unifi-x", manufacturer="Ubiquiti")
+    assert len(devices_ep.created) == 2
+    assert devices_ep.updated[-1]["name"] == "F1 (5568)"
+
+    # a third same-named AP never adopts the first's device via name+site
+    ap3 = {"mac": "b4:fb:e4:c3:99:99", "model": "U7PG2", "name": "F1",
+           "group": "Sharif", "ip": "192.168.236.19", "approved": True}
+    nbx.ensure_ap_device(ap3, "unifi-x", manufacturer="Ubiquiti")
+    assert devices_ep.created[-1]["name"] == "F1 (9999)"
+    assert devices_ep.created[-1]["custom_fields"]["wap_mac"] == ap3["mac"]
 
 
 def test_mark_ap_offline(monkeypatch):
