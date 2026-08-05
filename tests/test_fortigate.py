@@ -204,6 +204,14 @@ def test_fg_interface_type():
     assert mod._fg_interface_type(None) == "other"
 
 
+def test_fortigate_session_basic_auth(monkeypatch):
+    """Sessions always use HTTP Basic auth with admin credentials."""
+    monkeypatch.setattr(mod, "FORTIGATE_USER", "u")
+    monkeypatch.setattr(mod, "FORTIGATE_PASS", "p")
+    sess = mod.FortiGateSession("10.0.0.1", 443)
+    assert sess.s.auth == ("u", "p")
+
+
 LLDP_SUMMARY = """-----------------------------------------------------------------------------
 Port        Device ID          SysName          Capabilities  TTL   Port ID
 port1       00:1c:73:ab:cd:ef  F10-SW-W-02      B,R           120   Gi1/0/1

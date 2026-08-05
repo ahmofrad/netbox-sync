@@ -172,11 +172,10 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `CISCO_PORT` | ❌ | `22` | SSH port for Cisco switches. |
 | `CISCO_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for Cisco switches. Empty = family disabled. |
 | `DEFAULT_CISCO_ROLE` | ❌ | `Switch` | NetBox device role for Cisco switches. |
-| `FORTIGATE_USER` | ❌* | — | SSH username for FortiGates (LLDP + transceivers); required when `FORTIGATE_RANGES` is set. |
-| `FORTIGATE_PASS` | ❌* | — | SSH password for FortiGates. |
-| `FORTIGATE_PORT` | ❌ | `443` | REST API port (per-device override possible in the token file). |
+| `FORTIGATE_USER` | ❌* | — | Admin username for FortiGates (REST API **Basic auth** + SSH extras); required when `FORTIGATE_RANGES` is set. |
+| `FORTIGATE_PASS` | ❌* | — | Admin password for FortiGates. |
+| `FORTIGATE_PORT` | ❌ | `443` | REST API port. |
 | `FORTIGATE_SSH_PORT` | ❌ | `22` | SSH port for FortiGates. |
-| `FORTIGATE_TOKEN_FILE` | ❌ | `fortigate_tokens.txt` | Per-device API tokens: `<ip[:port]> <token>` per line (`#` comments). Gitignored. |
 | `FORTIGATE_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for FortiGates. Empty = family disabled. |
 | `DEFAULT_FORTIGATE_ROLE` | ❌ | `Firewall` | NetBox device role for FortiGates. |
 | `RUCKUS_USER` | ❌* | — | SSH username for Ruckus ZDs (required when `RUCKUS_RANGES` is set). |
@@ -416,7 +415,7 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 
 **Firewalls (FortiGate, REST API + SSH extras):**
 - FortiGate 40F / 60F / 80F / 100F / 200F class (FortiOS 6/7). Queries `/api/v2/monitor/system/status`, `/api/v2/monitor/system/interface`, `/api/v2/cmdb/system/interface` (VDOM `root`).
-- API tokens are **per-device** in `fortigate_tokens.txt` (gitignored): `<ip[:port]> <token>` per line, `#` comments allowed.
+- Authentication is HTTP **Basic auth** with admin credentials (`FORTIGATE_USER`/`FORTIGATE_PASS`) — no API tokens needed.
 - SSH runs `diagnose lldp neighbor-summary` (cables) and `diagnose sys transceiver list` (SFP inventory).
 - Aggregate (port-channel) interfaces are imported from cmdb as NetBox `lag` interfaces; member ports link via `lag`, VLAN subinterfaces link via `parent` to their LAG/parent interface.
 - **Opt-in**: activates only when `FORTIGATE_RANGES` is set.
@@ -636,11 +635,10 @@ pip install -r requirements.txt
 | `CISCO_PORT` | ❌ | `22` | پورت SSH برای سوئیچ‌های سیسکو. |
 | `CISCO_RANGES` | ❌ | *(خالی)* | بازه‌های CIDR جداشده با کاما برای سوئیچ‌های سیسکو. خالی = خانواده غیرفعال. |
 | `DEFAULT_CISCO_ROLE` | ❌ | `Switch` | نقش دستگاه در NetBox برای سوئیچ‌های سیسکو. |
-| `FORTIGATE_USER` | ❌* | — | نام کاربری SSH برای FortiGateها (LLDP + ترانسسیورها)؛ وقتی `FORTIGATE_RANGES` تنظیم شده الزامی است. |
-| `FORTIGATE_PASS` | ❌* | — | رمز عبور SSH برای FortiGateها. |
-| `FORTIGATE_PORT` | ❌ | `443` | پورت REST API (امکان بازنویسی per-device در فایل توکن). |
+| `FORTIGATE_USER` | ❌* | — | نام کاربری ادمین FortiGateها (احراز **Basic** برای REST API + SSH)؛ وقتی `FORTIGATE_RANGES` تنظیم شده الزامی است. |
+| `FORTIGATE_PASS` | ❌* | — | رمز عبور ادمین FortiGateها. |
+| `FORTIGATE_PORT` | ❌ | `443` | پورت REST API. |
 | `FORTIGATE_SSH_PORT` | ❌ | `22` | پورت SSH برای FortiGateها. |
-| `FORTIGATE_TOKEN_FILE` | ❌ | `fortigate_tokens.txt` | توکن‌های API به‌صورت per-device: در هر خط `<ip[:port]> <token>` (کامنت با `#`). این فایل در gitignore قرار دارد. |
 | `FORTIGATE_RANGES` | ❌ | *(خالی)* | بازه‌های CIDR جداشده با کاما برای FortiGateها. خالی = خانواده غیرفعال. |
 | `DEFAULT_FORTIGATE_ROLE` | ❌ | `Firewall` | نقش دستگاه در NetBox برای FortiGateها. |
 | `RUCKUS_USER` | ❌* | — | نام کاربری SSH برای کنترلرهای Ruckus (وقتی `RUCKUS_RANGES` تنظیم شده الزامی است). |
@@ -852,7 +850,7 @@ python -m pytest tests/
 
 **فایروالها (FortiGate، REST API + SSH):**
 - خانواده FortiGate 40F / 60F / 80F / 100F / 200F (FortiOS 6/7). کوئری‌های `/api/v2/monitor/system/status`، `/api/v2/monitor/system/interface`، `/api/v2/cmdb/system/interface` (VDOM سِ `root`).
-- توکن‌های API به‌صورت **per-device** در `fortigate_tokens.txt` (gitignore‌شده): در هر خط `<ip[:port]> <token>`، کامنت با `#`.
+- احراز هویت با **Basic auth** و اعتبار ادمین (`FORTIGATE_USER`/`FORTIGATE_PASS`) — بدون نیاز به توکن API.
 - SSH برای اجرای `diagnose lldp neighbor-summary` (کابل‌ها) و `diagnose sys transceiver list` (ترانسسیورهای SFP).
 - رابط‌های aggregate (port-channel) از cmdb به‌عنوان رابط `lag` در NetBox وارد می‌شوند؛ پورت‌های عضو با `lag` و زیررابط‌های VLAN با `parent` به رابط LAG/والد خود پیوند می‌خورند.
 - **اختیاری**: فقط وقتی `FORTIGATE_RANGES` تنظیم شود فعال می‌شود.

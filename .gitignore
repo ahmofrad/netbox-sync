@@ -21,6 +21,3 @@ venv/
 # Runtime lock
 netbox-sync.lock
 
-# FortiGate API tokens (secrets)
-fortigate_tokens.txt
-
