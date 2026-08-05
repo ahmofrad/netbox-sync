@@ -16,17 +16,32 @@ from netbox_sync.utils import (normalize_model, _invalid_serial,
 # ── REST API session + mappers ───────────────────────────────────────────────
 
 class FortiGateSession:
+    """FortiOS session-based auth: POST /logincheck with admin username and
+    secretkey to obtain session cookies (the documented username/password
+    alternative to api-user tokens). Re-logs in on 401 (expired session)."""
+
     def __init__(self, ip, port, timeout=30):
         self.base = f"https://{ip}:{port}"
         self.s = requests.Session()
         self.s.verify = False
-        # FortiOS accepts HTTP Basic auth with admin credentials.
-        if FORTIGATE_USER and FORTIGATE_PASS:
-            self.s.auth = (FORTIGATE_USER, FORTIGATE_PASS)
         self.timeout = timeout
+        self._login()
+
+    def _login(self):
+        r = self.s.post(f"{self.base}/logincheck",
+                        data={"username": FORTIGATE_USER,
+                              "secretkey": FORTIGATE_PASS},
+                        timeout=self.timeout)
+        # post-login-banner flow (if enabled) requires a disclaimer confirm
+        if "logindisclaimer" in r.text:
+            self.s.post(f"{self.base}/logindisclaimer",
+                        data={"confirm": 1}, timeout=self.timeout)
 
     def get(self, path):
         r = self.s.get(f"{self.base}{path}", timeout=self.timeout)
+        if r.status_code == 401:
+            self._login()
+            r = self.s.get(f"{self.base}{path}", timeout=self.timeout)
         r.raise_for_status()
         return r.json()
 
