@@ -1,4 +1,6 @@
 """Tests for the FortiGate REST API mappers (pure JSON -> dict)."""
+import requests
+
 import netbox_sync.collectors.fortigate as mod
 
 
@@ -202,6 +204,46 @@ def test_fg_interface_type():
     assert mod._fg_interface_type(1000) == "1000base-t"
     assert mod._fg_interface_type(10000) == "10gbase-t"
     assert mod._fg_interface_type(None) == "other"
+
+
+def test_fortigate_session_login_flow(monkeypatch):
+    """Sessions log in via /logincheck with the admin secretkey and retry on 401."""
+    calls = []
+
+    class FakeResp:
+        def __init__(self, status, text=""):
+            self.status_code = status
+            self.text = text
+            self._text = text
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(self.status_code)
+        def json(self):
+            return {"ok": True}
+
+    class FakeSession(requests.Session):
+        verify = False
+        def post(self, url, data=None, timeout=None):
+            calls.append(("POST", url, data))
+            return FakeResp(200)
+        def get(self, url, timeout=None):
+            calls.append(("GET", url, None))
+            if len([c for c in calls if c[0] == "GET"]) == 1:
+                return FakeResp(401)
+            return FakeResp(200)
+
+    monkeypatch.setattr(mod, "FORTIGATE_USER", "netbox")
+    monkeypatch.setattr(mod, "FORTIGATE_PASS", "s3cret")
+    monkeypatch.setattr(mod.requests, "Session", FakeSession)
+
+    sess = mod.FortiGateSession("10.0.0.1", 58291)
+    assert calls[0] == ("POST", "https://10.0.0.1:58291/logincheck",
+                        {"username": "netbox", "secretkey": "s3cret"})
+
+    out = sess.get("/api/v2/monitor/system/status")
+    assert out == {"ok": True}
+    # 401 on first GET -> re-login (second POST) then retry
+    assert [c[0] for c in calls].count("POST") == 2
 
 
 LLDP_SUMMARY = """-----------------------------------------------------------------------------

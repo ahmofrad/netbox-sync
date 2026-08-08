@@ -78,6 +78,11 @@ class FakeEndpoint:
             # NetBox's device_id filter matches the device relation — model it
             if not hasattr(rec, "device_id") and hasattr(rec, "device"):
                 rec.device_id = rec.device
+            # same for the site/role relation filters
+            if not hasattr(rec, "site_id") and hasattr(rec, "site"):
+                rec.site_id = rec.site
+            if not hasattr(rec, "role_id") and hasattr(rec, "role"):
+                rec.role_id = rec.role
             self.items.append(rec)
             records.append(rec)
         return records if isinstance(payload, list) else records[0]
@@ -485,40 +490,17 @@ def test_cable_iface_ids_handles_generic_objects():
     assert sorted(cisco._cable_iface_ids(cable)) == [1, 2, 3, 4]
 
 
-# ── FortiGate token file ─────────────────────────────────────────────────────
-
-def test_fortigate_token_file_parsing(tmp_path):
-    f = tmp_path / "tokens.txt"
-    f.write_text(
-        "# comment line\n"
-        "\n"
-        "172.31.1.1 token-one\n"
-        "172.31.1.2:8443 token-two\n"
-        "badline\n",
-        encoding="utf-8")
-    tokens = cfg._load_fortigate_tokens(str(f))
-    assert tokens == {"172.31.1.1": (443, "token-one"),
-                      "172.31.1.2": (8443, "token-two")}
-
-
-def test_fortigate_token_file_missing(tmp_path):
-    assert cfg._load_fortigate_tokens(str(tmp_path / "nope.txt")) == {}
-
-
 def test_validate_config_fortigate_requirements(monkeypatch, tmp_path):
     for var in REQUIRED_VARS:
         monkeypatch.setenv(var, "x")
     monkeypatch.delenv("FORTIGATE_USER", raising=False)
     monkeypatch.delenv("FORTIGATE_PASS", raising=False)
     monkeypatch.setenv("FORTIGATE_RANGES", "192.0.2.0/29")
-    f = tmp_path / "tokens.txt"
-    f.write_text("192.0.2.1 tok\n", encoding="utf-8")
-    monkeypatch.setenv("FORTIGATE_TOKEN_FILE", str(f))
     with pytest.raises(RuntimeError, match="FORTIGATE_USER"):
         cfg._validate_config()
     monkeypatch.setenv("FORTIGATE_USER", "u")
     monkeypatch.setenv("FORTIGATE_PASS", "p")
-    cfg._validate_config()   # creds + non-empty token file -> passes
+    cfg._validate_config()   # basic-auth creds present -> passes
 
 
 # ── Ruckus config + sysinfo parser ───────────────────────────────────────────
@@ -621,6 +603,38 @@ def test_ensure_ap_device_creates_and_matches_by_mac(monkeypatch):
     assert len(devices_ep.created) == 1
 
 
+def test_ensure_ap_device_disambiguates_duplicate_names(monkeypatch):
+    """Two APs named "F1" whose sites resolve to ONE NetBox site: NetBox
+    enforces name uniqueness per site, so the second gets a stable MAC
+    suffix; a later run keeps names stable and never duplicates."""
+    devices_ep = FakeEndpoint()
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(devices=devices_ep))
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda n: 11)
+    monkeypatch.setattr(nbx, "get_or_create_role", lambda n, *a: 12)
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda n: 13)
+    monkeypatch.setattr(nbx, "get_or_create_device_type", lambda *a, **k: 14)
+
+    ap1 = {"mac": "b4:fb:e4:c3:48:4b", "model": "U7PG2", "name": "F1",
+           "group": "Mollasadra", "ip": "192.168.236.17", "approved": True}
+    ap2 = {"mac": "b4:fb:e4:c3:55:68", "model": "U7PG2", "name": "F1",
+           "group": "Pardis", "ip": "192.168.236.18", "approved": True}
+    nbx.ensure_ap_device(ap1, "unifi-x", manufacturer="Ubiquiti")
+    nbx.ensure_ap_device(ap2, "unifi-x", manufacturer="Ubiquiti")
+    assert [p["name"] for p in devices_ep.created] == ["F1", "F1 (5568)"]
+
+    # repeat run: matched by wap_mac, suffixed name stays, nothing duplicated
+    nbx.ensure_ap_device(ap2, "unifi-x", manufacturer="Ubiquiti")
+    assert len(devices_ep.created) == 2
+    assert devices_ep.updated[-1]["name"] == "F1 (5568)"
+
+    # a third same-named AP never adopts the first's device via name+site
+    ap3 = {"mac": "b4:fb:e4:c3:99:99", "model": "U7PG2", "name": "F1",
+           "group": "Sharif", "ip": "192.168.236.19", "approved": True}
+    nbx.ensure_ap_device(ap3, "unifi-x", manufacturer="Ubiquiti")
+    assert devices_ep.created[-1]["name"] == "F1 (9999)"
+    assert devices_ep.created[-1]["custom_fields"]["wap_mac"] == ap3["mac"]
+
+
 def test_mark_ap_offline(monkeypatch):
     dev = FakeRecord(7, name="F13-AP-W", custom_fields={"wap_enabled": True})
     devices_ep = FakeEndpoint([dev])
@@ -701,6 +715,78 @@ def test_sweep_wireless_lans(monkeypatch):
 
     nbx.sweep_wireless_lans("Ruckus-Controller_02", {"Smart Plug"})
     assert api.wireless.wireless_lans.deleted_ids == [50]
+
+
+# ── UniFi session + parsers ──────────────────────────────────────────────────
+
+UNIFI_STATUS = {"meta": {"rc": "ok", "up": True,
+                         "server_version": "10.2.105",
+                         "uuid": "6dd002d7-b9f1-4625-84f2-b7b4f9400c16"},
+                "data": []}
+
+UNIFI_SITES = {"meta": {"rc": "ok"}, "data": [
+    {"name": "default", "desc": "Default", "_id": "588f25805bdbb3cf25db3fe1"},
+    {"name": "08r8os8i", "desc": "SnappPay", "_id": "62f73ef0567d3214303522d7"},
+    {"name": "ressysr4", "desc": "HQ-General", "_id": "64d2169dff7ccc1690b5cea6"},
+]}
+
+UNIFI_DEVICES = {"meta": {"rc": "ok"}, "data": [
+    {"_id": "67a38c6a0cfd72475b8ec7f7", "mac": "f4:e2:c6:13:da:0f",
+     "name": "F5-GamingRoom", "model": "U7PG2", "serial": "F4E2C613DA0F",
+     "ip": "192.168.254.14", "version": "6.6.77.15402", "type": "uap",
+     "state": 0, "adopted": True, "uptime": None},
+    {"_id": "67fa51eb667d7102b6961a55", "mac": "b4:fb:e4:c3:48:4b",
+     "name": "F3-S", "model": "U7PG2", "serial": "B4FBE4C3484B",
+     "ip": "192.168.236.17", "version": "6.8.2.15592", "type": "uap",
+     "state": 1, "adopted": True, "uptime": 954532},
+    {"_id": "6474dfd9ff7ccc11802fa6bb", "mac": "78:45:58:26:96:b4",
+     "name": "usw-mini", "model": "USW-MINI", "serial": "7845582696B4",
+     "ip": "172.31.2.253", "version": "6.6.77.15402", "type": "usw",
+     "state": 1, "adopted": True, "uptime": 1000},
+]}
+
+UNIFI_WLANS = {"meta": {"rc": "ok"}, "data": [
+    {"_id": "w1", "name": "Smart Plug", "security": "wpa2",
+     "wpa_mode": "wpa2", "wpa_enc": "aes", "enabled": True,
+     "hide_ssid": False, "is_guest": False, "networkconf_id": "n1",
+     "site_id": "s1"},
+    {"_id": "w2", "name": "CorpNet", "security": "8021x",
+     "wpa_mode": "wpa3", "wpa_enc": "aes", "enabled": True,
+     "hide_ssid": False, "is_guest": False, "networkconf_id": "n2",
+     "site_id": "s1"},
+]}
+
+UNIFI_NETWORKS = {"meta": {"rc": "ok"}, "data": [
+    {"_id": "n1", "name": "IOT", "vlan": 109, "site_id": "s1"},
+    {"_id": "n2", "name": "Corp", "vlan": 10, "site_id": "s1"},
+]}
+
+
+def test_unifi_parse_sites_devices_wlans_networks():
+    import netbox_sync.collectors.unifi as unifi
+    sites = unifi._parse_sites(UNIFI_SITES)
+    assert sites == [
+        {"name": "default", "desc": "Default"},
+        {"name": "08r8os8i", "desc": "SnappPay"},
+        {"name": "ressysr4", "desc": "HQ-General"},
+    ]
+    aps = unifi._parse_devices(UNIFI_DEVICES)
+    assert aps == [
+        {"mac": "f4:e2:c6:13:da:0f", "model": "U7PG2", "name": "F5-GamingRoom",
+         "group": None, "ip": "192.168.254.14", "approved": True,
+         "firmware": "6.6.77.15402", "state": 0},
+        {"mac": "b4:fb:e4:c3:48:4b", "model": "U7PG2", "name": "F3-S",
+         "group": None, "ip": "192.168.236.17", "approved": True,
+         "firmware": "6.8.2.15592", "state": 1},
+    ]   # type usw filtered out; only uap
+    wlans = unifi._parse_wlans(UNIFI_WLANS)
+    assert wlans[0]["ssid"] == "Smart Plug"
+    assert wlans[0]["security"] == "wpa2"
+    assert wlans[0]["auth"] == "wpa2"        # personal -> shared vocab
+    assert wlans[0]["networkconf_id"] == "n1"
+    assert wlans[1]["auth"] == "802.1x"      # enterprise -> shared vocab
+    nets = unifi._parse_networks(UNIFI_NETWORKS)
+    assert nets == {"n1": 109, "n2": 10}
 
 
 # ── Ruckus HA resolution + controller device ─────────────────────────────────

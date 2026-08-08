@@ -471,26 +471,43 @@ def mark_fortigate_offline(dev_id, dev_name):
         log("ERROR", f"  Could not mark FortiGate offline {dev_name}: {e}")
 
 
-def ensure_ap_device(ap, wlc_name, role_name=None):
-    """Ensure a NetBox device for a Ruckus access point. APs have no serial —
-    identity is the MAC (wap_mac custom field)."""
+def ensure_ap_device(ap, wlc_name, role_name=None, manufacturer="Ruckus",
+                     site_name=None):
+    """Ensure a NetBox device for an access point (Ruckus or UniFi). APs have
+    no reliable serial — identity is the MAC (wap_mac custom field).
+    site_name overrides keyword-based site resolution (UniFi: the site desc)."""
     from netbox_sync.config import AP_ROLE
     mac = ap["mac"]
     role = role_name or AP_ROLE
-    mfr_id = get_or_create_manufacturer("Ruckus")
+    mfr_id = get_or_create_manufacturer(manufacturer)
     role_id = get_or_create_role(role, "00acc1")
-    site_name = resolve_site(ap.get("name") or "", ap.get("ip") or "")
+    site_name = site_name or resolve_site(ap.get("name") or "",
+                                          ap.get("ip") or "")
     site_id = get_or_create_site(site_name)
-    dtype_id = get_or_create_device_type(ap.get("model") or "Ruckus AP", mfr_id)
+    dtype_id = get_or_create_device_type(ap.get("model") or f"{manufacturer} AP",
+                                         mfr_id)
     name = (ap.get("name") or mac)[:64]
     api = get_netbox()
     dev = next(iter(api.dcim.devices.filter(cf_wap_mac=mac)), None)
     if dev is None:
-        cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
-                                             role_id=role_id))
+        # adopt by name+site+role only when the candidate has no wap_mac of
+        # its own — a device with a DIFFERENT wap_mac is a different AP
+        cands = [d for d in api.dcim.devices.filter(name=name, site_id=site_id,
+                                                    role_id=role_id)
+                 if not (d.custom_fields or {}).get("wap_mac")]
         dev = cands[0] if cands else None
         if dev:
             log("INFO", f"  Found AP by name+site: {name} (id={dev.id})")
+    # NetBox enforces device-name uniqueness per site. AP names are not
+    # unique across controller sites (two "F1"s whose sites resolve to one
+    # NetBox site) — disambiguate with a stable MAC-based suffix when the
+    # plain name is held by any other device. Recomputed every run, so the
+    # name reverts to plain once the clash disappears.
+    clash = any(d.id != (dev.id if dev else None)
+                and (d.custom_fields or {}).get("wap_mac") != mac
+                for d in api.dcim.devices.filter(name=name, site_id=site_id))
+    if clash:
+        name = f"{name} ({mac.replace(':', '')[-4:]})"
     payload = {
         "name": name, "status": "active", "site": site_id,
         "device_type": dtype_id, "role": role_id,
@@ -529,6 +546,58 @@ def mark_ruckus_offline(dev_id, dev_name):
         log("WARN", f"  ZD marked offline: {dev_name} (id={dev_id})")
     except Exception as e:
         log("ERROR", f"  Could not mark ZD offline {dev_name}: {e}")
+
+
+def ensure_unifi_console(probe, ap_count=0, site_count=0):
+    """Ensure the NetBox device for a UniFi OS console. Identity: the console
+    uuid (serial field), then unifi_ip, then name+site+role."""
+    from netbox_sync.config import UNIFI_ROLE
+    serial = (probe.get("serial") or "").strip()
+    mfr_id = get_or_create_manufacturer("Ubiquiti")
+    role_id = get_or_create_role(UNIFI_ROLE, "8e44ad")
+    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
+    site_id = get_or_create_site(site_name)
+    dtype_id = get_or_create_device_type(probe.get("model")
+                                         or "UniFi OS Console", mfr_id)
+    name = (probe.get("hostname")
+            or f"unifi-{probe['ip'].replace('.', '-')}")[:64]
+    api = get_netbox()
+    dev = None
+    if not _invalid_serial(serial):
+        dev = find_device(serial, role_name=UNIFI_ROLE)
+    if dev is None:
+        dev = next(iter(api.dcim.devices.filter(cf_unifi_ip=probe["ip"])), None)
+    if dev is None:
+        cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
+                                             role_id=role_id))
+        dev = cands[0] if cands else None
+        if dev:
+            log("INFO", f"  Found UniFi console by name+site: {name} (id={dev.id})")
+    cf = {"unifi_ip": probe["ip"], "unifi_enabled": True,
+          "unifi_version": probe.get("firmware"),
+          "unifi_ap_count": ap_count, "unifi_sites": site_count}
+    payload = {"name": name, "status": "active", "site": site_id,
+               "device_type": dtype_id, "role": role_id,
+               "custom_fields": cf,
+               **({"serial": serial} if not _invalid_serial(serial) else {})}
+    if dev:
+        api.dcim.devices.update([{"id": dev.id, **payload}])
+        log("INFO", f"  UniFi console updated: {name} (id={dev.id})")
+        return dev.id
+    new = api.dcim.devices.create(payload)
+    log("INFO", f"  UniFi console created: {name} (id={new.id})")
+    return new.id
+
+
+def mark_unifi_offline(dev_id, dev_name):
+    try:
+        get_netbox().dcim.devices.update([{
+            "id": dev_id, "status": "offline",
+            "custom_fields": {"unifi_enabled": False},
+        }])
+        log("WARN", f"  UniFi console marked offline: {dev_name} (id={dev_id})")
+    except Exception as e:
+        log("ERROR", f"  Could not mark UniFi console offline {dev_name}: {e}")
 
 
 def ensure_hikvision_device(probe):
@@ -662,8 +731,10 @@ def mark_camera_offline(dev_id, dev_name):
         log("ERROR", f"  Could not mark camera offline {dev_name}: {e}")
 
 
-_WLAN_AUTH_MAP = {"open": "open", "wpa2": "wpa-personal",
-                  "802.1x": "wpa-enterprise"}
+_WLAN_AUTH_MAP = {"open": "open", "wpa": "wpa-personal",
+                  "wpa2": "wpa-personal", "wpa3": "wpa-personal",
+                  "802.1x": "wpa-enterprise", "8021x": "wpa-enterprise",
+                  "dot1x": "wpa-enterprise"}
 
 
 def ensure_wireless_lan_group(name):
@@ -676,11 +747,13 @@ def ensure_wireless_lan_group(name):
          "description": f"netbox-sync: {name}"}).id
 
 
-def sync_wireless_lans(wlc_name, wlans, vid_map):
-    """Sync ZD WLANs as NetBox Wireless LANs (ssid/auth/vlan). Passphrases
-    are never written. Returns the set of SSIDs seen (for sweeping)."""
+def sync_wireless_lans(wlc_name, wlans, vid_map, group_prefix="ZD"):
+    """Sync controller WLANs as NetBox Wireless LANs (ssid/auth/vlan).
+    Passphrases are never written. Returns the set of SSIDs seen (for
+    sweeping). group_prefix names the Wireless LAN group ('ZD' for Ruckus,
+    'UniFi' for UniFi consoles)."""
     api = get_netbox()
-    group_id = ensure_wireless_lan_group(f"ZD {wlc_name}")
+    group_id = ensure_wireless_lan_group(f"{group_prefix} {wlc_name}")
     seen = set()
     for w in wlans:
         ssid = (w.get("ssid") or w.get("name") or "").strip()[:32]

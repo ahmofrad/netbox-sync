@@ -172,11 +172,10 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `CISCO_PORT` | ❌ | `22` | SSH port for Cisco switches. |
 | `CISCO_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for Cisco switches. Empty = family disabled. |
 | `DEFAULT_CISCO_ROLE` | ❌ | `Switch` | NetBox device role for Cisco switches. |
-| `FORTIGATE_USER` | ❌* | — | SSH username for FortiGates (LLDP + transceivers); required when `FORTIGATE_RANGES` is set. |
-| `FORTIGATE_PASS` | ❌* | — | SSH password for FortiGates. |
-| `FORTIGATE_PORT` | ❌ | `443` | REST API port (per-device override possible in the token file). |
+| `FORTIGATE_USER` | ❌* | — | Admin username for FortiGates (REST API **Basic auth** + SSH extras); required when `FORTIGATE_RANGES` is set. |
+| `FORTIGATE_PASS` | ❌* | — | Admin password for FortiGates. |
+| `FORTIGATE_PORT` | ❌ | `443` | REST API port. |
 | `FORTIGATE_SSH_PORT` | ❌ | `22` | SSH port for FortiGates. |
-| `FORTIGATE_TOKEN_FILE` | ❌ | `fortigate_tokens.txt` | Per-device API tokens: `<ip[:port]> <token>` per line (`#` comments). Gitignored. |
 | `FORTIGATE_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for FortiGates. Empty = family disabled. |
 | `DEFAULT_FORTIGATE_ROLE` | ❌ | `Firewall` | NetBox device role for FortiGates. |
 | `RUCKUS_USER` | ❌* | — | SSH username for Ruckus ZDs (required when `RUCKUS_RANGES` is set). |
@@ -341,7 +340,17 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 | `cam_model` | Text | Model |
 | `cam_serial` | Text | Camera serial |
 
-> The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` / `cf_nvr_enabled=True` (NetBox custom-field filter syntax).
+**For UniFi OS consoles:**
+
+| Custom field | Type | Label |
+|--------------|------|-------|
+| `unifi_ip` | Text | UniFi console IP |
+| `unifi_enabled` | Boolean | UniFi enabled |
+| `unifi_version` | Text | UniFi OS version |
+| `unifi_ap_count` | Integer | Number of managed APs |
+| `unifi_sites` | Integer | Number of sites |
+
+> The offline-detection loop filters devices via `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` / `cf_nvr_enabled=True` / `cf_unifi_enabled=True` (NetBox custom-field filter syntax).
 
 ### 3. Device roles & sites
 
@@ -414,9 +423,15 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 - **HA pairs:** `RUCKUS_HA_MAP=vip:primary,secondary` (per pair, `;`-separated) merges a pair into one cluster device — identity from VIP/primary probes only, secondary probes update liveness only; primary IPv4 = the VIP.
 - **Opt-in**: activates only when `RUCKUS_RANGES` is set.
 
+**Wireless controllers (Ubiquiti UniFi OS, HTTPS API):**
+- UniFi OS consoles (UDM / CloudKey / UniFi OS Server, Network Application 10.x) via the legacy session API: `POST /api/login` (session cookie) → `/api/self/sites`, per-site `/api/s/<site>/stat/device` (APs), `/api/s/<site>/rest/wlanconf` (WLANs), `/api/s/<site>/rest/networkconf` (VLAN bindings). Use a dedicated **local** admin account (cloud UI.com accounts break on MFA).
+- The console becomes a **device** with `unifi_*` custom fields (identity = console uuid serial). Each AP reuses the shared AP machinery: `Access Point` role, MAC identity (`wap_mac`), `wap_group` = UniFi site name, `wap_wlc` = console name; the AP's NetBox site comes from the standard **SITE_IP_MAP resolution on the AP's IP** (same as every other family); vanished APs are marked offline, never deleted.
+- WLANs from **all sites** become native **Wireless LANs** (group `UniFi <console>`), aggregated console-globally by SSID; the VLAN link is resolved per site from the WLAN's network binding (unique match in the site's marker-owned VLAN groups, else created in the site's UniFi group). **Passphrases are never synced.**
+- **Opt-in**: activates only when `UNIFI_RANGES` is set.
+
 **Firewalls (FortiGate, REST API + SSH extras):**
 - FortiGate 40F / 60F / 80F / 100F / 200F class (FortiOS 6/7). Queries `/api/v2/monitor/system/status`, `/api/v2/monitor/system/interface`, `/api/v2/cmdb/system/interface` (VDOM `root`).
-- API tokens are **per-device** in `fortigate_tokens.txt` (gitignored): `<ip[:port]> <token>` per line, `#` comments allowed.
+- Authentication is HTTP **Basic auth** with admin credentials (`FORTIGATE_USER`/`FORTIGATE_PASS`) — no API tokens needed.
 - SSH runs `diagnose lldp neighbor-summary` (cables) and `diagnose sys transceiver list` (SFP inventory).
 - Aggregate (port-channel) interfaces are imported from cmdb as NetBox `lag` interfaces; member ports link via `lag`, VLAN subinterfaces link via `parent` to their LAG/parent interface.
 - **Opt-in**: activates only when `FORTIGATE_RANGES` is set.
@@ -636,11 +651,10 @@ pip install -r requirements.txt
 | `CISCO_PORT` | ❌ | `22` | پورت SSH برای سوئیچ‌های سیسکو. |
 | `CISCO_RANGES` | ❌ | *(خالی)* | بازه‌های CIDR جداشده با کاما برای سوئیچ‌های سیسکو. خالی = خانواده غیرفعال. |
 | `DEFAULT_CISCO_ROLE` | ❌ | `Switch` | نقش دستگاه در NetBox برای سوئیچ‌های سیسکو. |
-| `FORTIGATE_USER` | ❌* | — | نام کاربری SSH برای FortiGateها (LLDP + ترانسسیورها)؛ وقتی `FORTIGATE_RANGES` تنظیم شده الزامی است. |
-| `FORTIGATE_PASS` | ❌* | — | رمز عبور SSH برای FortiGateها. |
-| `FORTIGATE_PORT` | ❌ | `443` | پورت REST API (امکان بازنویسی per-device در فایل توکن). |
+| `FORTIGATE_USER` | ❌* | — | نام کاربری ادمین FortiGateها (احراز **Basic** برای REST API + SSH)؛ وقتی `FORTIGATE_RANGES` تنظیم شده الزامی است. |
+| `FORTIGATE_PASS` | ❌* | — | رمز عبور ادمین FortiGateها. |
+| `FORTIGATE_PORT` | ❌ | `443` | پورت REST API. |
 | `FORTIGATE_SSH_PORT` | ❌ | `22` | پورت SSH برای FortiGateها. |
-| `FORTIGATE_TOKEN_FILE` | ❌ | `fortigate_tokens.txt` | توکن‌های API به‌صورت per-device: در هر خط `<ip[:port]> <token>` (کامنت با `#`). این فایل در gitignore قرار دارد. |
 | `FORTIGATE_RANGES` | ❌ | *(خالی)* | بازه‌های CIDR جداشده با کاما برای FortiGateها. خالی = خانواده غیرفعال. |
 | `DEFAULT_FORTIGATE_ROLE` | ❌ | `Firewall` | نقش دستگاه در NetBox برای FortiGateها. |
 | `RUCKUS_USER` | ❌* | — | نام کاربری SSH برای کنترلرهای Ruckus (وقتی `RUCKUS_RANGES` تنظیم شده الزامی است). |
@@ -773,11 +787,21 @@ DEFAULT_SWITCH_ROLE=SAN Switch
 | `fortigate_ha_mode` | Text | حالت HA (a-p / a-a) |
 | `fortigate_ha_peer` | Text | واحدهای peer سِ HA |
 | `fortigate_ha_role` | Text | نقش واحد بررسی‌شده |
+
+**برای کنسول‌های UniFi OS:**
+
+| فیلد سفارشی | نوع | برچسب |
+|--------------|------|-------|
+| `unifi_ip` | Text | IP کنسول UniFi |
+| `unifi_enabled` | Boolean | UniFi فعال |
+| `unifi_version` | Text | نسخه UniFi OS |
+| `unifi_ap_count` | Integer | تعداد APهای مدیریت‌شده |
+| `unifi_sites` | Integer | تعداد سایت‌ها |
 **NAT → IPAM:** ورودی‌های **VIP** در FortiGate به آدرس‌های IPAM برای IP خارجی (`extip`) تبدیل می‌شوند با فیلد بومی **`nat_inside`** در NetBox که به آدرس سرور داخلی نگاشت‌شده اشاره دارد؛ **poolهای IP** به آدرس‌های ساده IPAM برای محدوده SNAT تبدیل می‌شوند. هر VIP با port-forwarding همچنین به یک **NetBox Service** (پروتکل + پورت) روی دستگاه تبدیل می‌شود که به IP خارجی پیوند خورده و سرور نگاشت‌شده در توضیح آن ثبت می‌شود — بنابراین VIPهایی که یک `extip` مشترک دارند دقت کامل per-port را حفظ می‌کنند (VIPهای بدون پورت فقط با آدرس نمایش داده می‌شوند). آدرس‌ها/سرویس‌های NAT علامت‌دار (`netbox-sync: nat …`) که دیگر گزارش نشوند پس از هر اجرا حذف می‌شوند؛ ورودی‌های دستی هرگز دست نمی‌خورند.
 
 **خوشه‌های HA:** یک جفت FortiGate در حالت HA (فعال-غیرفعال یا فعال-فعال) به **یک دستگاه** در NetBox تبدیل می‌شود که نام و سریال آن از واحد primary گرفته می‌شود — با هر سریال واحد قابل شناسایی است، بنابراین لیست‌کردن هر دو واحد هرگز دستگاه تکراری نمی‌سازد. واحدهای peer در فیلدهای `fortigate_ha_*` ثبت می‌شوند و primary IPv4 از واحد primary پیروی می‌کند (بررسی واحد secondary هرگز آن را تغییر نمی‌دهد).
 
-> حلقه تشخیص آفلاین، دستگاه‌ها را با فیلتر `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` فیلتر می‌کند (سینتکس فیلتر custom field در NetBox).
+> حلقه تشخیص آفلاین، دستگاه‌ها را با فیلتر `cf_redfish_enabled=True` / `cf_storage_enabled=True` / `cf_san_switch_enabled=True` / `cf_cisco_enabled=True` / `cf_fortigate_enabled=True` / `cf_unifi_enabled=True` فیلتر می‌کند (سینتکس فیلتر custom field در NetBox).
 
 ### ۳. نقش‌ها و سایت‌های دستگاه
 
@@ -850,9 +874,15 @@ python -m pytest tests/
 - **جفت‌های HA:** با `RUCKUS_HA_MAP=vip:primary,secondary` (به‌ازای هر جفت، جداشده با `;`) یک جفت به یک دستگاه خوشه ادغام می‌شود — هویت فقط از بررسی VIP/primary گرفته می‌شود و بررسی‌های secondary فقط زنده‌بودن را به‌روزرسانی می‌کنند؛ primary IPv4 همان VIP است.
 - **اختیاری**: فقط وقتی `RUCKUS_RANGES` تنظیم شود فعال می‌شود.
 
+**کنترلرهای بی‌سیم (Ubiquiti UniFi OS، API بر بستر HTTPS):**
+- کنسول‌های UniFi OS (UDM / CloudKey / UniFi OS Server با Network Application نسخه ۱۰.x) از طریق API نشست‌محور قدیمی: `POST /api/login` (کوکی نشست) ← `/api/self/sites` و سپس به‌ازای هر سایت `/api/s/<site>/stat/device` (APها)، `/api/s/<site>/rest/wlanconf` (WLANها) و `/api/s/<site>/rest/networkconf` (پیوندهای VLAN). یک حساب ادمین **محلی** اختصاصی بسازید (حساب‌های ابری UI.com به‌خاطر MFA اتوماسیون را می‌شکنند).
+- کنسول به یک **دستگاه** با فیلدهای سفارشی `unifi_*` تبدیل می‌شود (هویت = سریال uuid کنسول). هر AP از ماشین‌آلات مشترک AP استفاده می‌کند: نقش `Access Point`، هویت بر اساس MAC (`wap_mac`)، فیلد `wap_group` = نام سایت UniFi و `wap_wlc` = نام کنسول؛ سایت NetBox هر AP از **تفکیک استاندارد SITE_IP_MAP روی IP سِ AP** به دست می‌آید (مثل همه خانواده‌های دیگر)؛ APهای ناپدیدشده آفلاین علامت می‌خورند و هرگز حذف نمی‌شوند.
+- WLANهای **همه سایت‌ها** به **Wireless LANهای** بومی NetBox تبدیل می‌شوند (گروه `UniFi <console>`)، تجمیع سراسری به‌ازای هر SSID؛ پیوند VLAN هر WLAN از روی network binding آن به‌ازای هر سایت حل می‌شود (تطبیق یکتا در گروه‌های VLAN علامت‌دار سایت، وگرنه در گروه UniFi آن سایت ساخته می‌شود). **عبارات عبور (passphrase) هرگز همگام‌سازی نمی‌شوند.**
+- **اختیاری**: فقط وقتی `UNIFI_RANGES` تنظیم شود فعال می‌شود.
+
 **فایروالها (FortiGate، REST API + SSH):**
 - خانواده FortiGate 40F / 60F / 80F / 100F / 200F (FortiOS 6/7). کوئری‌های `/api/v2/monitor/system/status`، `/api/v2/monitor/system/interface`، `/api/v2/cmdb/system/interface` (VDOM سِ `root`).
-- توکن‌های API به‌صورت **per-device** در `fortigate_tokens.txt` (gitignore‌شده): در هر خط `<ip[:port]> <token>`، کامنت با `#`.
+- احراز هویت با **Basic auth** و اعتبار ادمین (`FORTIGATE_USER`/`FORTIGATE_PASS`) — بدون نیاز به توکن API.
 - SSH برای اجرای `diagnose lldp neighbor-summary` (کابل‌ها) و `diagnose sys transceiver list` (ترانسسیورهای SFP).
 - رابط‌های aggregate (port-channel) از cmdb به‌عنوان رابط `lag` در NetBox وارد می‌شوند؛ پورت‌های عضو با `lag` و زیررابط‌های VLAN با `parent` به رابط LAG/والد خود پیوند می‌خورند.
 - **اختیاری**: فقط وقتی `FORTIGATE_RANGES` تنظیم شود فعال می‌شود.

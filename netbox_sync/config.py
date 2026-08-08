@@ -39,6 +39,9 @@ FORTIGATE_PASS = os.getenv("FORTIGATE_PASS")
 RUCKUS_USER = os.getenv("RUCKUS_USER")
 RUCKUS_PASS = os.getenv("RUCKUS_PASS")
 
+UNIFI_USER = os.getenv("UNIFI_USER")
+UNIFI_PASS = os.getenv("UNIFI_PASS")
+
 HIKVISION_USER = os.getenv("HIKVISION_USER")
 HIKVISION_PASS = os.getenv("HIKVISION_PASS")
 
@@ -55,17 +58,18 @@ def _validate_config():
     if os.getenv("CISCO_RANGES") and (not os.getenv("CISCO_USER")
                                       or not os.getenv("CISCO_PASS")):
         missing.append("CISCO_USER/CISCO_PASS (required when CISCO_RANGES is set)")
-    # FortiGate family is opt-in: SSH creds + a non-empty token file.
-    if os.getenv("FORTIGATE_RANGES"):
-        if not os.getenv("FORTIGATE_USER") or not os.getenv("FORTIGATE_PASS"):
-            missing.append("FORTIGATE_USER/FORTIGATE_PASS (required when FORTIGATE_RANGES is set)")
-        token_path = os.getenv("FORTIGATE_TOKEN_FILE", FORTIGATE_TOKEN_FILE)
-        if not _load_fortigate_tokens(token_path):
-            missing.append(f"FortiGate token file missing or empty ({token_path})")
+    # FortiGate family is opt-in: basic-auth admin creds required when ranges are set.
+    if os.getenv("FORTIGATE_RANGES") and (not os.getenv("FORTIGATE_USER")
+                                          or not os.getenv("FORTIGATE_PASS")):
+        missing.append("FORTIGATE_USER/FORTIGATE_PASS (required when FORTIGATE_RANGES is set)")
     # Ruckus family is opt-in; SSH creds required only when ranges are set.
     if os.getenv("RUCKUS_RANGES") and (not os.getenv("RUCKUS_USER")
                                        or not os.getenv("RUCKUS_PASS")):
         missing.append("RUCKUS_USER/RUCKUS_PASS (required when RUCKUS_RANGES is set)")
+    # UniFi family is opt-in; console creds required only when ranges are set.
+    if os.getenv("UNIFI_RANGES") and (not os.getenv("UNIFI_USER")
+                                      or not os.getenv("UNIFI_PASS")):
+        missing.append("UNIFI_USER/UNIFI_PASS (required when UNIFI_RANGES is set)")
     # Hikvision family is opt-in; digest creds required only when ranges are set.
     if os.getenv("HIKVISION_RANGES") and (not os.getenv("HIKVISION_USER")
                                           or not os.getenv("HIKVISION_PASS")):
@@ -116,52 +120,21 @@ RUCKUS_HA_MAP = os.getenv("RUCKUS_HA_MAP", "")
 # Hikvision family is opt-in: empty default means "disabled".
 HIKVISION_RANGES = _parse_ranges("HIKVISION_RANGES", [])
 
+# UniFi family is opt-in: empty default means "disabled". Each range holds
+# UniFi OS console IPs (multi-site consoles are queried per site).
+UNIFI_RANGES = _parse_ranges("UNIFI_RANGES", [])
+
 FORTIGATE_PORT     = int(os.getenv("FORTIGATE_PORT", "443"))
 FORTIGATE_SSH_PORT = int(os.getenv("FORTIGATE_SSH_PORT", "22"))
 FORTIGATE_ROLE     = os.getenv("DEFAULT_FORTIGATE_ROLE", "Firewall")
 RUCKUS_PORT        = int(os.getenv("RUCKUS_PORT", "22"))
 RUCKUS_ROLE        = os.getenv("DEFAULT_RUCKUS_ROLE", "Wireless Controller")
+UNIFI_PORT         = int(os.getenv("UNIFI_PORT", "8443"))
+UNIFI_ROLE         = os.getenv("DEFAULT_UNIFI_ROLE", "Wireless Controller")
 AP_ROLE            = os.getenv("DEFAULT_AP_ROLE", "Access Point")
 HIKVISION_PORT     = int(os.getenv("HIKVISION_PORT", "80"))
 HIKVISION_ROLE     = os.getenv("DEFAULT_HIKVISION_ROLE", "NVR")
 HIKVISION_CAMERA_ROLE = os.getenv("DEFAULT_HIKVISION_CAMERA_ROLE", "Camera")
-FORTIGATE_TOKEN_FILE = os.getenv(
-    "FORTIGATE_TOKEN_FILE",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fortigate_tokens.txt"))
-
-def _load_fortigate_tokens(path):
-    """Load per-device FortiGate API tokens: "<ip[:port]> <token>" per line.
-    '#' comments and blank lines allowed; port defaults to 443."""
-    tokens = {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError:
-        if os.getenv("FORTIGATE_RANGES"):
-            log("WARN", f"FortiGate token file not found: {path}")
-        return tokens
-    for ln in lines:
-        s = ln.strip()
-        if not s or s.startswith("#"):
-            continue
-        parts = s.split()
-        if len(parts) < 2:
-            log("WARN", f"FortiGate token file: bad line {s!r} — skipped")
-            continue
-        host, token = parts[0], parts[1]
-        if ":" in host:
-            ip, port_s = host.rsplit(":", 1)
-            try:
-                port = int(port_s)
-            except ValueError:
-                log("WARN", f"FortiGate token file: bad port in {s!r} — skipped")
-                continue
-        else:
-            ip, port = host, 443
-        tokens[ip] = (port, token)
-    return tokens
-
-FORTIGATE_TOKENS = _load_fortigate_tokens(FORTIGATE_TOKEN_FILE)
 
 REDFISH_PORT  = int(os.getenv("REDFISH_PORT", "443"))
 STORAGE_PORT  = int(os.getenv("STORAGE_PORT", "443"))

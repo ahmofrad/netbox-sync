@@ -9,9 +9,11 @@ from netbox_sync.collectors.hikvision import probe_hikvision
 from netbox_sync.collectors.msa import probe_storage
 from netbox_sync.collectors.redfish import probe_redfish
 from netbox_sync.collectors.ruckus import probe_ruckus
+from netbox_sync.collectors.unifi import probe_unifi
 from netbox_sync.config import (BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
                                 CISCO_RANGES, FORTIGATE_RANGES, RUCKUS_RANGES,
-                                HIKVISION_RANGES, SCAN_WORKERS, log)
+                                HIKVISION_RANGES, UNIFI_RANGES,
+                                SCAN_WORKERS, log)
 from netbox_sync.utils import expand_ranges
 
 
@@ -32,7 +34,7 @@ def _drain_pool(ex, futures, on_hit):
 
 def scan_all():
     all_found = {"servers": [], "storage": [], "san_switches": [], "cisco_switches": [],
-                 "fortigates": [], "ruckus": [], "hikvision_nvrs": []}
+                 "fortigates": [], "ruckus": [], "hikvision_nvrs": [], "unifi": []}
 
     bmc_ips = expand_ranges(BMC_RANGES)
     if bmc_ips:
@@ -148,9 +150,29 @@ def scan_all():
     else:
         log("INFO", "Ruckus ranges not configured — skipping Ruckus scan.")
 
+    # ── UniFi OS consoles (HTTPS API, opt-in family) ────────────────────────
+    if UNIFI_RANGES:
+        used_ips = used_ips | {h["ip"] for h in all_found["ruckus"]}
+        all_unifi_ips = expand_ranges(UNIFI_RANGES)
+        unifi_ips = [ip for ip in all_unifi_ips if ip not in used_ips]
+        if unifi_ips:
+            log("INFO", f"Scanning {len(unifi_ips)} IPs for UniFi consoles (API) ...")
+            ex = ThreadPoolExecutor(max_workers=SCAN_WORKERS)
+            futures = {ex.submit(probe_unifi, ip): ip for ip in unifi_ips}
+            def _on_unifi(r):
+                log("INFO", f"  + UNIFI {r['ip']}  {r['model']}  s/n={r['serial']}")
+                all_found["unifi"].append(r)
+            _drain_pool(ex, futures, _on_unifi)
+            log("INFO", f"UniFi scan done: {len(all_found['unifi'])} found.")
+        else:
+            log("INFO", "No UniFi IPs to scan (all excluded).")
+    else:
+        log("INFO", "UniFi ranges not configured — skipping UniFi scan.")
+
     # ── Hikvision NVRs (HTTP ISAPI, opt-in family) ──────────────────────────
     if HIKVISION_RANGES:
-        used_ips = used_ips | {h["ip"] for h in all_found["ruckus"]}
+        used_ips = used_ips | {h["ip"] for h in all_found["ruckus"]} \
+                          | {h["ip"] for h in all_found["unifi"]}
         all_nvr_ips = expand_ranges(HIKVISION_RANGES)
         nvr_ips = [ip for ip in all_nvr_ips if ip not in used_ips]
         if nvr_ips:

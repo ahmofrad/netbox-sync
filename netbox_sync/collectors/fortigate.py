@@ -8,7 +8,7 @@ from netmiko import ConnectHandler
 
 from netbox_sync import netbox
 from netbox_sync.config import (FORTIGATE_USER, FORTIGATE_PASS, FORTIGATE_PORT,
-                                FORTIGATE_SSH_PORT, FORTIGATE_TOKENS, log)
+                                FORTIGATE_SSH_PORT, log)
 from netbox_sync.models import FORTIGATE_MODEL_MAP
 from netbox_sync.utils import (normalize_model, _invalid_serial,
                                _make_add_item, is_port_open)
@@ -16,15 +16,32 @@ from netbox_sync.utils import (normalize_model, _invalid_serial,
 # ── REST API session + mappers ───────────────────────────────────────────────
 
 class FortiGateSession:
-    def __init__(self, ip, port, token, timeout=30):
+    """FortiOS session-based auth: POST /logincheck with admin username and
+    secretkey to obtain session cookies (the documented username/password
+    alternative to api-user tokens). Re-logs in on 401 (expired session)."""
+
+    def __init__(self, ip, port, timeout=30):
         self.base = f"https://{ip}:{port}"
         self.s = requests.Session()
         self.s.verify = False
-        self.s.headers.update({"Authorization": f"Bearer {token}"})
         self.timeout = timeout
+        self._login()
+
+    def _login(self):
+        r = self.s.post(f"{self.base}/logincheck",
+                        data={"username": FORTIGATE_USER,
+                              "secretkey": FORTIGATE_PASS},
+                        timeout=self.timeout)
+        # post-login-banner flow (if enabled) requires a disclaimer confirm
+        if "logindisclaimer" in r.text:
+            self.s.post(f"{self.base}/logindisclaimer",
+                        data={"confirm": 1}, timeout=self.timeout)
 
     def get(self, path):
         r = self.s.get(f"{self.base}{path}", timeout=self.timeout)
+        if r.status_code == 401:
+            self._login()
+            r = self.s.get(f"{self.base}{path}", timeout=self.timeout)
         r.raise_for_status()
         return r.json()
 
@@ -268,11 +285,10 @@ def _parse_transceivers(text):
 # ── probe + collect ──────────────────────────────────────────────────────────
 
 def probe_fortigate(ip, retries=2, retry_delay=3):
-    entry = FORTIGATE_TOKENS.get(ip)
-    if not entry:
-        log("DEBUG", f"  no FortiGate API token for {ip} — skipping")
+    port = FORTIGATE_PORT
+    if not (FORTIGATE_USER and FORTIGATE_PASS):
+        log("DEBUG", f"  no FortiGate basic-auth creds configured — skipping {ip}")
         return None
-    port, token = entry
     for attempt in range(1, retries + 1):
         # One quick port check is enough for dead IPs (same reasoning as Cisco)
         if not is_port_open(ip, port, timeout=3, retries=1):
@@ -280,7 +296,7 @@ def probe_fortigate(ip, retries=2, retry_delay=3):
             return None
         try:
             status = _fg_status(
-                FortiGateSession(ip, port, token).get("/api/v2/monitor/system/status"))
+                FortiGateSession(ip, port).get("/api/v2/monitor/system/status"))
             if not (status.get("serial") or status.get("model")):
                 raise RuntimeError("status yielded no serial/model")
             return {
@@ -299,11 +315,10 @@ def probe_fortigate(ip, retries=2, retry_delay=3):
     return None
 
 def fortigate_collect(ip):
-    entry = FORTIGATE_TOKENS.get(ip)
-    if not entry:
-        raise RuntimeError(f"no FortiGate API token for {ip}")
-    port, token = entry
-    fg = FortiGateSession(ip, port, token)
+    if not (FORTIGATE_USER and FORTIGATE_PASS):
+        raise RuntimeError(f"no FortiGate basic-auth creds configured")
+    port = FORTIGATE_PORT
+    fg = FortiGateSession(ip, port)
     status = _fg_status(fg.get("/api/v2/monitor/system/status"))
     mon = fg.get("/api/v2/monitor/system/interface")
     cmdb = fg.get("/api/v2/cmdb/system/interface?vdom=root")
