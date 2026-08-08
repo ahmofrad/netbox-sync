@@ -1,4 +1,5 @@
 """Tests for the FortiGate REST API mappers (pure JSON -> dict)."""
+import pytest
 import requests
 
 import netbox_sync.collectors.fortigate as mod
@@ -280,3 +281,51 @@ def test_parse_transceivers():
     assert rows[0]["part_number"] == "FTLX8571D3BCL"
     assert rows[0]["serial_number"] == "ABC123456"
     assert rows[1]["port"] == 2
+
+
+def test_fg_get_raises_auth_error_on_persistent_401():
+    """A 401 persisting AFTER a fresh re-login means rejected credentials."""
+    class FakeResp:
+        status_code = 401
+        text = ""
+        def raise_for_status(self):
+            raise requests.HTTPError(401)
+        def json(self):
+            return {}
+
+    class FakeSession(requests.Session):
+        verify = False
+        def post(self, url, data=None, timeout=None):
+            class R:
+                status_code = 200
+                text = ""
+            return R()
+        def get(self, url, timeout=None):
+            return FakeResp()
+
+    sess = object.__new__(mod.FortiGateSession)
+    sess.base = "https://10.0.0.1:58291"
+    sess.s = FakeSession()
+    sess.timeout = 5
+
+    with pytest.raises(mod.FortiGateAuthError):
+        sess.get("/api/v2/monitor/system/status")
+
+
+def test_probe_fortigate_fails_fast_on_auth_rejection(monkeypatch):
+    """Auth rejection is a config error: no retry sleeps, immediate None."""
+    sleeps = []
+    monkeypatch.setattr(mod, "FORTIGATE_USER", "u")
+    monkeypatch.setattr(mod, "FORTIGATE_PASS", "p")
+    monkeypatch.setattr(mod, "is_port_open", lambda *a, **kw: True)
+    monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+
+    class RejectingSession:
+        def __init__(self, ip, port, timeout=30):
+            pass
+        def get(self, path):
+            raise mod.FortiGateAuthError("rejected")
+
+    monkeypatch.setattr(mod, "FortiGateSession", RejectingSession)
+    assert mod.probe_fortigate("10.0.0.1", retries=2, retry_delay=3) is None
+    assert sleeps == []

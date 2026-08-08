@@ -475,7 +475,8 @@ def ensure_ap_device(ap, wlc_name, role_name=None, manufacturer="Ruckus",
                      site_name=None):
     """Ensure a NetBox device for an access point (Ruckus or UniFi). APs have
     no reliable serial — identity is the MAC (wap_mac custom field).
-    site_name overrides keyword-based site resolution (UniFi: the site desc)."""
+    site_name overrides keyword-based site resolution (no current caller passes
+    it — AP sites resolve via SITE_IP_MAP / SITE_KEYWORD_MAP)."""
     from netbox_sync.config import AP_ROLE
     mac = ap["mac"]
     role = role_name or AP_ROLE

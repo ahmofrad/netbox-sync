@@ -172,7 +172,7 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `CISCO_PORT` | ❌ | `22` | SSH port for Cisco switches. |
 | `CISCO_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for Cisco switches. Empty = family disabled. |
 | `DEFAULT_CISCO_ROLE` | ❌ | `Switch` | NetBox device role for Cisco switches. |
-| `FORTIGATE_USER` | ❌* | — | Admin username for FortiGates (REST API **Basic auth** + SSH extras); required when `FORTIGATE_RANGES` is set. |
+| `FORTIGATE_USER` | ❌* | — | Admin username for FortiGates (REST API session auth (/logincheck) + SSH extras); required when `FORTIGATE_RANGES` is set. |
 | `FORTIGATE_PASS` | ❌* | — | Admin password for FortiGates. |
 | `FORTIGATE_PORT` | ❌ | `443` | REST API port. |
 | `FORTIGATE_SSH_PORT` | ❌ | `22` | SSH port for FortiGates. |
@@ -431,7 +431,7 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 
 **Firewalls (FortiGate, REST API + SSH extras):**
 - FortiGate 40F / 60F / 80F / 100F / 200F class (FortiOS 6/7). Queries `/api/v2/monitor/system/status`, `/api/v2/monitor/system/interface`, `/api/v2/cmdb/system/interface` (VDOM `root`).
-- Authentication is HTTP **Basic auth** with admin credentials (`FORTIGATE_USER`/`FORTIGATE_PASS`) — no API tokens needed.
+- Authentication is session-based: `POST /logincheck` with admin credentials (`FORTIGATE_USER`/`FORTIGATE_PASS`) — no API tokens, and the per-device token file was removed.
 - SSH runs `diagnose lldp neighbor-summary` (cables) and `diagnose sys transceiver list` (SFP inventory).
 - Aggregate (port-channel) interfaces are imported from cmdb as NetBox `lag` interfaces; member ports link via `lag`, VLAN subinterfaces link via `parent` to their LAG/parent interface.
 - **Opt-in**: activates only when `FORTIGATE_RANGES` is set.
@@ -651,7 +651,7 @@ pip install -r requirements.txt
 | `CISCO_PORT` | ❌ | `22` | پورت SSH برای سوئیچ‌های سیسکو. |
 | `CISCO_RANGES` | ❌ | *(خالی)* | بازه‌های CIDR جداشده با کاما برای سوئیچ‌های سیسکو. خالی = خانواده غیرفعال. |
 | `DEFAULT_CISCO_ROLE` | ❌ | `Switch` | نقش دستگاه در NetBox برای سوئیچ‌های سیسکو. |
-| `FORTIGATE_USER` | ❌* | — | نام کاربری ادمین FortiGateها (احراز **Basic** برای REST API + SSH)؛ وقتی `FORTIGATE_RANGES` تنظیم شده الزامی است. |
+| `FORTIGATE_USER` | ❌* | — | نام کاربری ادمین FortiGateها (احراز **session auth** (POST /logincheck) برای REST API + SSH)؛ وقتی `FORTIGATE_RANGES` تنظیم شده الزامی است. |
 | `FORTIGATE_PASS` | ❌* | — | رمز عبور ادمین FortiGateها. |
 | `FORTIGATE_PORT` | ❌ | `443` | پورت REST API. |
 | `FORTIGATE_SSH_PORT` | ❌ | `22` | پورت SSH برای FortiGateها. |
@@ -882,7 +882,7 @@ python -m pytest tests/
 
 **فایروالها (FortiGate، REST API + SSH):**
 - خانواده FortiGate 40F / 60F / 80F / 100F / 200F (FortiOS 6/7). کوئری‌های `/api/v2/monitor/system/status`، `/api/v2/monitor/system/interface`، `/api/v2/cmdb/system/interface` (VDOM سِ `root`).
-- احراز هویت با **Basic auth** و اعتبار ادمین (`FORTIGATE_USER`/`FORTIGATE_PASS`) — بدون نیاز به توکن API.
+- احراز هویت با **session auth** (POST /logincheck) و اعتبار ادمین (`FORTIGATE_USER`/`FORTIGATE_PASS`) — بدون نیاز به توکن API.
 - SSH برای اجرای `diagnose lldp neighbor-summary` (کابل‌ها) و `diagnose sys transceiver list` (ترانسسیورهای SFP).
 - رابط‌های aggregate (port-channel) از cmdb به‌عنوان رابط `lag` در NetBox وارد می‌شوند؛ پورت‌های عضو با `lag` و زیررابط‌های VLAN با `parent` به رابط LAG/والد خود پیوند می‌خورند.
 - **اختیاری**: فقط وقتی `FORTIGATE_RANGES` تنظیم شود فعال می‌شود.

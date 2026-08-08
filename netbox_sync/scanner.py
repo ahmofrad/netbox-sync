@@ -155,6 +155,9 @@ def scan_all():
         used_ips = used_ips | {h["ip"] for h in all_found["ruckus"]}
         all_unifi_ips = expand_ranges(UNIFI_RANGES)
         unifi_ips = [ip for ip in all_unifi_ips if ip not in used_ips]
+        skipped_unifi = len(all_unifi_ips) - len(unifi_ips)
+        if skipped_unifi:
+            log("INFO", f"Skipped {skipped_unifi} IP(s) in UniFi ranges already found.")
         if unifi_ips:
             log("INFO", f"Scanning {len(unifi_ips)} IPs for UniFi consoles (API) ...")
             ex = ThreadPoolExecutor(max_workers=SCAN_WORKERS)

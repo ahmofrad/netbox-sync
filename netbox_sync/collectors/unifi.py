@@ -169,7 +169,11 @@ def probe_unifi(ip, retries=2, retry_delay=3):
             return None
         sess = UniFiSession(ip)
         try:
-            sess.login()
+            try:
+                sess.login()
+            except RuntimeError as exc:     # auth/api rejection — not transient
+                log("WARN", f"  {exc} — skipping {ip}")
+                return None
             hostname = f"unifi-{ip.replace('.', '-')}"
             try:
                 for row in sess.get("/api/system"):

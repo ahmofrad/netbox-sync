@@ -13,6 +13,9 @@ from netbox_sync.models import FORTIGATE_MODEL_MAP
 from netbox_sync.utils import (normalize_model, _invalid_serial,
                                _make_add_item, is_port_open)
 
+class FortiGateAuthError(RuntimeError):
+    """Session login rejected / not honored — credentials wrong."""
+
 # ── REST API session + mappers ───────────────────────────────────────────────
 
 class FortiGateSession:
@@ -42,6 +45,9 @@ class FortiGateSession:
         if r.status_code == 401:
             self._login()
             r = self.s.get(f"{self.base}{path}", timeout=self.timeout)
+            if r.status_code == 401:
+                raise FortiGateAuthError(
+                    "FortiGate auth rejected — check FORTIGATE_USER/FORTIGATE_PASS")
         r.raise_for_status()
         return r.json()
 
@@ -309,6 +315,9 @@ def probe_fortigate(ip, retries=2, retry_delay=3):
                 "manufacturer": "Fortinet",
                 "firmware": status.get("version"),
             }
+        except FortiGateAuthError:
+            log("WARN", f"  FortiGate {ip}: auth rejected — skipping")
+            return None
         except Exception:
             if attempt < retries: time.sleep(retry_delay); continue
             return None

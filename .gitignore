@@ -3,6 +3,7 @@
 _env
 *.env
 !.env.example
+fortigate_tokens.txt
 
 # Personal / private working copies
 my personal code/
