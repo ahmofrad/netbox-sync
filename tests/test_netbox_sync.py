@@ -2015,3 +2015,43 @@ def test_camera_device_suffixed_when_name_taken_by_other_role(monkeypatch):
 
     assert devices_ep.created[0]["name"] == "GF-cam11"
     assert dev_id is not None
+
+# ── Custom-field UI visibility normalization ─────────────────────────────────
+
+class _FakeCFEndpoint:
+    def __init__(self, records):
+        self._records = records
+        self.updated = []
+    def all(self):
+        return list(self._records)
+    def update(self, payload_list):
+        self.updated.extend(payload_list)
+        return True
+
+
+def test_custom_fields_normalized_to_if_set(monkeypatch):
+    recs = [
+        FakeRecord(1, ui_visible={"value": "always", "label": "Always"}),
+        FakeRecord(2, ui_visible={"value": "if-set", "label": "If set"}),
+        FakeRecord(3, ui_visible="hidden"),
+    ]
+    ep = _FakeCFEndpoint(recs)
+    api = SimpleNamespace(extras=SimpleNamespace(custom_fields=ep))
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    nbx.ensure_custom_fields_if_set()
+
+    assert ep.updated == [{"id": 1, "ui_visible": "if-set"},
+                          {"id": 3, "ui_visible": "if-set"}]
+
+
+def test_custom_fields_noop_when_all_if_set(monkeypatch):
+    ep = _FakeCFEndpoint([FakeRecord(1, ui_visible={"value": "if-set"}),
+                          # pynetbox choice fields stringify to the label
+                          FakeRecord(2, ui_visible="If set")])
+    api = SimpleNamespace(extras=SimpleNamespace(custom_fields=ep))
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+
+    nbx.ensure_custom_fields_if_set()
+
+    assert ep.updated == []

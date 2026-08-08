@@ -60,6 +60,7 @@ from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 mark_camera_offline, mark_unifi_offline,
                                 ensure_unifi_console, get_or_create_site,
                                 sync_wireless_lans, sweep_wireless_lans,
+                                ensure_custom_fields_if_set,
                                 _check_offline,
                                 sync_inventory)
 from netbox_sync.scanner import scan_all
@@ -1029,6 +1030,13 @@ def run_sync():
                    mfr="Uniview")
     _offline_sweep(api, bool(UNIFI_RANGES), "cf_unifi_enabled", "unifi_ip",
                    live_unifi_ips, mark_unifi_offline, "UniFi consoles")
+
+    # Custom-field hygiene: every CF stays ui_visible=if-set (including any
+    # added manually between runs).
+    try:
+        ensure_custom_fields_if_set()
+    except Exception as e:
+        log("WARN", f"  custom-field visibility normalization failed: {e}")
 
     log("INFO", "Unified sync complete")
     log("INFO", "=" * 60)

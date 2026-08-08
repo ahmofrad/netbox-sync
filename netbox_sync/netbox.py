@@ -746,7 +746,6 @@ def ensure_camera_device(cam, nvr_name, role_name=None, manufacturer="Hikvision"
 
 CAMERA_IFACE_NAME = "eth0"
 
-
 def ensure_camera_interface(dev_id, online=True):
     """Get-or-create the camera's single LAN interface — the cable
     termination point for camera<->switch cabling. Only `enabled` is
@@ -776,6 +775,27 @@ def mark_camera_offline(dev_id, dev_name):
         log("WARN", f"  camera marked offline: {dev_name} (id={dev_id})")
     except Exception as e:
         log("ERROR", f"  Could not mark camera offline {dev_name}: {e}")
+
+
+def ensure_custom_fields_if_set():
+    """Normalize every custom field's UI visibility to 'if-set' (hidden until
+    the field carries a value, keeping device pages clean). Runs at the end of
+    each sync so custom fields added later are normalized automatically."""
+    api = get_netbox()
+    updates = []
+    for cf in api.extras.custom_fields.all():
+        vis = getattr(cf, "ui_visible", None)
+        value = vis.get("value") if isinstance(vis, dict) else vis
+        # pynetbox returns choice fields as label strings ("If set") — normalize
+        normalized = str(value or "").strip().lower().replace(" ", "-")
+        if normalized != "if-set":
+            updates.append({"id": cf.id, "ui_visible": "if-set"})
+    if updates:
+        api.extras.custom_fields.update(updates)
+        log("INFO", f"  custom fields: set ui_visible=if-set on "
+                    f"{len(updates)} field(s)")
+    else:
+        log("DEBUG", "  custom fields: all already ui_visible=if-set")
 
 
 _WLAN_AUTH_MAP = {"open": "open", "wpa": "wpa-personal",
