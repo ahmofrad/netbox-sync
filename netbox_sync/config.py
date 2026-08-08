@@ -45,6 +45,12 @@ UNIFI_PASS = os.getenv("UNIFI_PASS")
 HIKVISION_USER = os.getenv("HIKVISION_USER")
 HIKVISION_PASS = os.getenv("HIKVISION_PASS")
 
+DAHUA_USER = os.getenv("DAHUA_USER")
+DAHUA_PASS = os.getenv("DAHUA_PASS")
+
+UNV_USER = os.getenv("UNV_USER")
+UNV_PASS = os.getenv("UNV_PASS")
+
 REQUIRED_ENV_VARS = ("NETBOX_URL", "NETBOX_TOKEN",
                      "REDFISH_USER", "REDFISH_PASS",
                      "STORAGE_USER", "STORAGE_PASS",
@@ -74,6 +80,14 @@ def _validate_config():
     if os.getenv("HIKVISION_RANGES") and (not os.getenv("HIKVISION_USER")
                                           or not os.getenv("HIKVISION_PASS")):
         missing.append("HIKVISION_USER/HIKVISION_PASS (required when HIKVISION_RANGES is set)")
+    # Dahua family is opt-in; digest creds required only when ranges are set.
+    if os.getenv("DAHUA_RANGES") and (not os.getenv("DAHUA_USER")
+                                      or not os.getenv("DAHUA_PASS")):
+        missing.append("DAHUA_USER/DAHUA_PASS (required when DAHUA_RANGES is set)")
+    # Uniview family is opt-in; digest creds required only when ranges are set.
+    if os.getenv("UNV_RANGES") and (not os.getenv("UNV_USER")
+                                    or not os.getenv("UNV_PASS")):
+        missing.append("UNV_USER/UNV_PASS (required when UNV_RANGES is set)")
     if missing:
         raise RuntimeError(f"Missing required .env variables: {', '.join(missing)}")
 
@@ -120,6 +134,12 @@ RUCKUS_HA_MAP = os.getenv("RUCKUS_HA_MAP", "")
 # Hikvision family is opt-in: empty default means "disabled".
 HIKVISION_RANGES = _parse_ranges("HIKVISION_RANGES", [])
 
+# Dahua family is opt-in: empty default means "disabled".
+DAHUA_RANGES = _parse_ranges("DAHUA_RANGES", [])
+
+# Uniview family is opt-in: empty default means "disabled".
+UNV_RANGES = _parse_ranges("UNV_RANGES", [])
+
 # UniFi family is opt-in: empty default means "disabled". Each range holds
 # UniFi OS console IPs (multi-site consoles are queried per site).
 UNIFI_RANGES = _parse_ranges("UNIFI_RANGES", [])
@@ -135,6 +155,10 @@ AP_ROLE            = os.getenv("DEFAULT_AP_ROLE", "Access Point")
 HIKVISION_PORT     = int(os.getenv("HIKVISION_PORT", "80"))
 HIKVISION_ROLE     = os.getenv("DEFAULT_HIKVISION_ROLE", "NVR")
 HIKVISION_CAMERA_ROLE = os.getenv("DEFAULT_HIKVISION_CAMERA_ROLE", "Camera")
+DAHUA_PORT         = int(os.getenv("DAHUA_PORT", "80"))
+DAHUA_ROLE         = os.getenv("DEFAULT_DAHUA_ROLE", "NVR")
+UNV_PORT           = int(os.getenv("UNV_PORT", "80"))
+UNV_ROLE           = os.getenv("DEFAULT_UNV_ROLE", "NVR")
 
 REDFISH_PORT  = int(os.getenv("REDFISH_PORT", "443"))
 STORAGE_PORT  = int(os.getenv("STORAGE_PORT", "443"))

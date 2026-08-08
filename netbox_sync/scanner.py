@@ -6,6 +6,8 @@ from netbox_sync.collectors.brocade import probe_san_switch
 from netbox_sync.collectors.cisco import probe_cisco_switch
 from netbox_sync.collectors.fortigate import probe_fortigate
 from netbox_sync.collectors.hikvision import probe_hikvision
+from netbox_sync.collectors.dahua import probe_dahua
+from netbox_sync.collectors.unv import probe_unv
 from netbox_sync.collectors.msa import probe_storage
 from netbox_sync.collectors.redfish import probe_redfish
 from netbox_sync.collectors.ruckus import probe_ruckus
@@ -13,6 +15,7 @@ from netbox_sync.collectors.unifi import probe_unifi
 from netbox_sync.config import (BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
                                 CISCO_RANGES, FORTIGATE_RANGES, RUCKUS_RANGES,
                                 HIKVISION_RANGES, UNIFI_RANGES,
+                                DAHUA_RANGES, UNV_RANGES,
                                 SCAN_WORKERS, log)
 from netbox_sync.utils import expand_ranges
 
@@ -34,7 +37,8 @@ def _drain_pool(ex, futures, on_hit):
 
 def scan_all():
     all_found = {"servers": [], "storage": [], "san_switches": [], "cisco_switches": [],
-                 "fortigates": [], "ruckus": [], "hikvision_nvrs": [], "unifi": []}
+                 "fortigates": [], "ruckus": [], "hikvision_nvrs": [], "unifi": [],
+                 "dahua_nvrs": [], "unv_nvrs": []}
 
     bmc_ips = expand_ranges(BMC_RANGES)
     if bmc_ips:
@@ -172,10 +176,55 @@ def scan_all():
     else:
         log("INFO", "UniFi ranges not configured — skipping UniFi scan.")
 
+    # ── Dahua NVRs (HTTP CGI, opt-in family) ────────────────────────────────
+    if DAHUA_RANGES:
+        all_dahua_ips = expand_ranges(DAHUA_RANGES)
+        dahua_ips = [ip for ip in all_dahua_ips if ip not in used_ips]
+        skipped_dahua = len(all_dahua_ips) - len(dahua_ips)
+        if skipped_dahua:
+            log("INFO", f"Skipped {skipped_dahua} IP(s) in Dahua ranges already found.")
+        if dahua_ips:
+            log("INFO", f"Scanning {len(dahua_ips)} IPs for Dahua NVRs (HTTP) ...")
+            ex = ThreadPoolExecutor(max_workers=SCAN_WORKERS)
+            futures = {ex.submit(probe_dahua, ip): ip for ip in dahua_ips}
+            def _on_dahua(r):
+                log("INFO", f"  + DAHUA {r['ip']}  {r['model']}  s/n={r['serial']}")
+                all_found["dahua_nvrs"].append(r)
+            _drain_pool(ex, futures, _on_dahua)
+            log("INFO", f"Dahua scan done: {len(all_found['dahua_nvrs'])} found.")
+        else:
+            log("INFO", "No Dahua IPs to scan (all excluded).")
+    else:
+        log("INFO", "Dahua ranges not configured — skipping Dahua scan.")
+
+    # ── Uniview NVRs (HTTP LAPI, opt-in family) ──────────────────────────────
+    if UNV_RANGES:
+        used_ips = used_ips | {h["ip"] for h in all_found["dahua_nvrs"]}
+        all_unv_ips = expand_ranges(UNV_RANGES)
+        unv_ips = [ip for ip in all_unv_ips if ip not in used_ips]
+        skipped_unv = len(all_unv_ips) - len(unv_ips)
+        if skipped_unv:
+            log("INFO", f"Skipped {skipped_unv} IP(s) in UNV ranges already found.")
+        if unv_ips:
+            log("INFO", f"Scanning {len(unv_ips)} IPs for Uniview NVRs (HTTP) ...")
+            ex = ThreadPoolExecutor(max_workers=SCAN_WORKERS)
+            futures = {ex.submit(probe_unv, ip): ip for ip in unv_ips}
+            def _on_unv(r):
+                log("INFO", f"  + UNV {r['ip']}  {r['model']}  s/n={r['serial']}")
+                all_found["unv_nvrs"].append(r)
+            _drain_pool(ex, futures, _on_unv)
+            log("INFO", f"Uniview scan done: {len(all_found['unv_nvrs'])} found.")
+        else:
+            log("INFO", "No Uniview IPs to scan (all excluded).")
+    else:
+        log("INFO", "Uniview ranges not configured — skipping Uniview scan.")
+
     # ── Hikvision NVRs (HTTP ISAPI, opt-in family) ──────────────────────────
     if HIKVISION_RANGES:
         used_ips = used_ips | {h["ip"] for h in all_found["ruckus"]} \
-                          | {h["ip"] for h in all_found["unifi"]}
+                          | {h["ip"] for h in all_found["unifi"]} \
+                          | {h["ip"] for h in all_found["dahua_nvrs"]} \
+                          | {h["ip"] for h in all_found["unv_nvrs"]}
         all_nvr_ips = expand_ranges(HIKVISION_RANGES)
         nvr_ips = [ip for ip in all_nvr_ips if ip not in used_ips]
         if nvr_ips:

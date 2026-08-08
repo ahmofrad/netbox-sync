@@ -601,14 +601,14 @@ def mark_unifi_offline(dev_id, dev_name):
         log("ERROR", f"  Could not mark UniFi console offline {dev_name}: {e}")
 
 
-def ensure_hikvision_device(probe):
-    """Ensure the NetBox device for a Hikvision NVR. Match by serial first,
-    then name+site+role. Cameras are NOT devices — they live as inventory
-    items on this NVR via sync_inventory()."""
-    from netbox_sync.config import HIKVISION_ROLE
+def _ensure_nvr_device(probe, manufacturer, role_name):
+    """Ensure the NetBox device for an NVR of any vendor. Match by serial
+    first, then name+site+role. The nvr_* custom fields are vendor-neutral and
+    shared by the Hikvision/Dahua/Uniview families (the offline sweeps
+    disambiguate per vendor by manufacturer)."""
     serial = (probe.get("serial") or "").strip()
-    mfr_id = get_or_create_manufacturer("Hikvision")
-    role_id = get_or_create_role(HIKVISION_ROLE, "7b1fa2")
+    mfr_id = get_or_create_manufacturer(manufacturer)
+    role_id = get_or_create_role(role_name, "7b1fa2")
     site_name = resolve_site(probe.get("hostname") or "",
                              probe.get("reported_ip") or probe["ip"])
     site_id = get_or_create_site(site_name)
@@ -617,7 +617,7 @@ def ensure_hikvision_device(probe):
     api = get_netbox()
     dev = None
     if not _invalid_serial(serial):
-        dev = find_device(serial, role_name=HIKVISION_ROLE)
+        dev = find_device(serial, role_name=role_name)
     if dev is None:
         cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
                                              role_id=role_id))
@@ -640,7 +640,22 @@ def ensure_hikvision_device(probe):
     return new.id
 
 
-def mark_hikvision_offline(dev_id, dev_name):
+def ensure_hikvision_device(probe):
+    from netbox_sync.config import HIKVISION_ROLE
+    return _ensure_nvr_device(probe, "Hikvision", HIKVISION_ROLE)
+
+
+def ensure_dahua_device(probe):
+    from netbox_sync.config import DAHUA_ROLE
+    return _ensure_nvr_device(probe, "Dahua", DAHUA_ROLE)
+
+
+def ensure_unv_device(probe):
+    from netbox_sync.config import UNV_ROLE
+    return _ensure_nvr_device(probe, "Uniview", UNV_ROLE)
+
+
+def _mark_nvr_offline(dev_id, dev_name):
     try:
         get_netbox().dcim.devices.update([{
             "id": dev_id, "status": "offline",
@@ -651,35 +666,66 @@ def mark_hikvision_offline(dev_id, dev_name):
         log("ERROR", f"  Could not mark NVR offline {dev_name}: {e}")
 
 
-def ensure_camera_device(cam, nvr_name, role_name=None):
-    """Ensure a NetBox device for a Hikvision camera. Cameras are real devices
-    (not inventory items); identity is the camera serial. The parent NVR is
-    recorded in the cam_nvr custom field. MAC is not exposed by the NVR API, so
-    cam_mac is left empty unless the collector later supplies one."""
+def mark_hikvision_offline(dev_id, dev_name):
+    _mark_nvr_offline(dev_id, dev_name)
+
+
+def mark_dahua_offline(dev_id, dev_name):
+    _mark_nvr_offline(dev_id, dev_name)
+
+
+def mark_unv_offline(dev_id, dev_name):
+    _mark_nvr_offline(dev_id, dev_name)
+
+
+def ensure_camera_device(cam, nvr_name, role_name=None, manufacturer="Hikvision"):
+    """Ensure a NetBox device for a camera behind any NVR vendor (Hikvision,
+    Dahua, Uniview). Cameras are real devices (not inventory items); identity
+    is the camera serial. The parent NVR is recorded in the cam_nvr custom
+    field. cam_mac is set only when the collector supplies a real MAC —
+    Dahua's ONVIF-registered cameras usually have none."""
     from netbox_sync.config import HIKVISION_CAMERA_ROLE
     serial = (cam.get("serial") or "").strip()
     role = role_name or HIKVISION_CAMERA_ROLE
-    mfr_id = get_or_create_manufacturer("Hikvision")
+    mfr_id = get_or_create_manufacturer(manufacturer or "Hikvision")
     role_id = get_or_create_role(role, "4a90d9")
     site_name = resolve_site(cam.get("name") or "", cam.get("ip") or "")
     site_id = get_or_create_site(site_name)
     dtype_id = get_or_create_device_type(cam.get("model") or "Camera", mfr_id)
     name = (cam.get("name") or f"camera-ch{cam.get('channel')}")[:64]
+    # NetBox enforces device-name uniqueness per site: a camera title can
+    # collide with an unrelated device (e.g. a UniFi AP named "GF"). Try the
+    # plain title first; on collision use a deterministic '<title>-cam<ch>'.
+    ch = cam.get("channel")
+    names = [name]
+    if ch is not None:
+        suffix = f"-cam{ch}"
+        names.append(f"{name[:64 - len(suffix)]}{suffix}")
     api = get_netbox()
     dev = None
     if not _invalid_serial(serial):
         dev = find_device(serial, role_name=role)
     if dev is None:
-        cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
-                                             role_id=role_id))
-        dev = cands[0] if cands else None
-        if dev:
-            log("INFO", f"  Found camera by name+site: {name} (id={dev.id})")
+        for cand in names:
+            cands = list(api.dcim.devices.filter(name=cand, site_id=site_id,
+                                                 role_id=role_id))
+            if cands:
+                dev = cands[0]
+                name = cand
+                log("INFO", f"  Found camera by name+site: {name} (id={dev.id})")
+                break
+    if dev is None:
+        # new device: pick the first candidate not taken by ANY role at the site
+        for cand in names:
+            if not list(api.dcim.devices.filter(name=cand, site_id=site_id)):
+                name = cand
+                break
+        else:
+            log("WARN", f"  all camera name candidates taken at site: {names}")
     cf = {"cam_ip": cam.get("ip"), "cam_enabled": bool(cam.get("online")),
           "cam_nvr": nvr_name, "cam_model": cam.get("model")}
     if serial:
         cf["cam_serial"] = serial
-    ch = cam.get("channel")
     try:
         cf["cam_channel"] = int(ch)
     except (TypeError, ValueError):

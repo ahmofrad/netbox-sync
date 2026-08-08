@@ -503,6 +503,28 @@ def test_validate_config_fortigate_requirements(monkeypatch, tmp_path):
     cfg._validate_config()   # basic-auth creds present -> passes
 
 
+def test_validate_config_dahua_unv_requirements(monkeypatch):
+    for var in REQUIRED_VARS:
+        monkeypatch.setenv(var, "x")
+    monkeypatch.setenv("DAHUA_RANGES", "192.0.2.10/32")
+    monkeypatch.delenv("DAHUA_USER", raising=False)
+    monkeypatch.delenv("DAHUA_PASS", raising=False)
+    with pytest.raises(RuntimeError, match="DAHUA_USER"):
+        cfg._validate_config()
+    monkeypatch.setenv("DAHUA_USER", "u")
+    monkeypatch.setenv("DAHUA_PASS", "p")
+    cfg._validate_config()
+
+    monkeypatch.setenv("UNV_RANGES", "192.0.2.11/32")
+    monkeypatch.delenv("UNV_USER", raising=False)
+    monkeypatch.delenv("UNV_PASS", raising=False)
+    with pytest.raises(RuntimeError, match="UNV_USER"):
+        cfg._validate_config()
+    monkeypatch.setenv("UNV_USER", "u")
+    monkeypatch.setenv("UNV_PASS", "p")
+    cfg._validate_config()
+
+
 # ── Ruckus config + sysinfo parser ───────────────────────────────────────────
 
 def test_ruckus_ha_map_parsing():
@@ -1967,3 +1989,29 @@ def test_camera_cable_move_blocked_by_manual_cable(monkeypatch):
 
     assert api.dcim.cables.created == []
     assert api.dcim.cables.updated == []      # move blocked by the manual cable
+
+# ── Camera name-collision suffix ─────────────────────────────────────────────
+
+def test_camera_device_suffixed_when_name_taken_by_other_role(monkeypatch):
+    """A camera titled 'GF' at a site where an AP named 'GF' already exists
+    must be created as 'GF-cam<ch>' (deterministic), not fail with NetBox's
+    per-site name-uniqueness 400."""
+    ap_role = FakeRecord(50, name="Access Point")
+    ap_dev = FakeRecord(60, name="GF", site_id=7, role_id=50)
+    devices_ep = FakeEndpoint([ap_dev])
+    monkeypatch.setattr(nbx, "get_netbox",
+                        lambda: _fake_api(devices=devices_ep))
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda name: 5)
+    monkeypatch.setattr(nbx, "get_or_create_role", lambda name, color: 51)
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda name: 7)
+    monkeypatch.setattr(nbx, "get_or_create_device_type", lambda m, mfr: 77)
+    monkeypatch.setattr(nbx, "resolve_site", lambda name, ip: "S")
+    monkeypatch.setattr(nbx, "find_device", lambda serial, role_name=None: None)
+
+    cam = {"name": "GF", "channel": 11, "ip": "192.168.252.33",
+           "model": "DS-2CD1143G0-I", "serial": "DS-2CD1143G0-I20211208AAWRJ21084000",
+           "online": True}
+    dev_id = nbx.ensure_camera_device(cam, "dahua-nvr", manufacturer="Hikvision")
+
+    assert devices_ep.created[0]["name"] == "GF-cam11"
+    assert dev_id is not None

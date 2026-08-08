@@ -190,7 +190,17 @@ Copy `.env.example` to `.env` and edit. **All sensitive values must live in `.en
 | `HIKVISION_PORT` | ❌ | `80` | HTTP ISAPI port for Hikvision NVRs. |
 | `HIKVISION_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for Hikvision NVRs. Empty = family disabled. |
 | `DEFAULT_HIKVISION_ROLE` | ❌ | `NVR` | NetBox device role for NVRs. |
-| `DEFAULT_HIKVISION_CAMERA_ROLE` | ❌ | `Camera` | NetBox device role for cameras. |
+| `DEFAULT_HIKVISION_CAMERA_ROLE` | ❌ | `Camera` | NetBox device role for cameras (all NVR vendors). |
+| `DAHUA_USER` | ❌* | — | HTTP digest username for Dahua NVRs (required when `DAHUA_RANGES` is set). |
+| `DAHUA_PASS` | ❌* | — | HTTP digest password for Dahua NVRs. |
+| `DAHUA_PORT` | ❌ | `80` | HTTP CGI port for Dahua NVRs. |
+| `DAHUA_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for Dahua NVRs. Empty = family disabled. |
+| `DEFAULT_DAHUA_ROLE` | ❌ | `NVR` | NetBox device role for Dahua NVRs. |
+| `UNV_USER` | ❌* | — | HTTP digest username for Uniview NVRs (required when `UNV_RANGES` is set). |
+| `UNV_PASS` | ❌* | — | HTTP digest password for Uniview NVRs. |
+| `UNV_PORT` | ❌ | `80` | HTTP LAPI port for Uniview NVRs. |
+| `UNV_RANGES` | ❌ | *(empty)* | Comma-separated CIDR ranges for Uniview NVRs. Empty = family disabled. |
+| `DEFAULT_UNV_ROLE` | ❌ | `NVR` | NetBox device role for Uniview NVRs. |
 
 > *The shipped defaults in `netbox_sync/config.py` are **documentation-only** placeholder CIDRs (`192.0.2.0/27` = TEST-NET). Set the ranges in `.env` to your real networks — or set a range **empty** (e.g. `BMC_RANGES=`) to disable that family entirely (no scanning and no offline marking for it).
 
@@ -318,7 +328,7 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 
 **HA clusters:** a FortiGate HA pair (active-passive or active-active) becomes **one NetBox device** named and serialized after the primary unit — resolvable by any unit serial, so listing both units never duplicates. Peer units are recorded in the `fortigate_ha_*` fields, and the primary IPv4 follows the primary unit (a secondary probe never repoints it).
 
-**For Hikvision NVRs:**
+**For NVRs (Hikvision / Dahua / Uniview — shared vendor-neutral fields):**
 
 | Custom field | Type | Label |
 |--------------|------|-------|
@@ -328,7 +338,7 @@ The script writes **custom fields** on devices. Create these in NetBox (`/extras
 | `nvr_firmware` | Text | Firmware version |
 | `nvr_camera_count` | Integer | Number of attached cameras |
 
-**For Hikvision cameras (each camera is its own device):**
+**For cameras (each camera is its own device, all NVR vendors):**
 
 | Custom field | Type | Label |
 |--------------|------|-------|
@@ -439,9 +449,19 @@ The suite covers the Brocade CLI parsers, MSA XML parsing, item naming, and the 
 
 **NVRs (Hikvision, ISAPI over HTTP digest):**
 - Hikvision NVRs via HTTP digest auth — `GET /ISAPI/System/deviceInfo` (identity), `GET /ISAPI/ContentMgmt/InputProxy/channels` (attached cameras), `GET .../channels/status` (online state).
-- The NVR becomes a **device** with `nvr_*` custom fields (matched by serial). Each camera becomes **its own device** (role `Camera`, serial is the identity) with `cam_*` custom fields; the parent NVR is recorded in `cam_nvr`. Each camera's management IP is set as its **primary IPv4** (on a synthetic `mgmt` interface).
+- The NVR becomes a **device** with `nvr_*` custom fields (matched by serial). Each camera becomes **its own device** (role `Camera`, serial is the identity) with `cam_*` custom fields; the parent NVR is recorded in `cam_nvr`. Each camera's management IP is set as its **primary IPv4** (on the camera's `eth0` interface when camera cabling is active, else a synthetic `mgmt` interface).
 - Camera MACs are collected per channel via the NVR-proxied `.../InputProxy/channels/<id>/deviceInfo` endpoint and stored in `cam_mac` — they feed the camera→switch cabling described below. Cameras no longer reported by an NVR are marked **offline**, never deleted.
 - **Opt-in**: activates only when `HIKVISION_RANGES` is set.
+
+**NVRs (Dahua, CGI over HTTP digest):**
+- Dahua NVRs via HTTP digest auth — `magicBox.cgi?action=getSystemInfo`/`getDeviceClass`/`getSoftwareVersion`/`getMachineName` (identity), `configManager.cgi?action=getConfig&name=RemoteDevice` (per-channel camera IP/model/serial/firmware; slot N = channel N+1), `name=ChannelTitle` (camera names).
+- Cameras become their own devices exactly like the Hikvision family (same `cam_*` fields, same `cam_nvr` link, same offline sweep). Caveats: ONVIF-registered cameras usually have **no reliable MAC** in the table (empty or `ff:ff:ff:ff:ff:ff` — dropped), so camera→switch cabling simply skips them; channel online-state configs are permission-gated, so `cam_enabled` mirrors the registration `Enable` flag. A camera title colliding with an existing same-site device name gets a deterministic `-cam<ch>` suffix.
+- **Opt-in**: activates only when `DAHUA_RANGES` is set.
+
+**NVRs (Uniview/UNV, LAPI over HTTP digest):**
+- UNV NVRs via HTTP digest auth — `GET /LAPI/V1.0/System/DeviceInfo` (identity), `GET /LAPI/V1.0/Channels/System/ChannelDetailInfos` (per-channel name/online status/manufacturer/model/**IP+MAC**), `GET /LAPI/V1.0/Channels/System/DeviceInfos` (per-channel serial/firmware).
+- Cameras become their own devices like the other NVR families; **MACs are real**, so camera→switch cabling works for UNV cameras out of the box. Unassigned channel slots (no IP and no serial) are skipped.
+- **Opt-in**: activates only when `UNV_RANGES` is set.
 
 ### Camera → switch cabling
 

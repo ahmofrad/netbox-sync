@@ -24,6 +24,8 @@ from netbox_sync.collectors.fortigate import (fortigate_collect,
                                               resolve_fortigate_vlans,
                                               _fortigate_iface_mac)
 from netbox_sync.collectors.hikvision import hikvision_collect
+from netbox_sync.collectors.dahua import dahua_collect
+from netbox_sync.collectors.unv import unv_collect
 from netbox_sync.collectors.msa import storage_collect_inventory
 from netbox_sync.collectors.redfish import rf_collect_inventory
 from netbox_sync.collectors.ruckus import (ruckus_collect, probe_ruckus,
@@ -32,7 +34,8 @@ from netbox_sync.collectors.ruckus import (ruckus_collect, probe_ruckus,
 from netbox_sync.collectors.unifi import unifi_collect
 from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
                                 CISCO_RANGES, FORTIGATE_RANGES, RUCKUS_RANGES,
-                                RUCKUS_HA_MAP, HIKVISION_RANGES, UNIFI_RANGES)
+                                RUCKUS_HA_MAP, HIKVISION_RANGES, UNIFI_RANGES,
+                                DAHUA_RANGES, UNV_RANGES)
 from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
                               ensure_prefix, ensure_host_ip,
                               _containing_prefix, _prefix_masklen,
@@ -45,6 +48,7 @@ from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_cisco_device, ensure_fortigate_device,
                                 ensure_ruckus_device, ensure_ap_device,
                                 ensure_hikvision_device, ensure_camera_device,
+                                ensure_dahua_device, ensure_unv_device,
                                 ensure_camera_interface,
                                 CAMERA_IFACE_NAME,
                                 ensure_primary_ip,
@@ -52,6 +56,7 @@ from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 mark_san_offline, mark_cisco_offline,
                                 mark_fortigate_offline, mark_ap_offline,
                                 mark_ruckus_offline, mark_hikvision_offline,
+                                mark_dahua_offline, mark_unv_offline,
                                 mark_camera_offline, mark_unifi_offline,
                                 ensure_unifi_console, get_or_create_site,
                                 sync_wireless_lans, sweep_wireless_lans,
@@ -124,6 +129,94 @@ def sync_unifi_wlans(data, console_name, desc_site_votes, site_indexes,
                 f"{len(data['aps'])} APs, "
                 f"{len(seen_ssids)} WLANs, "
                 f"{len(data['sites'])} sites synced")
+
+
+def process_nvrs(probes, collect_fn, ensure_fn, family, mac_map,
+                 switch_by_ip, api):
+    """Process one NVR family end to end (Hikvision / Dahua / Uniview):
+    collect, ensure the NVR device, refresh nvr_* fields + primary IP, then
+    sync each camera (device, eth0, primary IP, MAC-table cable) and sweep
+    cameras that disappeared."""
+    live_ips = set()
+    for probe in probes:
+        ip = probe["ip"]
+        live_ips.add(ip)
+        log("INFO", f"Processing {family} NVR {ip}  "
+                    f"({probe.get('model')} / {probe.get('serial')})")
+        try:
+            data = collect_fn(ip)
+        except KeyboardInterrupt: raise
+        except Exception as e:
+            log("ERROR", f"  {family} collection failed for {ip}: {e}"); continue
+
+        try:
+            dev_id = ensure_fn(probe)
+        except Exception as e:
+            log("ERROR", f"  ensure device failed for {ip}: {e}"); continue
+
+        nvr_name = (data["summary"].get("name") or probe.get("hostname") or ip)
+        try:
+            cf = {"nvr_ip": ip, "nvr_enabled": True,
+                  "nvr_model": data["summary"].get("model") or probe.get("model"),
+                  "nvr_firmware": data["summary"].get("firmware") or probe.get("firmware"),
+                  "nvr_camera_count": len(data["cameras"])}
+            api.dcim.devices.update([{"id": dev_id, "status": "active",
+                                      "custom_fields": cf}])
+        except Exception as e:
+            log("ERROR", f"  NVR update failed for {ip}: {e}")
+
+        try:
+            ensure_primary_ip(dev_id, ip, nvr_name)
+        except Exception as e:
+            log("WARN", f"  NVR primary IPv4 sync failed for {ip}: {e}")
+
+        # Cameras -> separate devices, linked to the NVR via cam_nvr.
+        seen_camera_serials = set()
+        for cam in data["cameras"]:
+            try:
+                cam_dev = ensure_camera_device(
+                    cam, nvr_name, manufacturer=cam.get("manufacturer"))
+                serial = (cam.get("serial") or "").strip()
+                if serial:
+                    seen_camera_serials.add(serial)
+                cam_iface = None
+                if mac_map:
+                    try:
+                        cam_iface = ensure_camera_interface(
+                            cam_dev, bool(cam.get("online")))
+                    except Exception as e:
+                        log("WARN", f"  camera {cam.get('name')} interface sync failed: {e}")
+                if cam.get("ip"):
+                    try:
+                        ensure_primary_ip(
+                            cam_dev, cam["ip"], cam.get("name"),
+                            iface_name=CAMERA_IFACE_NAME if cam_iface else None)
+                    except Exception as e:
+                        log("WARN", f"  camera {cam.get('name')} primary IP failed: {e}")
+                if cam_iface and cam.get("mac") and mac_map:
+                    try:
+                        sync_camera_cable(cam_dev, cam.get("name"), cam_iface,
+                                          cam["mac"], mac_map, switch_by_ip)
+                    except Exception as e:
+                        log("WARN", f"  camera {cam.get('name')} cable sync failed: {e}")
+            except Exception as e:
+                log("ERROR", f"  camera sync failed for ch{cam.get('channel')}: {e}")
+
+        # Cameras no longer reported by this NVR -> offline (never deleted).
+        try:
+            for d in list(api.dcim.devices.filter(cf_cam_nvr=nvr_name,
+                                                  cf_cam_enabled=True)):
+                serial = (d.custom_fields or {}).get("cam_serial") or ""
+                # fall back to the device serial field when cam_serial unset
+                if not serial:
+                    serial = (d.serial or "").strip()
+                if serial and serial not in seen_camera_serials:
+                    mark_camera_offline(d.id, d.name)
+        except Exception as e:
+            log("ERROR", f"  camera offline sweep failed for {ip}: {e}")
+
+        log("INFO", f"  [OK] {family} NVR {ip} — {len(data['cameras'])} cameras synced")
+    return live_ips
 
 
 def run_sync():
@@ -857,86 +950,21 @@ def run_sync():
                              site_indexes, group_vlan_seen, legacy_sites)
         except Exception as e:
             log("ERROR", f"  UniFi WLAN sync failed for {ip}: {e}")
-    # ── Process Hikvision NVRs ───────────────────────────────────────────────
+    # ── Process NVRs (Hikvision / Dahua / Uniview) ───────────────────────────
     # The NVR is the device; each camera becomes its own device (serial is the
     # identity) with the parent NVR recorded in cam_nvr. Camera IPs are set as
-    # primary IPs on the camera device, not separate IPAM records.
-    live_hikvision_ips = {h["ip"] for h in found["hikvision_nvrs"]}
-    seen_camera_serials = set()
-    for probe in found["hikvision_nvrs"]:
-        ip = probe["ip"]
-        log("INFO", f"Processing NVR {ip}  ({probe.get('model')} / {probe.get('serial')})")
-        try:
-            data = hikvision_collect(ip)
-        except KeyboardInterrupt: raise
-        except Exception as e:
-            log("ERROR", f"  Hikvision collection failed for {ip}: {e}"); continue
-
-        try:
-            dev_id = ensure_hikvision_device(probe)
-        except Exception as e:
-            log("ERROR", f"  ensure_hikvision_device failed for {ip}: {e}"); continue
-
-        nvr_name = (data["summary"].get("name") or probe.get("hostname") or ip)
-        try:
-            cf = {"nvr_ip": ip, "nvr_enabled": True,
-                  "nvr_model": data["summary"].get("model") or probe.get("model"),
-                  "nvr_firmware": data["summary"].get("firmware") or probe.get("firmware"),
-                  "nvr_camera_count": len(data["cameras"])}
-            api.dcim.devices.update([{"id": dev_id, "status": "active",
-                                      "custom_fields": cf}])
-        except Exception as e:
-            log("ERROR", f"  NVR update failed for {ip}: {e}")
-
-        try:
-            ensure_primary_ip(dev_id, ip, nvr_name)
-        except Exception as e:
-            log("WARN", f"  NVR primary IPv4 sync failed for {ip}: {e}")
-
-        # Cameras -> separate devices, linked to the NVR via cam_nvr.
-        for cam in data["cameras"]:
-            try:
-                cam_dev = ensure_camera_device(cam, nvr_name)
-                serial = (cam.get("serial") or "").strip()
-                if serial:
-                    seen_camera_serials.add(serial)
-                cam_iface = None
-                if mac_map:
-                    try:
-                        cam_iface = ensure_camera_interface(
-                            cam_dev, bool(cam.get("online")))
-                    except Exception as e:
-                        log("WARN", f"  camera {cam.get('name')} interface sync failed: {e}")
-                if cam.get("ip"):
-                    try:
-                        ensure_primary_ip(
-                            cam_dev, cam["ip"], cam.get("name"),
-                            iface_name=CAMERA_IFACE_NAME if cam_iface else None)
-                    except Exception as e:
-                        log("WARN", f"  camera {cam.get('name')} primary IP failed: {e}")
-                if cam_iface and cam.get("mac") and mac_map:
-                    try:
-                        sync_camera_cable(cam_dev, cam.get("name"), cam_iface,
-                                          cam["mac"], mac_map, switch_by_ip)
-                    except Exception as e:
-                        log("WARN", f"  camera {cam.get('name')} cable sync failed: {e}")
-            except Exception as e:
-                log("ERROR", f"  camera sync failed for ch{cam.get('channel')}: {e}")
-
-        # Cameras no longer reported by this NVR -> offline (never deleted).
-        try:
-            for d in list(api.dcim.devices.filter(cf_cam_nvr=nvr_name,
-                                                  cf_cam_enabled=True)):
-                serial = (d.custom_fields or {}).get("cam_serial") or ""
-                # fall back to the device serial field when cam_serial unset
-                if not serial:
-                    serial = (d.serial or "").strip()
-                if serial and serial not in seen_camera_serials:
-                    mark_camera_offline(d.id, d.name)
-        except Exception as e:
-            log("ERROR", f"  camera offline sweep failed for {ip}: {e}")
-
-        log("INFO", f"  [OK] NVR {ip} — {len(data['cameras'])} cameras synced")
+    # primary IPs on the camera device (on eth0 when MAC cabling is active).
+    # All three vendors share process_nvrs and the vendor-neutral nvr_*/cam_*
+    # custom fields; offline sweeps are manufacturer-scoped (see below).
+    live_hikvision_ips = process_nvrs(found["hikvision_nvrs"], hikvision_collect,
+                                      ensure_hikvision_device, "Hikvision",
+                                      mac_map, switch_by_ip, api)
+    live_dahua_ips = process_nvrs(found["dahua_nvrs"], dahua_collect,
+                                  ensure_dahua_device, "Dahua",
+                                  mac_map, switch_by_ip, api)
+    live_unv_ips = process_nvrs(found["unv_nvrs"], unv_collect,
+                                ensure_unv_device, "UNV",
+                                mac_map, switch_by_ip, api)
 
     # ── IPAM parent prefixes from SITE_IP_MAP (containers for discovered ones)
     try:
@@ -991,7 +1019,14 @@ def run_sync():
     _offline_sweep(api, bool(FORTIGATE_RANGES), "cf_fortigate_enabled", "fortigate_ip",
                    live_fortigate_ips, mark_fortigate_offline, "FortiGates")
     _offline_sweep(api, bool(HIKVISION_RANGES), "cf_nvr_enabled", "nvr_ip",
-                   live_hikvision_ips, mark_hikvision_offline, "Hikvision NVRs")
+                   live_hikvision_ips, mark_hikvision_offline, "Hikvision NVRs",
+                   mfr="Hikvision")
+    _offline_sweep(api, bool(DAHUA_RANGES), "cf_nvr_enabled", "nvr_ip",
+                   live_dahua_ips, mark_dahua_offline, "Dahua NVRs",
+                   mfr="Dahua")
+    _offline_sweep(api, bool(UNV_RANGES), "cf_nvr_enabled", "nvr_ip",
+                   live_unv_ips, mark_unv_offline, "Uniview NVRs",
+                   mfr="Uniview")
     _offline_sweep(api, bool(UNIFI_RANGES), "cf_unifi_enabled", "unifi_ip",
                    live_unifi_ips, mark_unifi_offline, "UniFi consoles")
 
@@ -999,15 +1034,23 @@ def run_sync():
     log("INFO", "=" * 60)
 
 
-def _offline_sweep(api, enabled, cf_field, ip_field, live_ips, mark_fn, label):
+def _offline_sweep(api, enabled, cf_field, ip_field, live_ips, mark_fn, label,
+                   mfr=None):
     """One family's offline pass: every enabled device whose stored IP was not
     seen this scan gets a miss via _check_offline. No-op when the family is
-    disabled (empty ranges) so it never offlines its existing devices."""
+    disabled (empty ranges) so it never offlines its existing devices.
+
+    mfr scopes the sweep to devices of one manufacturer — required for the NVR
+    families, which share the nvr_* custom fields across vendors: without it
+    the Dahua sweep would offline Hikvision NVRs (and vice versa)."""
     if not enabled:
         return
     log("INFO", f"Checking for unreachable {label} ...")
     try:
         for dev in list(api.dcim.devices.filter(**{cf_field: True})):
+            if mfr and (getattr(getattr(dev, "manufacturer", None), "name", "")
+                        or "").lower() != mfr.lower():
+                continue
             stored_ip = (dev.custom_fields or {}).get(ip_field)
             if not stored_ip: continue
             ip = str(stored_ip).split("/")[0].strip()

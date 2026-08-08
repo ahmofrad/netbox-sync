@@ -23,7 +23,8 @@ def test_scan_all_skips_disabled_families(no_families):
     found = scanner.scan_all()
     assert found == {"servers": [], "storage": [], "san_switches": [],
                      "cisco_switches": [], "fortigates": [], "ruckus": [],
-                     "hikvision_nvrs": [], "unifi": []}
+                     "hikvision_nvrs": [], "unifi": [],
+                     "dahua_nvrs": [], "unv_nvrs": []}
 
 
 def test_scan_all_collects_found_devices(monkeypatch, no_families):
@@ -81,3 +82,34 @@ def test_offline_sweep_processes_devices_when_enabled(monkeypatch):
     # both devices examined; the /32 suffix is stripped to a bare IP
     assert [c[0] for c in calls] == ["192.0.2.5", "192.0.2.6"]
     assert {c[2] for c in calls} == {1, 2}   # dev ids
+
+def test_offline_sweep_scopes_by_manufacturer(monkeypatch):
+    """The NVR vendors share the nvr_* custom fields; a Dahua sweep must never
+    examine Hikvision devices (or it would offline them on sight)."""
+    hik = FakeRecord(1, name="nvr-hik", cf_nvr_enabled=True,
+                     custom_fields={"nvr_ip": "192.168.230.66"})
+    hik.manufacturer = type("M", (), {"name": "Hikvision"})()
+    dah = FakeRecord(2, name="nvr-dahua", cf_nvr_enabled=True,
+                     custom_fields={"nvr_ip": "192.168.252.5"})
+    dah.manufacturer = type("M", (), {"name": "Dahua"})()
+    devices_ep = FakeEndpoint([hik, dah])
+    calls = []
+    monkeypatch.setattr(sync_mod, "_check_offline", lambda *a: calls.append(a))
+
+    sync_mod._offline_sweep(_fake_api(devices=devices_ep), True,
+                            "cf_nvr_enabled", "nvr_ip", set(),
+                            lambda *a: None, "Dahua NVRs", mfr="Dahua")
+    assert [c[0] for c in calls] == ["192.168.252.5"]   # only the Dahua NVR
+
+
+def test_offline_sweep_without_mfr_keeps_legacy_behavior(monkeypatch):
+    dev = FakeRecord(1, name="nvr-hik", cf_nvr_enabled=True,
+                     custom_fields={"nvr_ip": "192.168.230.66"})
+    devices_ep = FakeEndpoint([dev])
+    calls = []
+    monkeypatch.setattr(sync_mod, "_check_offline", lambda *a: calls.append(a))
+
+    sync_mod._offline_sweep(_fake_api(devices=devices_ep), True,
+                            "cf_nvr_enabled", "nvr_ip", set(),
+                            lambda *a: None, "Hikvision NVRs")
+    assert len(calls) == 1
