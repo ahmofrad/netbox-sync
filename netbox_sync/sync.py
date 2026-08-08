@@ -61,6 +61,71 @@ from netbox_sync.scanner import scan_all
 from netbox_sync.utils import resolve_site
 
 
+def sync_unifi_wlans(data, console_name, desc_site_votes, site_indexes,
+                     group_vlan_seen, legacy_sites):
+    """Aggregate a UniFi console's WLANs console-globally (unique SSIDs,
+    first site wins) and resolve VLAN bindings per site (first unique match
+    wins; missing VLANs are created in the majority-AP site)."""
+    desc_by_name = {s["name"]: s["desc"] for s in data["sites"]}
+    # UniFi site -> NetBox site: majority of its APs' resolved sites.
+    desc_site = {d: max(v, key=v.get)
+                 for d, v in desc_site_votes.items()}
+    site_id_by_name = {}
+    wlan_by_ssid = {}
+    for sname, wlist in (data["wlans"] or {}).items():
+        for w in wlist:
+            entry = wlan_by_ssid.setdefault(
+                w["ssid"], dict(w, vlan_id=None, _bindings=[]))
+            vid = (data["networks"].get(sname) or {}).get(
+                w.get("networkconf_id"))
+            if vid:
+                entry["_bindings"].append((desc_by_name.get(sname), vid))
+    vid_map = {}
+    missing = {}   # netbox site name -> [{vid, name, status}]
+    for entry in wlan_by_ssid.values():
+        for desc, vid in entry["_bindings"]:
+            site_name = desc_site.get(desc)
+            if not site_name:
+                continue   # no APs at that UniFi site -> can't place
+            site_id = site_id_by_name.get(site_name)
+            if site_id is None:
+                site_id = get_or_create_site(site_name)
+                site_id_by_name[site_name] = site_id
+            site_index = site_indexes.get(site_id)
+            if site_index is None:
+                site_index = _site_vlan_index(site_id)
+                site_indexes[site_id] = site_index
+            matches = site_index.get(vid, [])
+            if len(matches) == 1:
+                entry["vlan_id"] = vid
+                vid_map[vid] = matches[0][1]
+                break
+        else:
+            if entry["_bindings"]:
+                desc, vid = entry["_bindings"][0]
+                site_name = desc_site.get(desc)
+                if site_name:
+                    entry["vlan_id"] = vid
+                    missing.setdefault(site_name, []).append(
+                        {"vid": vid, "name": f"VLAN{vid:04d}",
+                         "status": "active"})
+    for site_name, vlans in missing.items():
+        site_id = site_id_by_name[site_name]
+        group_id = ensure_vlan_group(site_id, console_name)
+        created = sync_cisco_vlans(group_id, console_name, vlans)
+        vid_map.update(created)
+        group_vlan_seen.setdefault(group_id, set()).update(created.keys())
+        legacy_sites.add(site_id)
+    seen_ssids = sync_wireless_lans(console_name,
+                                    list(wlan_by_ssid.values()),
+                                    vid_map, group_prefix="UniFi")
+    sweep_wireless_lans(console_name, seen_ssids)
+    log("INFO", f"  [OK] UniFi {data['summary'].get('reported_ip')} — "
+                f"{len(data['aps'])} APs, "
+                f"{len(seen_ssids)} WLANs, "
+                f"{len(data['sites'])} sites synced")
+
+
 def run_sync():
     log("INFO", "=" * 60)
     log("INFO", "Unified sync started (servers + storage + SAN + Cisco switches)")
@@ -788,66 +853,10 @@ def run_sync():
             log("ERROR", f"  UniFi AP offline sweep failed for {ip}: {e}")
 
         try:
-            desc_by_name = {s["name"]: s["desc"] for s in data["sites"]}
-            # UniFi site -> NetBox site: majority of its APs' resolved sites.
-            desc_site = {d: max(v, key=v.get)
-                         for d, v in desc_site_votes.items()}
-            site_id_by_name = {}
-            wlan_by_ssid = {}
-            for sname, wlist in (data["wlans"] or {}).items():
-                for w in wlist:
-                    entry = wlan_by_ssid.setdefault(
-                        w["ssid"], dict(w, vlan_id=None, _bindings=[]))
-                    vid = (data["networks"].get(sname) or {}).get(
-                        w.get("networkconf_id"))
-                    if vid:
-                        entry["_bindings"].append((desc_by_name.get(sname), vid))
-            vid_map = {}
-            missing = {}   # netbox site name -> [{vid, name, status}]
-            for entry in wlan_by_ssid.values():
-                for desc, vid in entry["_bindings"]:
-                    site_name = desc_site.get(desc)
-                    if not site_name:
-                        continue   # no APs at that UniFi site -> can't place
-                    site_id = site_id_by_name.get(site_name)
-                    if site_id is None:
-                        site_id = get_or_create_site(site_name)
-                        site_id_by_name[site_name] = site_id
-                    site_index = site_indexes.get(site_id)
-                    if site_index is None:
-                        site_index = _site_vlan_index(site_id)
-                        site_indexes[site_id] = site_index
-                    matches = site_index.get(vid, [])
-                    if len(matches) == 1:
-                        entry["vlan_id"] = vid
-                        vid_map[vid] = matches[0][1]
-                        break
-                else:
-                    if entry["_bindings"]:
-                        desc, vid = entry["_bindings"][0]
-                        site_name = desc_site.get(desc)
-                        if site_name:
-                            entry["vlan_id"] = vid
-                            missing.setdefault(site_name, []).append(
-                                {"vid": vid, "name": f"VLAN{vid:04d}",
-                                 "status": "active"})
-            for site_name, vlans in missing.items():
-                site_id = site_id_by_name[site_name]
-                group_id = ensure_vlan_group(site_id, console_name)
-                created = sync_cisco_vlans(group_id, console_name, vlans)
-                vid_map.update(created)
-                group_vlan_seen.setdefault(group_id, set()).update(created.keys())
-                legacy_sites.add(site_id)
-            seen_ssids = sync_wireless_lans(console_name,
-                                            list(wlan_by_ssid.values()),
-                                            vid_map, group_prefix="UniFi")
-            sweep_wireless_lans(console_name, seen_ssids)
-            log("INFO", f"  [OK] UniFi {ip} — {len(data['aps'])} APs, "
-                        f"{len(seen_ssids)} WLANs, "
-                        f"{len(data['sites'])} sites synced")
+            sync_unifi_wlans(data, console_name, desc_site_votes,
+                             site_indexes, group_vlan_seen, legacy_sites)
         except Exception as e:
             log("ERROR", f"  UniFi WLAN sync failed for {ip}: {e}")
-
     # ── Process Hikvision NVRs ───────────────────────────────────────────────
     # The NVR is the device; each camera becomes its own device (serial is the
     # identity) with the parent NVR recorded in cam_nvr. Camera IPs are set as
