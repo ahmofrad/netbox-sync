@@ -15,7 +15,7 @@ import sys
 from netbox_sync.config import log, _validate_config
 from netbox_sync.netbox import (get_netbox, ensure_custom_fields,
                                 ensure_server_device, ensure_storage_device,
-                                ensure_san_device, ensure_cisco_device,
+                                ensure_san_switch_device, ensure_cisco_device,
                                 ensure_fortigate_device, ensure_ruckus_device,
                                 ensure_unifi_console, ensure_hikvision_device,
                                 ensure_dahua_device, ensure_unv_device)
@@ -34,7 +34,7 @@ from netbox_sync.sync import process_nvrs, sync_inventory, ensure_primary_ip
 FAMILIES = {
     "server":    (probe_redfish, rf_collect_inventory, ensure_server_device),
     "storage":   (probe_storage, storage_collect_inventory, ensure_storage_device),
-    "san":       (probe_san_switch, san_collect_inventory, ensure_san_device),
+    "san":       (probe_san_switch, san_collect_inventory, ensure_san_switch_device),
     "cisco":     (probe_cisco_switch, cisco_collect_inventory, ensure_cisco_device),
     "fortigate": (probe_fortigate, fortigate_collect, ensure_fortigate_device),
     "ruckus":    (probe_ruckus, ruckus_collect, ensure_ruckus_device),
