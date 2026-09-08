@@ -194,7 +194,12 @@ def ensure_primary_ip(dev_id, ip, hostname=None, iface_name=None):
     api = get_netbox()
     existing = list(api.ipam.ip_addresses.filter(address=str(ip)))
     if existing:
-        ip_rec = existing[0]
+        # Prefer the global-table (non-VRF) record: an HA peer's shared copy of
+        # the same IP lives in the 'HA' VRF and must not be mistaken for the
+        # device's own mgmt address.
+        global_recs = [r for r in existing
+                       if getattr(r, "vrf", None) in (None, "")]
+        ip_rec = (global_recs or existing)[0]
     else:
         payload = {
             "address": f"{ip}/{_mgmt_prefixlen(ip)}",
@@ -240,6 +245,55 @@ def ensure_primary_ip(dev_id, ip, hostname=None, iface_name=None):
     if current != ip_id:
         api.dcim.devices.update([{"id": dev_id, "primary_ip4": ip_id}])
     return ip_id
+
+
+def _get_or_create_ha_vrf(api):
+    """The 'HA' VRF holds shared HA management addresses: NetBox enforces
+    unique IPs per table, so a passive node's copy of the mgmt IP lives in
+    this separate namespace (same IP string, role 'vrrp')."""
+    vrf = api.ipam.vrfs.get(name="HA")
+    if vrf is None:
+        vrf = api.ipam.vrfs.create({
+            "name": "HA", "rd": "65000:1",
+            "description": "netbox-sync: shared HA mgmt addresses"})
+    return vrf.id
+
+
+def ensure_shared_primary_ip(dev_id, ip, hostname=None):
+    """HA variant of ensure_primary_ip: give a passive node the SAME mgmt IP
+    the primary holds. NetBox won't let one address live on two devices and
+    rejects a duplicate in the global table, so the passive node's copy goes
+    in the 'HA' VRF (separate namespace) with role 'vrrp', assigned to its own
+    mgmt interface and set as its primary. Both nodes show the same mgmt IP."""
+    api = get_netbox()
+    bare = str(ip).split("/")[0]
+    vrf_id = _get_or_create_ha_vrf(api)
+    # this node's own HA copy of the address (in the HA VRF, assigned to it)
+    mine = None
+    for a in api.ipam.ip_addresses.filter(address=bare, vrf_id=vrf_id):
+        ao = getattr(a, "assigned_object_id", None)
+        if getattr(a, "assigned_object_type", None) == "dcim.interface" and ao:
+            iface = api.dcim.interfaces.get(id=ao)
+            d = getattr(iface, "device", None) if iface else None
+            if (getattr(d, "id", None) if d else getattr(iface, "device_id", None)) == dev_id:
+                mine = a
+                break
+    if mine is None:
+        iface = _get_or_create_mgmt_iface(api, dev_id)
+        payload = {"address": f"{bare}/{_mgmt_prefixlen(bare)}",
+                   "status": "active", "role": "vrrp", "vrf": vrf_id,
+                   "description": "netbox-sync: ha shared mgmt IP",
+                   "assigned_object_type": "dcim.interface",
+                   "assigned_object_id": iface.id}
+        dns = _sanitize_dns_name(hostname)
+        if dns:
+            payload["dns_name"] = dns
+        mine = api.ipam.ip_addresses.create(payload)
+    dev = api.dcim.devices.get(id=dev_id)
+    current = getattr(getattr(dev, "primary_ip4", None), "id", None) if dev else None
+    if current != mine.id:
+        api.dcim.devices.update([{"id": dev_id, "primary_ip4": mine.id}])
+    return mine.id
 
 # ── device ensure / mark offline ─────────────────────────────────────────────
 def _device_name(probe, prefix="server"):
@@ -512,10 +566,11 @@ def mark_fortigate_offline(dev_id, dev_name):
         log("ERROR", f"  Could not mark FortiGate offline {dev_name}: {e}")
 
 
-def ensure_fortiweb_device(probe, extra=None):
-    """Ensure the NetBox device for a FortiWeb WAF. Identity = serial
-    (FV-...); hostname may be unset on a factory box, so fall back to a
-    deterministic name. extra carries op_mode/ha_status/port_count."""
+def _ensure_fortiweb_node(probe, extra, ha_role=None, ha_group=None,
+                          ha_peer=None):
+    """Ensure ONE FortiWeb node device. Identity = serial (FV-...), matched
+    regardless of role (so an AE-created device is adopted, not duplicated).
+    ha_role/ha_group/ha_peer are set only for cluster members."""
     from netbox_sync.config import FORTIWEB_ROLE
     extra = extra or {}
     serial = (probe.get("serial") or "").strip()
@@ -532,8 +587,7 @@ def ensure_fortiweb_device(probe, extra=None):
     if not _invalid_serial(serial):
         # Serial is the identity — match REGARDLESS of role so a device the
         # AssetExplorer sync created (role Firewall, carrying asset_tag /
-        # department) is adopted and its role corrected to WAF, instead of
-        # creating a duplicate. find_device(role_name=None) matches any role.
+        # department) is adopted and its role corrected to WAF, not duplicated.
         dev = find_device(serial, role_name=None)
     if dev is None:
         cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
@@ -551,6 +605,12 @@ def ensure_fortiweb_device(probe, extra=None):
           "fortiweb_mode": extra.get("op_mode"),
           "fortiweb_ha": extra.get("ha_status"),
           "fortiweb_port_count": extra.get("port_count")}
+    if ha_role:
+        cf["fortiweb_ha_role"] = ha_role
+    if ha_group:
+        cf["fortiweb_ha_group"] = ha_group
+    if ha_peer:
+        cf["fortiweb_ha_peer"] = ha_peer
     payload = {"name": name, "status": "active", "site": site_id,
                "device_type": dtype_id, "role": role_id,
                "custom_fields": cf,
@@ -562,6 +622,56 @@ def ensure_fortiweb_device(probe, extra=None):
     new = api.dcim.devices.create(payload)
     log("INFO", f"  FortiWeb created: {name} (id={new.id})")
     return new.id
+
+
+def ensure_fortiweb_device(probe, extra=None):
+    """Ensure NetBox devices for a FortiWeb WAF. A Standalone box -> one
+    device. An HA pair -> TWO devices (one per node), each with its own
+    serial, BOTH sharing the same management IP (the passive node gets the
+    address as a role='vrrp' record). Returns the primary node's device id."""
+    extra = extra or {}
+    members = [m for m in (extra.get("ha_members") or []) if m.get("serial")]
+    probed_serial = (probe.get("serial") or "").strip()
+
+    if len(members) < 2:
+        # Standalone (or no cluster data) -> single device, normal primary IP.
+        dev_id = _ensure_fortiweb_node(probe, extra)
+        return dev_id
+
+    # HA pair: identify the primary (role==primary, else the probed serial).
+    primary = next((m for m in members if m["role"] == "primary"), None) \
+        or next((m for m in members if m["serial"] == probed_serial), members[0])
+    ha_group = extra.get("ha_group")
+    primary_id = None
+    for m in members:
+        is_primary = (m["serial"] == primary["serial"])
+        peer = primary if not is_primary else \
+            next((x for x in members if x["serial"] != primary["serial"]), None)
+        node_probe = dict(probe)
+        node_probe["serial"] = m["serial"]
+        # hostname: member's own, else primary-hostname + suffix for the peer
+        if m.get("hostname"):
+            node_probe["hostname"] = m["hostname"]
+        elif is_primary:
+            node_probe["hostname"] = probe.get("hostname")
+        else:
+            base = probe.get("hostname") or f"fortiweb-{probe['ip'].replace('.', '-')}"
+            node_probe["hostname"] = f"{base}-HA2"
+        node_extra = dict(extra)
+        dev_id = _ensure_fortiweb_node(
+            node_probe, node_extra,
+            ha_role="primary" if is_primary else "secondary",
+            ha_group=ha_group,
+            ha_peer=(f"{peer['hostname'] or peer['serial']} ({peer['serial']})"
+                     if peer else None))
+        # shared mgmt IP: primary owns it (normal), secondary gets a vrrp copy
+        if is_primary:
+            ensure_primary_ip(dev_id, probe["ip"], node_probe.get("hostname"))
+            primary_id = dev_id
+        else:
+            ensure_shared_primary_ip(dev_id, probe["ip"],
+                                     node_probe.get("hostname"))
+    return primary_id
 
 
 def mark_fortiweb_offline(dev_id, dev_name):
@@ -979,6 +1089,9 @@ CUSTOM_FIELDS = [
     ("fortiweb_firmware",         "text",    "FortiWeb firmware"),
     ("fortiweb_mode",             "text",    "Operation mode"),
     ("fortiweb_ha",               "text",    "HA status"),
+    ("fortiweb_ha_role",          "text",    "HA role (primary/secondary)"),
+    ("fortiweb_ha_group",         "text",    "HA cluster group name"),
+    ("fortiweb_ha_peer",          "text",    "HA peer unit"),
     ("fortiweb_port_count",       "integer", "Port count"),
     # Ruckus ZoneDirector
     ("wlc_ip",                    "text",    "Controller IP"),

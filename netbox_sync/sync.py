@@ -869,9 +869,12 @@ def run_sync():
             log("ERROR", f"  FortiWeb collection failed for {ip}: {e}"); continue
 
         summary = data["summary"]
+        ha_members = data.get("ha_members") or []
         extra = {"op_mode": summary.get("op_mode"),
                  "ha_status": summary.get("ha_status"),
-                 "port_count": (data.get("interfaces") or {}).get("port_count")}
+                 "port_count": (data.get("interfaces") or {}).get("port_count"),
+                 "ha_members": ha_members,
+                 "ha_group": data.get("ha_group")}
         # prefer the collected hostname over the probe fallback
         eff_probe = dict(probe)
         if summary.get("name"):
@@ -885,12 +888,17 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  ensure_fortiweb_device failed for {ip}: {e}"); continue
 
-        try:
-            ensure_primary_ip(dev_id, ip, eff_probe.get("hostname"))
-        except Exception as e:
-            log("WARN", f"  FortiWeb primary IPv4 sync failed for {ip}: {e}")
+        # standalone boxes get their primary IP here; the HA path assigns the
+        # shared mgmt IP to each node inside ensure_fortiweb_device.
+        if len(ha_members) < 2 and dev_id:
+            try:
+                ensure_primary_ip(dev_id, ip, eff_probe.get("hostname"))
+            except Exception as e:
+                log("WARN", f"  FortiWeb primary IPv4 sync failed for {ip}: {e}")
+        n = len(ha_members) if len(ha_members) >= 2 else 1
         log("INFO", f"  [OK] FortiWeb {ip} — {summary.get('model')} "
-                    f"({summary.get('op_mode')}, HA {summary.get('ha_status')})")
+                    f"({summary.get('op_mode')}, HA {summary.get('ha_status')}"
+                    + (f", {n} nodes" if n > 1 else "") + ")")
 
     # ── Process Ruckus ZoneDirectors ──────────────────────────────────────────
     live_ruckus_ips = {h["ip"] for h in found["ruckus"]}

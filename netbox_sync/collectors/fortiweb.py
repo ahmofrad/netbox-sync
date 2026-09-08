@@ -86,6 +86,26 @@ def _parse_global_hostname(results):
     return (results.get("hostname") or "").strip() or None
 
 
+def _parse_cluster_members(results):
+    """status.systemstatus 'cluster_members' -> [{hostname, serial, role}].
+    Empty list for Standalone / non-clustered. role normalized to
+    'primary'/'secondary'."""
+    members = []
+    for m in (results.get("cluster_members") or []):
+        if not isinstance(m, dict):
+            continue
+        serial = (m.get("dev_sn") or "").strip()
+        if not serial:
+            continue
+        role = (m.get("role") or "").strip().lower()
+        members.append({
+            "hostname": (m.get("hostname") or "").strip() or None,
+            "serial": serial,
+            "role": "primary" if role == "primary" else "secondary",
+        })
+    return members
+
+
 def _parse_interfaces(results):
     """cmdb system/interface results -> {port_count}. Physical ports only;
     mgmt IPs are factory defaults here, so the real mgmt IP is the probed one."""
@@ -129,8 +149,11 @@ def fortiweb_collect(ip):
     interface/port count. Hostname comes from cmdb/system/global (authoritative);
     status.systemstatus's hostName is None on some boxes / HA members."""
     sess = FortiWebSession(ip)
-    status = _parse_system_status(
-        sess.get("/api/v2.0/system/status.systemstatus"))
+    raw_status = sess.get("/api/v2.0/system/status.systemstatus")
+    status = _parse_system_status(raw_status)
+    members = _parse_cluster_members(raw_status)
+    ha_group = (raw_status.get("cluster") or "").strip() or None \
+        if isinstance(raw_status, dict) else None
     try:
         gh = _parse_global_hostname(sess.get("/api/v2.0/cmdb/system/global"))
         if gh:
@@ -152,4 +175,6 @@ def fortiweb_collect(ip):
         "summary": status,
         "resources": resources,
         "interfaces": ifaces,
+        "ha_members": members,     # [{hostname, serial, role}] — empty if Standalone
+        "ha_group": ha_group,      # cluster name, e.g. "WAF-HA"
     }

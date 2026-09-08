@@ -73,6 +73,26 @@ def test_parse_global_hostname():
     assert fw._parse_global_hostname({}) is None
 
 
+def test_parse_cluster_members():
+    results = {"cluster": "WAF-HA", "haStatus": "Active-Passive",
+               "cluster_members": [
+                   {"hostname": "FortiWeb-Afranet", "dev_sn": "FV-1KFS124000458",
+                    "role": "Primary"},
+                   {"hostname": "FortiWeb", "dev_sn": "FV-1KFS124000505",
+                    "role": "Secondary"}]}
+    out = fw._parse_cluster_members(results)
+    assert out == [
+        {"hostname": "FortiWeb-Afranet", "serial": "FV-1KFS124000458",
+         "role": "primary"},
+        {"hostname": "FortiWeb", "serial": "FV-1KFS124000505",
+         "role": "secondary"}]
+
+
+def test_parse_cluster_members_standalone():
+    assert fw._parse_cluster_members({"haStatus": "Standalone"}) == []
+    assert fw._parse_cluster_members({}) == []
+
+
 def test_session_get_returns_results_and_raises_on_errcode(monkeypatch):
     class _Resp:
         def __init__(self, status, payload):
@@ -217,3 +237,95 @@ def test_ensure_fortiweb_adopts_existing_serial_regardless_of_role(monkeypatch):
     # AE fields preserved (update merges; we never clear them)
     assert upd["custom_fields"].get("ae_department") is None or \
            existing.custom_fields.get("ae_department") == "ICT"
+
+
+# ── HA two-device model ──────────────────────────────────────────────────────
+
+def _ha_setup(monkeypatch):
+    """Common fakes for HA tests; returns (devices_ep, ips_ep, ifaces_ep)."""
+    from tests.test_netbox_sync import FakeEndpoint, FakeRecord
+    devices_ep = FakeEndpoint()
+    ifaces_ep = FakeEndpoint()
+    ips_ep = FakeEndpoint()
+    vrfs_ep = FakeEndpoint()
+    api = SimpleNamespace(
+        dcim=SimpleNamespace(devices=devices_ep, interfaces=ifaces_ep),
+        ipam=SimpleNamespace(ip_addresses=ips_ep, vrfs=vrfs_ep))
+    monkeypatch.setattr(nbx, "get_netbox", lambda: api)
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda n: 11)
+    monkeypatch.setattr(nbx, "get_or_create_role", lambda n, *a: 12)
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda n: 13)
+    monkeypatch.setattr(nbx, "get_or_create_device_type", lambda *a, **k: 14)
+    monkeypatch.setattr(nbx, "find_device",
+                        lambda serial, role_name=None: next(
+                            (d for d in devices_ep.items
+                             if getattr(d, "serial", None) == serial), None))
+    return devices_ep, ips_ep, ifaces_ep
+
+
+HA_MEMBERS = [
+    {"hostname": "FortiWeb-Afranet", "serial": "FV-1KFS124000458", "role": "primary"},
+    {"hostname": None, "serial": "FV-1KFS124000505", "role": "secondary"},
+]
+
+
+def test_ensure_fortiweb_ha_creates_two_devices_shared_ip(monkeypatch):
+    devices_ep, ips_ep, ifaces_ep = _ha_setup(monkeypatch)
+    probe = {"ip": "192.168.19.130", "serial": "FV-1KFS124000458",
+             "model": "FortiWeb 1000F", "hostname": "FortiWeb-Afranet",
+             "manufacturer": "Fortinet", "firmware": "7.2.12"}
+    extra = {"op_mode": "Reverse Proxy", "ha_status": "Active-Passive",
+             "port_count": 16, "ha_members": HA_MEMBERS, "ha_group": "WAF-HA"}
+
+    primary_id = nbx.ensure_fortiweb_device(probe, extra)
+
+    # two devices, distinct serials
+    assert len(devices_ep.created) == 2
+    serials = {p["serial"] for p in devices_ep.created}
+    assert serials == {"FV-1KFS124000458", "FV-1KFS124000505"}
+    # names: primary keeps hostname, secondary gets -HA2 (its hostname was None)
+    names = {p["serial"]: p["name"] for p in devices_ep.created}
+    assert names["FV-1KFS124000458"] == "FortiWeb-Afranet"
+    assert names["FV-1KFS124000505"] == "FortiWeb-Afranet-HA2"
+    # both share the same mgmt IP in fortiweb_ip
+    for p in devices_ep.created:
+        assert p["custom_fields"]["fortiweb_ip"] == "192.168.19.130"
+    # roles
+    role_by_serial = {p["serial"]: p["custom_fields"]["fortiweb_ha_role"]
+                      for p in devices_ep.created}
+    assert role_by_serial["FV-1KFS124000458"] == "primary"
+    assert role_by_serial["FV-1KFS124000505"] == "secondary"
+    # primary returned
+    assert primary_id == next(p for p in devices_ep.items
+                              if getattr(p, "serial", None) == "FV-1KFS124000458").id
+    # two IP address records for the same IP string (primary active + secondary vrrp)
+    addr_strs = [p["address"] for p in ips_ep.created]
+    assert all(a.startswith("192.168.19.130") for a in addr_strs)
+    roles = [getattr(p.get("role"), "value", p.get("role")) for p in ips_ep.created]
+    assert "vrrp" in roles
+
+
+def test_ensure_fortiweb_ha_idempotent(monkeypatch):
+    devices_ep, ips_ep, ifaces_ep = _ha_setup(monkeypatch)
+    probe = {"ip": "192.168.19.130", "serial": "FV-1KFS124000458",
+             "model": "FortiWeb 1000F", "hostname": "FortiWeb-Afranet",
+             "manufacturer": "Fortinet", "firmware": "7.2.12"}
+    extra = {"op_mode": "Reverse Proxy", "ha_status": "Active-Passive",
+             "port_count": 16, "ha_members": HA_MEMBERS, "ha_group": "WAF-HA"}
+    nbx.ensure_fortiweb_device(probe, extra)
+    nbx.ensure_fortiweb_device(probe, extra)   # second run
+    assert len(devices_ep.created) == 2        # still two, no dupes
+
+
+def test_ensure_fortiweb_standalone_single_device(monkeypatch):
+    devices_ep, ips_ep, ifaces_ep = _ha_setup(monkeypatch)
+    probe = {"ip": "192.168.60.252", "serial": "FV-1KET122900020",
+             "model": "FortiWeb 1000E", "hostname": "FortiWeb-Azadegan",
+             "manufacturer": "Fortinet", "firmware": "7.2.12"}
+    extra = {"op_mode": "Reverse Proxy", "ha_status": "Standalone",
+             "port_count": 14, "ha_members": [], "ha_group": None}
+    nbx.ensure_fortiweb_device(probe, extra)
+    assert len(devices_ep.created) == 1
+    assert devices_ep.created[0]["serial"] == "FV-1KET122900020"
+    # no HA role on a standalone box
+    assert "fortiweb_ha_role" not in devices_ep.created[0]["custom_fields"]
