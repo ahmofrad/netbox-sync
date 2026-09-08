@@ -25,6 +25,7 @@ from netbox_sync.collectors.fortigate import (fortigate_collect,
                                               sync_fortigate_interfaces,
                                               resolve_fortigate_vlans,
                                               _fortigate_iface_mac)
+from netbox_sync.collectors.fortiweb import fortiweb_collect
 from netbox_sync.collectors.hikvision import hikvision_collect
 from netbox_sync.collectors.dahua import dahua_collect
 from netbox_sync.collectors.unv import unv_collect
@@ -37,7 +38,7 @@ from netbox_sync.collectors.unifi import unifi_collect
 from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
                                  CISCO_RANGES, FORTIGATE_RANGES, RUCKUS_RANGES,
                                  RUCKUS_HA_MAP, HIKVISION_RANGES, UNIFI_RANGES,
-                                 DAHUA_RANGES, UNV_RANGES)
+                                 DAHUA_RANGES, UNV_RANGES, FORTIWEB_RANGES)
 from netbox_sync.report import (classify_error, clear as clear_scan_report,
                                 print_summary, record_processing_failure)
 from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
@@ -50,6 +51,7 @@ from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
 from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_storage_device, ensure_san_switch_device,
                                 ensure_cisco_device, ensure_fortigate_device,
+                                ensure_fortiweb_device,
                                 ensure_ruckus_device, ensure_ap_device,
                                 ensure_hikvision_device, ensure_camera_device,
                                 ensure_dahua_device, ensure_unv_device,
@@ -58,7 +60,8 @@ from netbox_sync.netbox import (get_netbox, ensure_server_device,
                                 ensure_primary_ip,
                                 mark_server_offline, mark_storage_offline,
                                 mark_san_offline, mark_cisco_offline,
-                                mark_fortigate_offline, mark_ap_offline,
+                                mark_fortigate_offline, mark_fortiweb_offline,
+                                mark_ap_offline,
                                 mark_ruckus_offline, mark_hikvision_offline,
                                 mark_dahua_offline, mark_unv_offline,
                                 mark_camera_offline, mark_unifi_offline,
@@ -852,6 +855,43 @@ def run_sync():
         except Exception as e:
             log("ERROR", f"  NAT IP sweep failed: {e}")
 
+    # ── Process FortiWeb WAFs ────────────────────────────────────────────────
+    # Device-level inventory only (identity/model/firmware/mode/HA/ports).
+    # Serial is the identity; a factory box may have no hostname -> fallback.
+    live_fortiweb_ips = {h["ip"] for h in found["fortiwebs"]}
+    for probe in found["fortiwebs"]:
+        ip = probe["ip"]
+        log("INFO", f"Processing FORTIWEB {ip}  ({probe.get('model')} / {probe.get('serial')})")
+        try:
+            data = fortiweb_collect(ip)
+        except KeyboardInterrupt: raise
+        except Exception as e:
+            log("ERROR", f"  FortiWeb collection failed for {ip}: {e}"); continue
+
+        summary = data["summary"]
+        extra = {"op_mode": summary.get("op_mode"),
+                 "ha_status": summary.get("ha_status"),
+                 "port_count": (data.get("interfaces") or {}).get("port_count")}
+        # prefer the collected hostname over the probe fallback
+        eff_probe = dict(probe)
+        if summary.get("name"):
+            eff_probe["hostname"] = summary["name"]
+        if summary.get("model"):
+            eff_probe["model"] = summary["model"]
+        if summary.get("version"):
+            eff_probe["firmware"] = summary["version"]
+        try:
+            dev_id = ensure_fortiweb_device(eff_probe, extra)
+        except Exception as e:
+            log("ERROR", f"  ensure_fortiweb_device failed for {ip}: {e}"); continue
+
+        try:
+            ensure_primary_ip(dev_id, ip, eff_probe.get("hostname"))
+        except Exception as e:
+            log("WARN", f"  FortiWeb primary IPv4 sync failed for {ip}: {e}")
+        log("INFO", f"  [OK] FortiWeb {ip} — {summary.get('model')} "
+                    f"({summary.get('op_mode')}, HA {summary.get('ha_status')})")
+
     # ── Process Ruckus ZoneDirectors ──────────────────────────────────────────
     live_ruckus_ips = {h["ip"] for h in found["ruckus"]}
     ruckus_ha_map = _parse_ha_map(RUCKUS_HA_MAP)
@@ -1112,6 +1152,8 @@ def run_sync():
                    live_cisco_ips, mark_cisco_offline, "Cisco switches")
     _offline_sweep(api, bool(FORTIGATE_RANGES), "cf_fortigate_enabled", "fortigate_ip",
                    live_fortigate_ips, mark_fortigate_offline, "FortiGates")
+    _offline_sweep(api, bool(FORTIWEB_RANGES), "cf_fortiweb_enabled", "fortiweb_ip",
+                   live_fortiweb_ips, mark_fortiweb_offline, "FortiWeb WAFs")
     _offline_sweep(api, bool(HIKVISION_RANGES), "cf_nvr_enabled", "nvr_ip",
                    live_hikvision_ips, mark_hikvision_offline, "Hikvision NVRs",
                    mfr="Hikvision")

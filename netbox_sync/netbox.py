@@ -512,6 +512,61 @@ def mark_fortigate_offline(dev_id, dev_name):
         log("ERROR", f"  Could not mark FortiGate offline {dev_name}: {e}")
 
 
+def ensure_fortiweb_device(probe, extra=None):
+    """Ensure the NetBox device for a FortiWeb WAF. Identity = serial
+    (FV-...); hostname may be unset on a factory box, so fall back to a
+    deterministic name. extra carries op_mode/ha_status/port_count."""
+    from netbox_sync.config import FORTIWEB_ROLE
+    extra = extra or {}
+    serial = (probe.get("serial") or "").strip()
+    mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Fortinet")
+    role_id = get_or_create_role(FORTIWEB_ROLE, "c62828")
+    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
+    site_id = get_or_create_site(site_name)
+    dtype_id = get_or_create_device_type(probe.get("model") or "FortiWeb",
+                                         mfr_id)
+    name = (probe.get("hostname")
+            or f"fortiweb-{probe['ip'].replace('.', '-')}")[:64]
+    api = get_netbox()
+    dev = None
+    if not _invalid_serial(serial):
+        dev = find_device(serial, role_name=FORTIWEB_ROLE)
+    if dev is None:
+        cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
+                                             role_id=role_id))
+        dev = cands[0] if cands else None
+        if dev:
+            log("INFO", f"  Found FortiWeb by name+site: {name} (id={dev.id})")
+    cf = {"fortiweb_ip": probe["ip"], "fortiweb_enabled": True,
+          "fortiweb_model": probe.get("model"),
+          "fortiweb_firmware": probe.get("firmware"),
+          "fortiweb_mode": extra.get("op_mode"),
+          "fortiweb_ha": extra.get("ha_status"),
+          "fortiweb_port_count": extra.get("port_count")}
+    payload = {"name": name, "status": "active", "site": site_id,
+               "device_type": dtype_id, "role": role_id,
+               "custom_fields": cf,
+               **({"serial": serial} if not _invalid_serial(serial) else {})}
+    if dev:
+        api.dcim.devices.update([{"id": dev.id, **payload}])
+        log("INFO", f"  FortiWeb updated: {name} (id={dev.id})")
+        return dev.id
+    new = api.dcim.devices.create(payload)
+    log("INFO", f"  FortiWeb created: {name} (id={new.id})")
+    return new.id
+
+
+def mark_fortiweb_offline(dev_id, dev_name):
+    try:
+        get_netbox().dcim.devices.update([{
+            "id": dev_id, "status": "offline",
+            "custom_fields": {"fortiweb_enabled": False},
+        }])
+        log("WARN", f"  FortiWeb marked offline: {dev_name} (id={dev_id})")
+    except Exception as e:
+        log("ERROR", f"  Could not mark FortiWeb offline {dev_name}: {e}")
+
+
 def ensure_ap_device(ap, wlc_name, role_name=None, manufacturer="Ruckus",
                      site_name=None):
     """Ensure a NetBox device for an access point (Ruckus or UniFi). APs have
@@ -909,6 +964,14 @@ CUSTOM_FIELDS = [
     ("fortigate_ha_mode",         "text",    "HA mode (a-p / a-a)"),
     ("fortigate_ha_peer",         "text",    "HA peer units"),
     ("fortigate_ha_role",         "text",    "Role of the probed unit"),
+    # FortiWeb WAF
+    ("fortiweb_ip",               "text",    "FortiWeb IP"),
+    ("fortiweb_enabled",          "boolean", "FortiWeb enabled"),
+    ("fortiweb_model",            "text",    "Model"),
+    ("fortiweb_firmware",         "text",    "FortiWeb firmware"),
+    ("fortiweb_mode",             "text",    "Operation mode"),
+    ("fortiweb_ha",               "text",    "HA status"),
+    ("fortiweb_port_count",       "integer", "Port count"),
     # Ruckus ZoneDirector
     ("wlc_ip",                    "text",    "Controller IP"),
     ("wlc_enabled",               "boolean", "Controller enabled"),
