@@ -67,6 +67,12 @@ def test_parse_interfaces_counts_physical_only():
     assert out["port_count"] == 3                 # mgmt1 + port1 + port2, not vlan
 
 
+def test_parse_global_hostname():
+    assert fw._parse_global_hostname({"hostname": "FortiWeb-Afranet"}) == "FortiWeb-Afranet"
+    assert fw._parse_global_hostname({"hostname": ""}) is None
+    assert fw._parse_global_hostname({}) is None
+
+
 def test_session_get_returns_results_and_raises_on_errcode(monkeypatch):
     class _Resp:
         def __init__(self, status, payload):
@@ -175,3 +181,39 @@ def test_mark_fortiweb_offline(monkeypatch):
     nbx.mark_fortiweb_offline(7, "FortiWeb-Azadegan")
     assert devices_ep.updated[0]["status"] == "offline"
     assert devices_ep.updated[0]["custom_fields"]["fortiweb_enabled"] is False
+
+
+def test_ensure_fortiweb_adopts_existing_serial_regardless_of_role(monkeypatch):
+    """A device the AssetExplorer sync created (role Firewall, carrying
+    asset_tag/department) must be ADOPTED by serial and its role corrected to
+    WAF — not duplicated. Regression test for the Azadegan/Afranet dupes."""
+    from tests.test_netbox_sync import FakeRecord, FakeEndpoint
+    # pre-existing AE-created device: same serial, role Firewall, has asset data
+    existing = FakeRecord(
+        10228, name="Azadegan-FortiWeb", serial="FV-1KET122900020",
+        site_id=13, role_id=99,                        # role_id 99 = Firewall
+        role=SimpleNamespace(id=99, name="Firewall"),
+        custom_fields={"ae_asset_id": "403", "ae_department": "ICT"})
+    devices_ep = FakeEndpoint([existing])
+    monkeypatch.setattr(nbx, "get_netbox",
+                        lambda: SimpleNamespace(dcim=SimpleNamespace(devices=devices_ep)))
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda n: 11)
+    monkeypatch.setattr(nbx, "get_or_create_role", lambda n, *a: 12)   # WAF id=12
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda n: 13)
+    monkeypatch.setattr(nbx, "get_or_create_device_type", lambda *a, **k: 14)
+
+    probe = {"ip": "192.168.60.252", "serial": "FV-1KET122900020",
+             "model": "FortiWeb 1000E", "hostname": "FortiWeb-Azadegan",
+             "manufacturer": "Fortinet", "firmware": "7.2.12"}
+    dev_id = nbx.ensure_fortiweb_device(probe, {"op_mode": "Reverse Proxy"})
+
+    # adopted, not duplicated
+    assert dev_id == 10228
+    assert len(devices_ep.created) == 0
+    upd = devices_ep.updated[-1]
+    assert upd["id"] == 10228
+    assert upd["role"] == 12                            # role corrected to WAF
+    assert upd["custom_fields"]["fortiweb_ip"] == "192.168.60.252"
+    # AE fields preserved (update merges; we never clear them)
+    assert upd["custom_fields"].get("ae_department") is None or \
+           existing.custom_fields.get("ae_department") == "ICT"

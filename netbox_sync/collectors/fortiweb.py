@@ -60,7 +60,9 @@ class FortiWebSession:
 
 def _parse_system_status(results):
     """status.systemstatus results -> identity. firmwareVersion looks like
-    'FortiWeb-1000E 7.2.12,build0437(GA),251023' -> model + version split."""
+    'FortiWeb-1000E 7.2.12,build0437(GA),251023' -> model + version split.
+    NOTE: hostName here is unreliable (None on some boxes / HA members) — the
+    real hostname lives in cmdb/system/global; see fortiweb_collect."""
     fw = (results.get("firmwareVersion") or "").strip()
     model = version = None
     if fw:
@@ -77,6 +79,11 @@ def _parse_system_status(results):
         "ha_status": (results.get("haStatus") or "").strip() or None,
         "firmware_raw": fw or None,
     }
+
+
+def _parse_global_hostname(results):
+    """cmdb/system/global results -> hostname (the authoritative source)."""
+    return (results.get("hostname") or "").strip() or None
 
 
 def _parse_interfaces(results):
@@ -119,10 +126,17 @@ def probe_fortiweb(ip, retries=2, retry_delay=3):
 
 def fortiweb_collect(ip):
     """Full collection: identity + operation/HA mode + resource snapshot +
-    interface/port count."""
+    interface/port count. Hostname comes from cmdb/system/global (authoritative);
+    status.systemstatus's hostName is None on some boxes / HA members."""
     sess = FortiWebSession(ip)
     status = _parse_system_status(
         sess.get("/api/v2.0/system/status.systemstatus"))
+    try:
+        gh = _parse_global_hostname(sess.get("/api/v2.0/cmdb/system/global"))
+        if gh:
+            status["name"] = gh
+    except Exception as e:
+        log("WARN", f"  fortiweb {ip}: system/global hostname failed: {e}")
     try:
         resources = sess.get("/api/v2.0/system/status.systemresource")
     except Exception as e:

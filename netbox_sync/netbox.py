@@ -530,13 +530,21 @@ def ensure_fortiweb_device(probe, extra=None):
     api = get_netbox()
     dev = None
     if not _invalid_serial(serial):
-        dev = find_device(serial, role_name=FORTIWEB_ROLE)
+        # Serial is the identity — match REGARDLESS of role so a device the
+        # AssetExplorer sync created (role Firewall, carrying asset_tag /
+        # department) is adopted and its role corrected to WAF, instead of
+        # creating a duplicate. find_device(role_name=None) matches any role.
+        dev = find_device(serial, role_name=None)
     if dev is None:
         cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
                                              role_id=role_id))
         dev = cands[0] if cands else None
         if dev:
             log("INFO", f"  Found FortiWeb by name+site: {name} (id={dev.id})")
+    elif dev.role and getattr(dev.role, "id", None) != role_id:
+        log("INFO", f"  FortiWeb serial matched existing device {dev.name!r} "
+                    f"(id={dev.id}, role {getattr(dev.role, 'name', dev.role)} "
+                    f"-> {FORTIWEB_ROLE})")
     cf = {"fortiweb_ip": probe["ip"], "fortiweb_enabled": True,
           "fortiweb_model": probe.get("model"),
           "fortiweb_firmware": probe.get("firmware"),
