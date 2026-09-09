@@ -88,7 +88,7 @@ def print_summary(found):
         "servers": "Servers", "storage": "Storage",
         "san_switches": "SAN switches", "cisco_switches": "Cisco switches",
         "fortigates": "FortiGates", "fortiwebs": "FortiWeb WAFs",
-        "ruckus": "Ruckus",
+        "ftds": "Cisco FTDs", "ruckus": "Ruckus",
         "unifi": "UniFi consoles", "hikvision_nvrs": "Hikvision NVRs",
         "dahua_nvrs": "Dahua NVRs", "unv_nvrs": "Uniview NVRs",
     }

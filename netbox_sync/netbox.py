@@ -747,6 +747,69 @@ def mark_fortiweb_offline(dev_id, dev_name):
         log("ERROR", f"  Could not mark FortiWeb offline {dev_name}: {e}")
 
 
+def ensure_ftd_device(ftd, fmc_ip=None):
+    """Ensure the NetBox device for a Cisco FTD (discovered via FMC). Identity
+    = chassis serial (metadata.deviceSerialNumber), matched regardless of role
+    (adopts AE-created records). Each FTD has its own distinct mgmt IP, so no
+    shared-IP/VRF handling is needed."""
+    from netbox_sync.config import FTD_ROLE
+    serial = (ftd.get("serial") or "").strip()
+    mgmt_ip = (ftd.get("mgmt_ip") or "").strip()
+    mfr_id = get_or_create_manufacturer("Cisco")
+    role_id = get_or_create_role(FTD_ROLE, "009688")
+    site_name = resolve_site(ftd.get("name") or "", mgmt_ip)
+    site_id = get_or_create_site(site_name)
+    dtype_id = get_or_create_device_type(ftd.get("model") or "Cisco FTD", mfr_id)
+    name = (ftd.get("name")
+            or (f"ftd-{mgmt_ip.replace('.', '-')}" if mgmt_ip
+                else f"ftd-{serial}"))[:64]
+    api = get_netbox()
+    dev = None
+    if not _invalid_serial(serial):
+        dev = find_device(serial, role_name=None)   # any role — adopt, don't dupe
+    if dev is None:
+        # Serial mismatch is common here: the AssetExplorer sync may hold the
+        # same FTD under a DIFFERENT serial (e.g. AE's module/supervisor serial
+        # vs the chassis serial the FMC reports). Fall back to name+site so the
+        # existing record is adopted (role corrected to FTD, serial reconciled
+        # to the FMC's authoritative chassis serial) instead of duplicated.
+        cands = [d for d in api.dcim.devices.filter(name=name, site_id=site_id)
+                 if not (d.custom_fields or {}).get("ftd_ip")]
+        if len(cands) == 1:
+            dev = cands[0]
+            log("INFO", f"  FTD serial {serial} not found; adopted by name+site: "
+                        f"{name} (id={dev.id}, had serial {dev.serial!r})")
+    cf = {"ftd_ip": mgmt_ip, "ftd_enabled": True,
+          "ftd_model": ftd.get("model"),
+          "ftd_firmware": ftd.get("sw_version"),
+          "ftd_health": ftd.get("health"),
+          "ftd_mode": ftd.get("mode"),
+          "ftd_group": ftd.get("group"),
+          "ftd_fmc": fmc_ip}
+    payload = {"name": name, "status": "active", "site": site_id,
+               "device_type": dtype_id, "role": role_id,
+               "custom_fields": cf,
+               **({"serial": serial} if not _invalid_serial(serial) else {})}
+    if dev:
+        api.dcim.devices.update([{"id": dev.id, **payload}])
+        log("INFO", f"  FTD updated: {name} (id={dev.id})")
+        return dev.id
+    new = api.dcim.devices.create(payload)
+    log("INFO", f"  FTD created: {name} (id={new.id})")
+    return new.id
+
+
+def mark_ftd_offline(dev_id, dev_name):
+    try:
+        get_netbox().dcim.devices.update([{
+            "id": dev_id, "status": "offline",
+            "custom_fields": {"ftd_enabled": False},
+        }])
+        log("WARN", f"  FTD marked offline: {dev_name} (id={dev_id})")
+    except Exception as e:
+        log("ERROR", f"  Could not mark FTD offline {dev_name}: {e}")
+
+
 def ensure_ap_device(ap, wlc_name, role_name=None, manufacturer="Ruckus",
                      site_name=None):
     """Ensure a NetBox device for an access point (Ruckus or UniFi). APs have
@@ -1158,6 +1221,15 @@ CUSTOM_FIELDS = [
     ("fortiweb_ha_group",         "text",    "HA cluster group name"),
     ("fortiweb_ha_peer",          "text",    "HA peer unit"),
     ("fortiweb_port_count",       "integer", "Port count"),
+    # Cisco FTD (via FMC)
+    ("ftd_ip",                    "text",    "FTD management IP"),
+    ("ftd_enabled",               "boolean", "FTD enabled"),
+    ("ftd_model",                 "text",    "Model"),
+    ("ftd_firmware",              "text",    "FTD software version"),
+    ("ftd_health",                "text",    "Health status"),
+    ("ftd_mode",                  "text",    "FTD mode"),
+    ("ftd_group",                 "text",    "FMC device group"),
+    ("ftd_fmc",                   "text",    "Managing FMC IP"),
     # Ruckus ZoneDirector
     ("wlc_ip",                    "text",    "Controller IP"),
     ("wlc_enabled",               "boolean", "Controller enabled"),
