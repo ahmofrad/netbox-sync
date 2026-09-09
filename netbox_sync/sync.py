@@ -494,23 +494,24 @@ def run_sync():
     site_prefix_seen = {}
     legacy_sites = set()
 
-    # Pass 1: ensure devices and collect everything — broadcast domains are
-    # derived from the CDP topology, which needs every switch's data first.
+    # Pass 1: collect everything, then ensure devices — broadcast domains are
+    # derived from the CDP topology (needs every switch's data first), and the
+    # stack membership comes from the collection (show switch / show inventory).
     collected = []
     for probe in found["cisco_switches"]:
         ip = probe["ip"]
         log("INFO", f"Processing CISCO {ip}  ({probe.get('model')} / {probe.get('serial')})")
 
         try:
-            dev_id = ensure_cisco_device(probe)
-        except Exception as e:
-            log("ERROR", f"  ensure_cisco_device failed for {ip}: {e}"); continue
-
-        try:
             data = cisco_collect_inventory(ip)
         except KeyboardInterrupt: raise
         except Exception as e:
             log("ERROR", f"  Cisco inventory collection failed for {ip}: {e}"); continue
+
+        try:
+            dev_id = ensure_cisco_device(probe, stack=data.get("stack"))
+        except Exception as e:
+            log("ERROR", f"  ensure_cisco_device failed for {ip}: {e}"); continue
 
         collected.append((probe, dev_id, data))
 

@@ -419,7 +419,11 @@ def ensure_san_switch_device(probe):
     log("INFO", f"  SAN switch created: {name} (id={new.id})")
     return new.id
 
-def ensure_cisco_device(probe):
+def _ensure_cisco_node(probe, stack_role=None, stack_members=None,
+                       stack_peer=None):
+    """Ensure ONE Cisco switch/stack-member device. Identity = serial, matched
+    regardless of role (adopts AE-created records). stack_* set only for
+    stack members."""
     serial = (probe.get("serial") or "").strip()
     mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Cisco")
     role_id = get_or_create_role(CISCO_ROLE, "009688")
@@ -428,20 +432,24 @@ def ensure_cisco_device(probe):
     dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, CISCO_MODEL_MAP)
     name = _device_name(probe, prefix="cisco")
     api = get_netbox()
-    dev = find_device(serial, role_name=CISCO_ROLE)
+    dev = find_device(serial, role_name=None)   # any role — adopt, don't dupe
     if dev is None:
         cands = list(api.dcim.devices.filter(name=name, site_id=site_id, role_id=role_id))
         dev = cands[0] if cands else None
         if dev: log("INFO", f"  Found cisco switch by name+site: {name} (id={dev.id})")
+    cf = {
+        "cisco_ip":       probe["ip"],
+        "cisco_enabled":  True,
+        "cisco_firmware": probe.get("firmware"),
+        "cisco_model":    probe.get("model"),
+    }
+    if stack_role:    cf["cisco_stack_role"] = stack_role
+    if stack_members: cf["cisco_stack_members"] = stack_members
+    if stack_peer:    cf["cisco_stack_peer"] = stack_peer
     payload = {
         "name": name, "status": "active", "site": site_id,
         "device_type": dtype_id, "role": role_id,
-        "custom_fields": {
-            "cisco_ip":       probe["ip"],
-            "cisco_enabled":  True,
-            "cisco_firmware": probe.get("firmware"),
-            "cisco_model":    probe.get("model"),
-        },
+        "custom_fields": cf,
         **({"serial": serial} if not _invalid_serial(serial) else {}),
     }
     if dev:
@@ -452,36 +460,57 @@ def ensure_cisco_device(probe):
     log("INFO", f"  Cisco switch created: {name} (id={new.id})")
     return new.id
 
-def ensure_fortigate_device(probe, ha=None):
-    """Ensure the NetBox device for a FortiGate. When the unit belongs to an
-    HA cluster, the device represents the CLUSTER: named and serialized after
-    the primary unit, resolvable by ANY unit serial, peers recorded in custom
-    fields instead of as separate devices."""
-    ha = ha or {}
+
+def ensure_cisco_device(probe, stack=None):
+    """Ensure NetBox devices for a Cisco switch. Single unit -> one device.
+    A stack -> ONE device PER MEMBER, each with its own chassis serial, all
+    sharing the same mgmt IP (standby via the 'HA' VRF, role vrrp). Returns
+    the ACTIVE member's device id (interfaces/VLANs/cables attach there)."""
+    members = [m for m in (stack or []) if m.get("serial")]
+    if len(members) < 2:
+        return _ensure_cisco_node(probe)
+
+    active = next((m for m in members if m["role"] == "Active"), members[0])
+    n = len(members)
+    active_id = None
+    for m in members:
+        is_active = (m["serial"] == active["serial"])
+        peer = active if not is_active else \
+            next((x for x in members if x["serial"] != active["serial"]), None)
+        node_probe = dict(probe)
+        node_probe["serial"] = m["serial"]
+        if not is_active:
+            base = probe.get("hostname") or f"cisco-{probe['ip'].replace('.', '-')}"
+            node_probe["hostname"] = f"{base}-M{m['member']}"
+        dev_id = _ensure_cisco_node(
+            node_probe,
+            stack_role="active" if is_active else "standby",
+            stack_members=n,
+            stack_peer=(f"{peer.get('hostname') or 'M' + str(peer['member'])} "
+                        f"({peer['serial']})" if peer else None))
+        if is_active:
+            ensure_primary_ip(dev_id, probe["ip"], node_probe.get("hostname"))
+            active_id = dev_id
+        else:
+            ensure_shared_primary_ip(dev_id, probe["ip"], node_probe.get("hostname"))
+    return active_id
+
+def _ensure_fortigate_node(probe, ha_role=None, ha_group=None, ha_mode=None,
+                           ha_peer=None):
+    """Ensure ONE FortiGate unit device. Identity = serial (FG...), matched
+    regardless of role (adopts AE-created records, no dupes). ha_* set only
+    for cluster members."""
     serial = (probe.get("serial") or "").strip()
-    clustered = bool(ha.get("clustered") and ha.get("primary_hostname"))
-    if clustered:
-        eff_serial = (ha.get("primary_serial") or serial).strip()
-        name = ha["primary_hostname"][:64]
-        find_serials = [eff_serial] + [u.get("serial") for u in ha.get("units", [])
-                                       if u.get("serial") and u.get("serial") != eff_serial]
-    else:
-        eff_serial = serial
-        name = _device_name(probe, prefix="fortigate")
-        find_serials = [eff_serial] if eff_serial else []
     mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Fortinet")
     role_id = get_or_create_role(FORTIGATE_ROLE, "c62828")
     site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
     site_id = get_or_create_site(site_name)
     dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, FORTIGATE_MODEL_MAP)
+    name = _device_name(probe, prefix="fortigate")
     api = get_netbox()
     dev = None
-    for s in find_serials:
-        if _invalid_serial(s):
-            continue
-        dev = find_device(s, role_name=FORTIGATE_ROLE)
-        if dev:
-            break
+    if not _invalid_serial(serial):
+        dev = find_device(serial, role_name=None)   # any role — adopt, don't dupe
     if dev is None:
         cands = list(api.dcim.devices.filter(name=name, site_id=site_id, role_id=role_id))
         dev = cands[0] if cands else None
@@ -492,20 +521,15 @@ def ensure_fortigate_device(probe, ha=None):
         "fortigate_firmware": probe.get("firmware"),
         "fortigate_model":    probe.get("model"),
     }
-    if clustered:
-        cf.update({
-            "fortigate_ha_group": ha.get("group_name"),
-            "fortigate_ha_mode":  ha.get("mode"),
-            "fortigate_ha_peer":  "; ".join(
-                f"{u['hostname']} ({u['serial']})"
-                for u in ha.get("units", []) if not u.get("is_primary")),
-            "fortigate_ha_role":  "primary" if serial == eff_serial else "secondary",
-        })
+    if ha_role:   cf["fortigate_ha_role"] = ha_role
+    if ha_group:  cf["fortigate_ha_group"] = ha_group
+    if ha_mode:   cf["fortigate_ha_mode"] = ha_mode
+    if ha_peer:   cf["fortigate_ha_peer"] = ha_peer
     payload = {
         "name": name, "status": "active", "site": site_id,
         "device_type": dtype_id, "role": role_id,
         "custom_fields": cf,
-        **({"serial": eff_serial} if not _invalid_serial(eff_serial) else {}),
+        **({"serial": serial} if not _invalid_serial(serial) else {}),
     }
     if dev:
         api.dcim.devices.update([{"id": dev.id, **payload}])
@@ -514,6 +538,44 @@ def ensure_fortigate_device(probe, ha=None):
     new = api.dcim.devices.create(payload)
     log("INFO", f"  FortiGate created: {name} (id={new.id})")
     return new.id
+
+
+def ensure_fortigate_device(probe, ha=None):
+    """Ensure NetBox devices for a FortiGate. Standalone -> one device. An HA
+    cluster -> TWO devices (one per unit), each with its own serial, BOTH
+    sharing the same management IP (secondary via the 'HA' VRF, role vrrp).
+    Returns the primary unit's device id (interfaces/VLANs/NAT attach there)."""
+    ha = ha or {}
+    units = [u for u in (ha.get("units") or []) if u.get("serial")]
+    if not (ha.get("clustered") and len(units) >= 2):
+        # standalone -> single device, normal primary IP (done by caller)
+        return _ensure_fortigate_node(probe)
+
+    primary_serial = (ha.get("primary_serial") or "").strip()
+    primary = next((u for u in units if u["serial"] == primary_serial), None) \
+        or next((u for u in units if u.get("is_primary")), units[0])
+    group, mode = ha.get("group_name"), ha.get("mode")
+    primary_id = None
+    for u in units:
+        is_primary = (u["serial"] == primary["serial"])
+        peer = primary if not is_primary else \
+            next((x for x in units if x["serial"] != primary["serial"]), None)
+        node_probe = dict(probe)
+        node_probe["serial"] = u["serial"]
+        if u.get("hostname"):
+            node_probe["hostname"] = u["hostname"]
+        dev_id = _ensure_fortigate_node(
+            node_probe,
+            ha_role="primary" if is_primary else "secondary",
+            ha_group=group, ha_mode=mode,
+            ha_peer=(f"{peer['hostname'] or peer['serial']} ({peer['serial']})"
+                     if peer else None))
+        if is_primary:
+            ensure_primary_ip(dev_id, probe["ip"], node_probe.get("hostname"))
+            primary_id = dev_id
+        else:
+            ensure_shared_primary_ip(dev_id, probe["ip"], node_probe.get("hostname"))
+    return primary_id
 
 def mark_server_offline(dev_id, dev_name):
     try:
@@ -1072,6 +1134,9 @@ CUSTOM_FIELDS = [
     ("cisco_firmware",            "text",    "IOS version"),
     ("cisco_model",               "text",    "Model"),
     ("cisco_port_count",          "integer", "Port count"),
+    ("cisco_stack_role",          "text",    "Stack role (active/standby)"),
+    ("cisco_stack_members",       "integer", "Stack member count"),
+    ("cisco_stack_peer",          "text",    "Stack peer unit(s)"),
     # FortiGate
     ("fortigate_ip",              "text",    "FortiGate IP"),
     ("fortigate_enabled",         "boolean", "FortiGate enabled"),
