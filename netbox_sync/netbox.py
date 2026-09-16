@@ -577,55 +577,35 @@ def ensure_fortigate_device(probe, ha=None):
             ensure_shared_primary_ip(dev_id, probe["ip"], node_probe.get("hostname"))
     return primary_id
 
-def mark_server_offline(dev_id, dev_name):
+def _mark_offline(dev_id, dev_name, cf_key, label):
     try:
         get_netbox().dcim.devices.update([{
             "id": dev_id, "status": "offline",
-            "custom_fields": {"redfish_enabled": False},
+            "custom_fields": {cf_key: False},
         }])
-        log("WARN", f"  Server marked offline: {dev_name} (id={dev_id})")
+        log("WARN", f"  {label} marked offline: {dev_name} (id={dev_id})")
     except Exception as e:
-        log("ERROR", f"  Could not mark server offline {dev_name}: {e}")
+        log("ERROR", f"  Could not mark {label} offline {dev_name}: {e}")
+
+
+def mark_server_offline(dev_id, dev_name):
+    return _mark_offline(dev_id, dev_name, "redfish_enabled", "Server")
+
 
 def mark_storage_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"storage_enabled": False},
-        }])
-        log("WARN", f"  Storage marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark storage offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "storage_enabled", "Storage")
+
 
 def mark_san_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"san_switch_enabled": False},
-        }])
-        log("WARN", f"  SAN switch marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark SAN switch offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "san_switch_enabled", "SAN switch")
+
 
 def mark_cisco_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"cisco_enabled": False},
-        }])
-        log("WARN", f"  Cisco switch marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark Cisco switch offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "cisco_enabled", "Cisco switch")
+
 
 def mark_fortigate_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"fortigate_enabled": False},
-        }])
-        log("WARN", f"  FortiGate marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark FortiGate offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "fortigate_enabled", "FortiGate")
 
 
 def _ensure_fortiweb_node(probe, extra, ha_role=None, ha_group=None,
@@ -737,14 +717,7 @@ def ensure_fortiweb_device(probe, extra=None):
 
 
 def mark_fortiweb_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"fortiweb_enabled": False},
-        }])
-        log("WARN", f"  FortiWeb marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark FortiWeb offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "fortiweb_enabled", "FortiWeb")
 
 
 def ensure_ftd_device(ftd, fmc_ip=None):
@@ -800,14 +773,7 @@ def ensure_ftd_device(ftd, fmc_ip=None):
 
 
 def mark_ftd_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"ftd_enabled": False},
-        }])
-        log("WARN", f"  FTD marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark FTD offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "ftd_enabled", "FTD")
 
 
 def ensure_ap_device(ap, wlc_name, role_name=None, manufacturer="Ruckus",
@@ -873,25 +839,11 @@ def ensure_ap_device(ap, wlc_name, role_name=None, manufacturer="Ruckus",
 
 
 def mark_ap_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"wap_enabled": False},
-        }])
-        log("WARN", f"  AP marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark AP offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "wap_enabled", "AP")
 
 
 def mark_ruckus_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"wlc_enabled": False},
-        }])
-        log("WARN", f"  ZD marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark ZD offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "wlc_enabled", "ZD")
 
 
 def ensure_unifi_console(probe, ap_count=0, site_count=0):
@@ -936,14 +888,7 @@ def ensure_unifi_console(probe, ap_count=0, site_count=0):
 
 
 def mark_unifi_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"unifi_enabled": False},
-        }])
-        log("WARN", f"  UniFi console marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark UniFi console offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "unifi_enabled", "UniFi console")
 
 
 def _ensure_nvr_device(probe, manufacturer, role_name):
@@ -1000,7 +945,11 @@ def ensure_unv_device(probe):
     return _ensure_nvr_device(probe, "Uniview", UNV_ROLE)
 
 
-def _mark_nvr_offline(dev_id, dev_name):
+def _mark_nvr_offline(dev_id, dev_name):  # compat alias — use _mark_offline directly
+    return _mark_offline(dev_id, dev_name, "nvr_enabled", "NVR")
+
+
+def _mark_nvr_offline_real(dev_id, dev_name):
     try:
         get_netbox().dcim.devices.update([{
             "id": dev_id, "status": "offline",
@@ -1012,15 +961,15 @@ def _mark_nvr_offline(dev_id, dev_name):
 
 
 def mark_hikvision_offline(dev_id, dev_name):
-    _mark_nvr_offline(dev_id, dev_name)
+    return _mark_offline(dev_id, dev_name, "nvr_enabled", "NVR")
 
 
 def mark_dahua_offline(dev_id, dev_name):
-    _mark_nvr_offline(dev_id, dev_name)
+    return _mark_offline(dev_id, dev_name, "nvr_enabled", "NVR")
 
 
 def mark_unv_offline(dev_id, dev_name):
-    _mark_nvr_offline(dev_id, dev_name)
+    return _mark_offline(dev_id, dev_name, "nvr_enabled", "NVR")
 
 
 def ensure_camera_device(cam, nvr_name, role_name=None, manufacturer="Hikvision"):
@@ -1129,14 +1078,7 @@ def ensure_camera_interface(dev_id, online=True):
 
 
 def mark_camera_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"cam_enabled": False},
-        }])
-        log("WARN", f"  camera marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark camera offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "cam_enabled", "camera")
 
 
 def ensure_custom_fields_if_set():
@@ -1290,6 +1232,21 @@ def ensure_custom_fields():
     if created:
         log("INFO", f"  custom fields: created {created} missing field(s)")
     ensure_custom_fields_if_set()
+    # Guard: verify custom-field filters actually filter. If a required field
+    # is missing (misspelled, deleted in the UI, API hiccup), NetBox silently
+    # ignores the filter and returns every device — which once mass-offlined
+    # the fleet. Fail fast so the operator sees it immediately.
+    try:
+        probe = api.extras.custom_fields.get(name="redfish_enabled")
+        if probe is None:
+            raise RuntimeError(
+                "Custom field 'redfish_enabled' missing after bootstrap — "
+                "aborting to prevent unfiltered cf_* sweeps. "
+                "Check NetBox /extras/custom-fields/ or re-run the sync.")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        log("WARN", f"  custom-field guard check failed (non-fatal): {e}")
 
 
 _WLAN_AUTH_MAP = {"open": "open", "wpa": "wpa-personal",

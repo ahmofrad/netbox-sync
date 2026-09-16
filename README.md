@@ -6,7 +6,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![NetBox](https://img.shields.io/badge/netbox-4.x-blueviolet)
-![Tests](https://img.shields.io/badge/tests-288%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-316%20passing-brightgreen)
 ![Device families](https://img.shields.io/badge/device%20families-10%2BME-orange)
 
 Servers · Storage · SAN & LAN switches · Firewalls · Wireless · NVRs & Hard Drives · Cameras · ManageEngine AssetExplorer inventory enrichment — devices, interfaces, VLANs, IPAM, cables, and hardware inventory.
