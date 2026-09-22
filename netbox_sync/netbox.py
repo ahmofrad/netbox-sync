@@ -300,165 +300,142 @@ def _device_name(probe, prefix="server"):
     hn = probe.get("hostname") or f"{prefix}-{probe['ip'].replace('.', '-')}"
     return hn.strip()[:64]
 
-def ensure_server_device(probe):
-    serial = (probe.get("serial") or "").strip()
-    mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "HPE")
-    role_id = get_or_create_role(SERVER_ROLE)
-    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
+
+def _ensure_device(*, probe, manufacturer, role_name, role_color="9e9e9e",
+                   cf, model_map=None, prefix, name=None, serial=None,
+                   site_ip=None, site_host=None, adopt_any_role=False,
+                   name_exclude_cf=None, name_any_role=False,
+                   extra_find=None, blank_serial_find=None,
+                   create_serial_empty_string=False, log_label=None,
+                   default_model=None):
+    """Generic device ensure shared by every single-device family.
+
+    Flow: serial match (role-scoped, or any-role when adopt_any_role so an
+    AE-created record is adopted instead of duplicated) -> optional extra_find
+    hook (e.g. UniFi's cf_unifi_ip) -> name+site(+role) fallback (optionally
+    excluding devices carrying name_exclude_cf) -> optional blank_serial_find
+    hook (server's tertiary BMC-IP lookup, only when the serial is blank) ->
+    create. Returns the device id.
+
+    Families with genuinely different identity (AP MAC, camera name
+    disambiguation) keep their own functions; HA/stack wrappers call this per
+    node."""
+    serial = (serial if serial is not None
+              else (probe.get("serial") or "").strip())
+    label = log_label or prefix.capitalize()
+    mfr_id = get_or_create_manufacturer(manufacturer)
+    role_id = get_or_create_role(role_name, role_color)
+    site_name = resolve_site(
+        site_host if site_host is not None else (probe.get("hostname") or ""),
+        site_ip if site_ip is not None else probe["ip"])
     site_id = get_or_create_site(site_name)
-    dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, SERVER_MODEL_MAP)
-    name = _device_name(probe)
+    dtype_id = get_or_create_device_type(probe.get("model") or default_model,
+                                         mfr_id, model_map)
+    name = name or _device_name(probe, prefix=prefix)
     api = get_netbox()
-    dev = find_device(serial, role_name=SERVER_ROLE)
-    # Secondary: find by name+site+role
+    dev = None
+    if not _invalid_serial(serial):
+        dev = find_device(serial, role_name=None if adopt_any_role else role_name)
+    if dev is None and extra_find is not None:
+        dev = extra_find(api, role_id)
     if dev is None:
-        cands = list(api.dcim.devices.filter(name=name, site_id=site_id, role_id=role_id))
-        dev = next((c for c in cands if not (c.custom_fields or {}).get("storage_ip")), None)
-        if dev: log("INFO", f"  Found server by name+site: {name} (id={dev.id})")
-    # Tertiary, blank-serial servers only: the iLO IP and hostname are the
-    # only stable identities such a box has — match them across ALL sites so
-    # a site-map or hostname drift can never spawn a duplicate.
-    if dev is None and _invalid_serial(serial):
+        kwargs = {"name": name, "site_id": site_id}
+        if not name_any_role:
+            kwargs["role_id"] = role_id
+        cands = list(api.dcim.devices.filter(**kwargs))
+        if name_exclude_cf:
+            cands = [c for c in cands
+                     if not (c.custom_fields or {}).get(name_exclude_cf)]
+        dev = cands[0] if cands else None
+        if dev:
+            log("INFO", f"  Found {prefix} by name+site: {name} (id={dev.id})")
+    if dev is None and _invalid_serial(serial) and blank_serial_find is not None:
+        dev = blank_serial_find(api, role_id, name)
+    payload = {"name": name, "status": "active", "site": site_id,
+               "device_type": dtype_id, "role": role_id,
+               "custom_fields": cf}
+    if not _invalid_serial(serial):
+        payload["serial"] = serial
+    elif create_serial_empty_string:
+        payload["serial"] = ""
+    if dev:
+        api.dcim.devices.update([{"id": dev.id, **payload}])
+        log("INFO", f"  {label} updated: {name} (id={dev.id})")
+        return dev.id
+    new = api.dcim.devices.create(payload)
+    log("INFO", f"  {label} created: {name} (id={new.id})")
+    return new.id
+
+def ensure_server_device(probe):
+    # Blank-serial tertiary: the iLO IP and hostname are the only stable
+    # identities such a box has — match them across ALL sites so a site-map
+    # or hostname drift can never spawn a duplicate.
+    def _blank_serial_find(api, role_id, name):
         servers = [d for d in api.dcim.devices.filter(role_id=role_id)
                    if not (d.custom_fields or {}).get("storage_ip")]
-        dev = next((d for d in servers if str((d.custom_fields or {})
-                                              .get("bmc_ip") or "")
-                    .split("/")[0].strip() == probe["ip"]), None)
+        dev = next((d for d in servers
+                    if str((d.custom_fields or {}).get("bmc_ip") or "")
+                       .split("/")[0].strip() == probe["ip"]), None)
         if dev:
             log("INFO", f"  Found server by BMC IP {probe['ip']}: "
                         f"{dev.name} (id={dev.id})")
-        else:
-            named = [d for d in servers if d.name == name]
-            if len(named) == 1:
-                dev = named[0]
-                log("INFO", f"  Found server by name+role: {name} (id={dev.id})")
-    if dev:
-        api.dcim.devices.update([{
-            "id": dev.id, "name": name, "status": "active",
-            "site": site_id, "device_type": dtype_id, "role": role_id,
-            "custom_fields": {"bmc_ip": probe["ip"], "redfish_enabled": True},
-            **({"serial": serial} if not _invalid_serial(serial) else {}),
-        }])
-        log("INFO", f"  Server updated: {name} (id={dev.id})")
-        return dev.id
-    new = api.dcim.devices.create({
-        "name": name, "device_type": dtype_id, "role": role_id,
-        "site": site_id, "serial": serial if not _invalid_serial(serial) else "",
-        "status": "active",
-        "custom_fields": {"bmc_ip": probe["ip"], "redfish_enabled": True},
-    })
-    log("INFO", f"  Server created: {name} (id={new.id})")
-    return new.id
+            return dev
+        named = [d for d in servers if d.name == name]
+        if len(named) == 1:
+            log("INFO", f"  Found server by name+role: {name} (id={named[0].id})")
+            return named[0]
+        return None
+
+    return _ensure_device(
+        probe=probe,
+        manufacturer=probe.get("manufacturer") or "HPE",
+        role_name=SERVER_ROLE,                 # default role color
+        model_map=SERVER_MODEL_MAP, prefix="server", log_label="Server",
+        name_exclude_cf="storage_ip",          # a same-named storage isn't a server
+        blank_serial_find=_blank_serial_find,
+        create_serial_empty_string=True,       # server create sends serial:""
+        cf={"bmc_ip": probe["ip"], "redfish_enabled": True})
 
 def ensure_storage_device(probe):
-    serial = (probe.get("serial") or "").strip()
-    mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or DEFAULT_MFR)
-    role_id = get_or_create_role(STORAGE_ROLE, "2196f3")
-    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
-    site_id = get_or_create_site(site_name)
-    dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, STORAGE_MODEL_MAP)
-    name = _device_name(probe, prefix="storage")
-    api = get_netbox()
-    dev = find_device(serial, role_name=STORAGE_ROLE)
-    # Secondary: find by name+site+role (storage names unique per site)
-    if dev is None:
-        cands = list(api.dcim.devices.filter(name=name, site_id=site_id, role_id=role_id))
-        dev = next((c for c in cands if not (c.custom_fields or {}).get("bmc_ip")), None)
-        if dev: log("INFO", f"  Found storage by name+site: {name} (id={dev.id})")
-    payload = {
-        "name": name, "status": "active", "site": site_id,
-        "device_type": dtype_id,
-        "custom_fields": {
-            "storage_ip":       probe["ip"],
-            "storage_enabled":  True,
-            "storage_health":   probe.get("health"),
+    return _ensure_device(
+        probe=probe,
+        manufacturer=probe.get("manufacturer") or DEFAULT_MFR,
+        role_name=STORAGE_ROLE, role_color="2196f3",
+        model_map=STORAGE_MODEL_MAP, prefix="storage", log_label="Storage",
+        name_exclude_cf="bmc_ip",   # a same-named server isn't storage
+        cf={"storage_ip": probe["ip"], "storage_enabled": True,
+            "storage_health": probe.get("health"),
             "storage_firmware": probe.get("firmware"),
-            "storage_model":    probe.get("model"),
-        },
-        **({"serial": serial} if not _invalid_serial(serial) else {}),
-    }
-    if dev:
-        api.dcim.devices.update([{"id": dev.id, **payload, "role": role_id}])
-        log("INFO", f"  Storage updated: {name} (id={dev.id})")
-        return dev.id
-    new = api.dcim.devices.create({**payload, "role": role_id})
-    log("INFO", f"  Storage created: {name} (id={new.id})")
-    return new.id
+            "storage_model": probe.get("model")})
 
 def ensure_san_switch_device(probe):
-    serial = (probe.get("serial") or "").strip()
-    mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Brocade")
-    role_id = get_or_create_role(SWITCH_ROLE, "f44336")
-    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
-    site_id = get_or_create_site(site_name)
-    dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, SWITCH_MODEL_MAP)
-    name = _device_name(probe, prefix="san")
-    api = get_netbox()
-    dev = find_device(serial, role_name=SWITCH_ROLE)
-    if dev is None:
-        cands = list(api.dcim.devices.filter(name=name, site_id=site_id, role_id=role_id))
-        dev = cands[0] if cands else None
-        if dev: log("INFO", f"  Found san switch by name+site: {name} (id={dev.id})")
-    payload = {
-        "name": name, "status": "active", "site": site_id,
-        "device_type": dtype_id, "role": role_id,
-        "custom_fields": {
-            "san_switch_ip":      probe["ip"],
-            "san_switch_enabled": True,
-            "san_switch_wwn":     probe.get("wwn"),
+    return _ensure_device(
+        probe=probe,
+        manufacturer=probe.get("manufacturer") or "Brocade",
+        role_name=SWITCH_ROLE, role_color="f44336",
+        model_map=SWITCH_MODEL_MAP, prefix="san", log_label="SAN switch",
+        cf={"san_switch_ip": probe["ip"], "san_switch_enabled": True,
+            "san_switch_wwn": probe.get("wwn"),
             "san_switch_firmware": probe.get("firmware"),
-            "san_switch_model":   probe.get("model"),
-        },
-        **({"serial": serial} if not _invalid_serial(serial) else {}),
-    }
-    if dev:
-        api.dcim.devices.update([{"id": dev.id, **payload}])
-        log("INFO", f"  SAN switch updated: {name} (id={dev.id})")
-        return dev.id
-    new = api.dcim.devices.create(payload)
-    log("INFO", f"  SAN switch created: {name} (id={new.id})")
-    return new.id
+            "san_switch_model": probe.get("model")})
 
 def _ensure_cisco_node(probe, stack_role=None, stack_members=None,
                        stack_peer=None):
     """Ensure ONE Cisco switch/stack-member device. Identity = serial, matched
     regardless of role (adopts AE-created records). stack_* set only for
     stack members."""
-    serial = (probe.get("serial") or "").strip()
-    mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Cisco")
-    role_id = get_or_create_role(CISCO_ROLE, "009688")
-    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
-    site_id = get_or_create_site(site_name)
-    dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, CISCO_MODEL_MAP)
-    name = _device_name(probe, prefix="cisco")
-    api = get_netbox()
-    dev = find_device(serial, role_name=None)   # any role — adopt, don't dupe
-    if dev is None:
-        cands = list(api.dcim.devices.filter(name=name, site_id=site_id, role_id=role_id))
-        dev = cands[0] if cands else None
-        if dev: log("INFO", f"  Found cisco switch by name+site: {name} (id={dev.id})")
-    cf = {
-        "cisco_ip":       probe["ip"],
-        "cisco_enabled":  True,
-        "cisco_firmware": probe.get("firmware"),
-        "cisco_model":    probe.get("model"),
-    }
+    cf = {"cisco_ip": probe["ip"], "cisco_enabled": True,
+          "cisco_firmware": probe.get("firmware"),
+          "cisco_model": probe.get("model")}
     if stack_role:    cf["cisco_stack_role"] = stack_role
     if stack_members: cf["cisco_stack_members"] = stack_members
     if stack_peer:    cf["cisco_stack_peer"] = stack_peer
-    payload = {
-        "name": name, "status": "active", "site": site_id,
-        "device_type": dtype_id, "role": role_id,
-        "custom_fields": cf,
-        **({"serial": serial} if not _invalid_serial(serial) else {}),
-    }
-    if dev:
-        api.dcim.devices.update([{"id": dev.id, **payload}])
-        log("INFO", f"  Cisco switch updated: {name} (id={dev.id})")
-        return dev.id
-    new = api.dcim.devices.create(payload)
-    log("INFO", f"  Cisco switch created: {name} (id={new.id})")
-    return new.id
+    return _ensure_device(
+        probe=probe,
+        manufacturer=probe.get("manufacturer") or "Cisco",
+        role_name=CISCO_ROLE, role_color="009688",
+        model_map=CISCO_MODEL_MAP, prefix="cisco", log_label="Cisco switch",
+        adopt_any_role=True, cf=cf)
 
 
 def ensure_cisco_device(probe, stack=None):
@@ -500,44 +477,19 @@ def _ensure_fortigate_node(probe, ha_role=None, ha_group=None, ha_mode=None,
     """Ensure ONE FortiGate unit device. Identity = serial (FG...), matched
     regardless of role (adopts AE-created records, no dupes). ha_* set only
     for cluster members."""
-    serial = (probe.get("serial") or "").strip()
-    mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Fortinet")
-    role_id = get_or_create_role(FORTIGATE_ROLE, "c62828")
-    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
-    site_id = get_or_create_site(site_name)
-    dtype_id = get_or_create_device_type(probe.get("model"), mfr_id, FORTIGATE_MODEL_MAP)
-    name = _device_name(probe, prefix="fortigate")
-    api = get_netbox()
-    dev = None
-    if not _invalid_serial(serial):
-        dev = find_device(serial, role_name=None)   # any role — adopt, don't dupe
-    if dev is None:
-        cands = list(api.dcim.devices.filter(name=name, site_id=site_id, role_id=role_id))
-        dev = cands[0] if cands else None
-        if dev: log("INFO", f"  Found fortigate by name+site: {name} (id={dev.id})")
-    cf = {
-        "fortigate_ip":       probe["ip"],
-        "fortigate_enabled":  True,
-        "fortigate_firmware": probe.get("firmware"),
-        "fortigate_model":    probe.get("model"),
-    }
+    cf = {"fortigate_ip": probe["ip"], "fortigate_enabled": True,
+          "fortigate_firmware": probe.get("firmware"),
+          "fortigate_model": probe.get("model")}
     if ha_role:   cf["fortigate_ha_role"] = ha_role
     if ha_group:  cf["fortigate_ha_group"] = ha_group
     if ha_mode:   cf["fortigate_ha_mode"] = ha_mode
     if ha_peer:   cf["fortigate_ha_peer"] = ha_peer
-    payload = {
-        "name": name, "status": "active", "site": site_id,
-        "device_type": dtype_id, "role": role_id,
-        "custom_fields": cf,
-        **({"serial": serial} if not _invalid_serial(serial) else {}),
-    }
-    if dev:
-        api.dcim.devices.update([{"id": dev.id, **payload}])
-        log("INFO", f"  FortiGate updated: {name} (id={dev.id})")
-        return dev.id
-    new = api.dcim.devices.create(payload)
-    log("INFO", f"  FortiGate created: {name} (id={new.id})")
-    return new.id
+    return _ensure_device(
+        probe=probe,
+        manufacturer=probe.get("manufacturer") or "Fortinet",
+        role_name=FORTIGATE_ROLE, role_color="c62828",
+        model_map=FORTIGATE_MODEL_MAP, prefix="fortigate", log_label="FortiGate",
+        adopt_any_role=True, cf=cf)
 
 
 def ensure_fortigate_device(probe, ha=None):
@@ -577,55 +529,35 @@ def ensure_fortigate_device(probe, ha=None):
             ensure_shared_primary_ip(dev_id, probe["ip"], node_probe.get("hostname"))
     return primary_id
 
-def mark_server_offline(dev_id, dev_name):
+def _mark_offline(dev_id, dev_name, cf_key, label):
     try:
         get_netbox().dcim.devices.update([{
             "id": dev_id, "status": "offline",
-            "custom_fields": {"redfish_enabled": False},
+            "custom_fields": {cf_key: False},
         }])
-        log("WARN", f"  Server marked offline: {dev_name} (id={dev_id})")
+        log("WARN", f"  {label} marked offline: {dev_name} (id={dev_id})")
     except Exception as e:
-        log("ERROR", f"  Could not mark server offline {dev_name}: {e}")
+        log("ERROR", f"  Could not mark {label} offline {dev_name}: {e}")
+
+
+def mark_server_offline(dev_id, dev_name):
+    return _mark_offline(dev_id, dev_name, "redfish_enabled", "Server")
+
 
 def mark_storage_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"storage_enabled": False},
-        }])
-        log("WARN", f"  Storage marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark storage offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "storage_enabled", "Storage")
+
 
 def mark_san_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"san_switch_enabled": False},
-        }])
-        log("WARN", f"  SAN switch marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark SAN switch offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "san_switch_enabled", "SAN switch")
+
 
 def mark_cisco_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"cisco_enabled": False},
-        }])
-        log("WARN", f"  Cisco switch marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark Cisco switch offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "cisco_enabled", "Cisco switch")
+
 
 def mark_fortigate_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"fortigate_enabled": False},
-        }])
-        log("WARN", f"  FortiGate marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark FortiGate offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "fortigate_enabled", "FortiGate")
 
 
 def _ensure_fortiweb_node(probe, extra, ha_role=None, ha_group=None,
@@ -635,32 +567,6 @@ def _ensure_fortiweb_node(probe, extra, ha_role=None, ha_group=None,
     ha_role/ha_group/ha_peer are set only for cluster members."""
     from netbox_sync.config import FORTIWEB_ROLE
     extra = extra or {}
-    serial = (probe.get("serial") or "").strip()
-    mfr_id = get_or_create_manufacturer(probe.get("manufacturer") or "Fortinet")
-    role_id = get_or_create_role(FORTIWEB_ROLE, "c62828")
-    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
-    site_id = get_or_create_site(site_name)
-    dtype_id = get_or_create_device_type(probe.get("model") or "FortiWeb",
-                                         mfr_id)
-    name = (probe.get("hostname")
-            or f"fortiweb-{probe['ip'].replace('.', '-')}")[:64]
-    api = get_netbox()
-    dev = None
-    if not _invalid_serial(serial):
-        # Serial is the identity — match REGARDLESS of role so a device the
-        # AssetExplorer sync created (role Firewall, carrying asset_tag /
-        # department) is adopted and its role corrected to WAF, not duplicated.
-        dev = find_device(serial, role_name=None)
-    if dev is None:
-        cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
-                                             role_id=role_id))
-        dev = cands[0] if cands else None
-        if dev:
-            log("INFO", f"  Found FortiWeb by name+site: {name} (id={dev.id})")
-    elif dev.role and getattr(dev.role, "id", None) != role_id:
-        log("INFO", f"  FortiWeb serial matched existing device {dev.name!r} "
-                    f"(id={dev.id}, role {getattr(dev.role, 'name', dev.role)} "
-                    f"-> {FORTIWEB_ROLE})")
     cf = {"fortiweb_ip": probe["ip"], "fortiweb_enabled": True,
           "fortiweb_model": probe.get("model"),
           "fortiweb_firmware": probe.get("firmware"),
@@ -673,17 +579,13 @@ def _ensure_fortiweb_node(probe, extra, ha_role=None, ha_group=None,
         cf["fortiweb_ha_group"] = ha_group
     if ha_peer:
         cf["fortiweb_ha_peer"] = ha_peer
-    payload = {"name": name, "status": "active", "site": site_id,
-               "device_type": dtype_id, "role": role_id,
-               "custom_fields": cf,
-               **({"serial": serial} if not _invalid_serial(serial) else {})}
-    if dev:
-        api.dcim.devices.update([{"id": dev.id, **payload}])
-        log("INFO", f"  FortiWeb updated: {name} (id={dev.id})")
-        return dev.id
-    new = api.dcim.devices.create(payload)
-    log("INFO", f"  FortiWeb created: {name} (id={new.id})")
-    return new.id
+    return _ensure_device(
+        probe=probe,
+        manufacturer=probe.get("manufacturer") or "Fortinet",
+        role_name=FORTIWEB_ROLE, role_color="c62828",
+        model_map=None, prefix="fortiweb", log_label="FortiWeb",
+        default_model="FortiWeb",
+        adopt_any_role=True, cf=cf)
 
 
 def ensure_fortiweb_device(probe, extra=None):
@@ -737,14 +639,7 @@ def ensure_fortiweb_device(probe, extra=None):
 
 
 def mark_fortiweb_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"fortiweb_enabled": False},
-        }])
-        log("WARN", f"  FortiWeb marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark FortiWeb offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "fortiweb_enabled", "FortiWeb")
 
 
 def ensure_ftd_device(ftd, fmc_ip=None):
@@ -755,59 +650,33 @@ def ensure_ftd_device(ftd, fmc_ip=None):
     from netbox_sync.config import FTD_ROLE
     serial = (ftd.get("serial") or "").strip()
     mgmt_ip = (ftd.get("mgmt_ip") or "").strip()
-    mfr_id = get_or_create_manufacturer("Cisco")
-    role_id = get_or_create_role(FTD_ROLE, "009688")
-    site_name = resolve_site(ftd.get("name") or "", mgmt_ip)
-    site_id = get_or_create_site(site_name)
-    dtype_id = get_or_create_device_type(ftd.get("model") or "Cisco FTD", mfr_id)
     name = (ftd.get("name")
             or (f"ftd-{mgmt_ip.replace('.', '-')}" if mgmt_ip
                 else f"ftd-{serial}"))[:64]
-    api = get_netbox()
-    dev = None
-    if not _invalid_serial(serial):
-        dev = find_device(serial, role_name=None)   # any role — adopt, don't dupe
-    if dev is None:
-        # Serial mismatch is common here: the AssetExplorer sync may hold the
-        # same FTD under a DIFFERENT serial (e.g. AE's module/supervisor serial
-        # vs the chassis serial the FMC reports). Fall back to name+site so the
-        # existing record is adopted (role corrected to FTD, serial reconciled
-        # to the FMC's authoritative chassis serial) instead of duplicated.
-        cands = [d for d in api.dcim.devices.filter(name=name, site_id=site_id)
-                 if not (d.custom_fields or {}).get("ftd_ip")]
-        if len(cands) == 1:
-            dev = cands[0]
-            log("INFO", f"  FTD serial {serial} not found; adopted by name+site: "
-                        f"{name} (id={dev.id}, had serial {dev.serial!r})")
-    cf = {"ftd_ip": mgmt_ip, "ftd_enabled": True,
-          "ftd_model": ftd.get("model"),
-          "ftd_firmware": ftd.get("sw_version"),
-          "ftd_health": ftd.get("health"),
-          "ftd_mode": ftd.get("mode"),
-          "ftd_group": ftd.get("group"),
-          "ftd_fmc": fmc_ip}
-    payload = {"name": name, "status": "active", "site": site_id,
-               "device_type": dtype_id, "role": role_id,
-               "custom_fields": cf,
-               **({"serial": serial} if not _invalid_serial(serial) else {})}
-    if dev:
-        api.dcim.devices.update([{"id": dev.id, **payload}])
-        log("INFO", f"  FTD updated: {name} (id={dev.id})")
-        return dev.id
-    new = api.dcim.devices.create(payload)
-    log("INFO", f"  FTD created: {name} (id={new.id})")
-    return new.id
+    return _ensure_device(
+        probe={"model": ftd.get("model"), "ip": mgmt_ip},
+        manufacturer="Cisco",
+        role_name=FTD_ROLE, role_color="009688",
+        model_map=None, prefix="ftd", log_label="FTD",
+        name=name, serial=serial,
+        site_ip=mgmt_ip, site_host=ftd.get("name") or "",
+        adopt_any_role=True,
+        # AE may hold the same FTD under a different serial (module/supervisor
+        # vs the FMC's chassis serial) — adopt by name+site so the record is
+        # reconciled instead of duplicated.
+        name_any_role=True, name_exclude_cf="ftd_ip",
+        default_model="Cisco FTD",
+        cf={"ftd_ip": mgmt_ip, "ftd_enabled": True,
+            "ftd_model": ftd.get("model"),
+            "ftd_firmware": ftd.get("sw_version"),
+            "ftd_health": ftd.get("health"),
+            "ftd_mode": ftd.get("mode"),
+            "ftd_group": ftd.get("group"),
+            "ftd_fmc": fmc_ip})
 
 
 def mark_ftd_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"ftd_enabled": False},
-        }])
-        log("WARN", f"  FTD marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark FTD offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "ftd_enabled", "FTD")
 
 
 def ensure_ap_device(ap, wlc_name, role_name=None, manufacturer="Ruckus",
@@ -873,77 +742,33 @@ def ensure_ap_device(ap, wlc_name, role_name=None, manufacturer="Ruckus",
 
 
 def mark_ap_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"wap_enabled": False},
-        }])
-        log("WARN", f"  AP marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark AP offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "wap_enabled", "AP")
 
 
 def mark_ruckus_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"wlc_enabled": False},
-        }])
-        log("WARN", f"  ZD marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark ZD offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "wlc_enabled", "ZD")
 
 
 def ensure_unifi_console(probe, ap_count=0, site_count=0):
     """Ensure the NetBox device for a UniFi OS console. Identity: the console
     uuid (serial field), then unifi_ip, then name+site+role."""
     from netbox_sync.config import UNIFI_ROLE
-    serial = (probe.get("serial") or "").strip()
-    mfr_id = get_or_create_manufacturer("Ubiquiti")
-    role_id = get_or_create_role(UNIFI_ROLE, "8e44ad")
-    site_name = resolve_site(probe.get("hostname") or "", probe["ip"])
-    site_id = get_or_create_site(site_name)
-    dtype_id = get_or_create_device_type(probe.get("model")
-                                         or "UniFi OS Console", mfr_id)
-    name = (probe.get("hostname")
-            or f"unifi-{probe['ip'].replace('.', '-')}")[:64]
-    api = get_netbox()
-    dev = None
-    if not _invalid_serial(serial):
-        dev = find_device(serial, role_name=UNIFI_ROLE)
-    if dev is None:
-        dev = next(iter(api.dcim.devices.filter(cf_unifi_ip=probe["ip"])), None)
-    if dev is None:
-        cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
-                                             role_id=role_id))
-        dev = cands[0] if cands else None
-        if dev:
-            log("INFO", f"  Found UniFi console by name+site: {name} (id={dev.id})")
-    cf = {"unifi_ip": probe["ip"], "unifi_enabled": True,
-          "unifi_version": probe.get("firmware"),
-          "unifi_ap_count": ap_count, "unifi_sites": site_count}
-    payload = {"name": name, "status": "active", "site": site_id,
-               "device_type": dtype_id, "role": role_id,
-               "custom_fields": cf,
-               **({"serial": serial} if not _invalid_serial(serial) else {})}
-    if dev:
-        api.dcim.devices.update([{"id": dev.id, **payload}])
-        log("INFO", f"  UniFi console updated: {name} (id={dev.id})")
-        return dev.id
-    new = api.dcim.devices.create(payload)
-    log("INFO", f"  UniFi console created: {name} (id={new.id})")
-    return new.id
+    return _ensure_device(
+        probe=probe,
+        manufacturer="Ubiquiti",
+        role_name=UNIFI_ROLE, role_color="8e44ad",
+        model_map=None, prefix="unifi", log_label="UniFi console",
+        default_model="UniFi OS Console",
+        # console re-IP: fall back to the management-IP custom field
+        extra_find=lambda api, role_id: next(
+            iter(api.dcim.devices.filter(cf_unifi_ip=probe["ip"])), None),
+        cf={"unifi_ip": probe["ip"], "unifi_enabled": True,
+            "unifi_version": probe.get("firmware"),
+            "unifi_ap_count": ap_count, "unifi_sites": site_count})
 
 
 def mark_unifi_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"unifi_enabled": False},
-        }])
-        log("WARN", f"  UniFi console marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark UniFi console offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "unifi_enabled", "UniFi console")
 
 
 def _ensure_nvr_device(probe, manufacturer, role_name):
@@ -951,38 +776,16 @@ def _ensure_nvr_device(probe, manufacturer, role_name):
     first, then name+site+role. The nvr_* custom fields are vendor-neutral and
     shared by the Hikvision/Dahua/Uniview families (the offline sweeps
     disambiguate per vendor by manufacturer)."""
-    serial = (probe.get("serial") or "").strip()
-    mfr_id = get_or_create_manufacturer(manufacturer)
-    role_id = get_or_create_role(role_name, "7b1fa2")
-    site_name = resolve_site(probe.get("hostname") or "",
-                             probe.get("reported_ip") or probe["ip"])
-    site_id = get_or_create_site(site_name)
-    dtype_id = get_or_create_device_type(probe.get("model") or "NVR", mfr_id)
-    name = (probe.get("hostname") or f"nvr-{probe['ip'].replace('.', '-')}")[:64]
-    api = get_netbox()
-    dev = None
-    if not _invalid_serial(serial):
-        dev = find_device(serial, role_name=role_name)
-    if dev is None:
-        cands = list(api.dcim.devices.filter(name=name, site_id=site_id,
-                                             role_id=role_id))
-        dev = cands[0] if cands else None
-        if dev:
-            log("INFO", f"  Found NVR by name+site: {name} (id={dev.id})")
-    cf = {"nvr_ip": probe["ip"], "nvr_enabled": True,
-          "nvr_model": probe.get("model"),
-          "nvr_firmware": probe.get("firmware")}
-    payload = {"name": name, "status": "active", "site": site_id,
-               "device_type": dtype_id, "role": role_id,
-               "custom_fields": cf,
-               **({"serial": serial} if not _invalid_serial(serial) else {})}
-    if dev:
-        api.dcim.devices.update([{"id": dev.id, **payload}])
-        log("INFO", f"  NVR updated: {name} (id={dev.id})")
-        return dev.id
-    new = api.dcim.devices.create(payload)
-    log("INFO", f"  NVR created: {name} (id={new.id})")
-    return new.id
+    return _ensure_device(
+        probe=probe,
+        manufacturer=manufacturer,
+        role_name=role_name, role_color="7b1fa2",
+        model_map=None, prefix="nvr", log_label="NVR",
+        site_ip=probe.get("reported_ip") or probe["ip"],
+        default_model="NVR",
+        cf={"nvr_ip": probe["ip"], "nvr_enabled": True,
+            "nvr_model": probe.get("model"),
+            "nvr_firmware": probe.get("firmware")})
 
 
 def ensure_hikvision_device(probe):
@@ -1000,27 +803,16 @@ def ensure_unv_device(probe):
     return _ensure_nvr_device(probe, "Uniview", UNV_ROLE)
 
 
-def _mark_nvr_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"nvr_enabled": False},
-        }])
-        log("WARN", f"  NVR marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark NVR offline {dev_name}: {e}")
-
-
 def mark_hikvision_offline(dev_id, dev_name):
-    _mark_nvr_offline(dev_id, dev_name)
+    return _mark_offline(dev_id, dev_name, "nvr_enabled", "NVR")
 
 
 def mark_dahua_offline(dev_id, dev_name):
-    _mark_nvr_offline(dev_id, dev_name)
+    return _mark_offline(dev_id, dev_name, "nvr_enabled", "NVR")
 
 
 def mark_unv_offline(dev_id, dev_name):
-    _mark_nvr_offline(dev_id, dev_name)
+    return _mark_offline(dev_id, dev_name, "nvr_enabled", "NVR")
 
 
 def ensure_camera_device(cam, nvr_name, role_name=None, manufacturer="Hikvision"):
@@ -1129,14 +921,7 @@ def ensure_camera_interface(dev_id, online=True):
 
 
 def mark_camera_offline(dev_id, dev_name):
-    try:
-        get_netbox().dcim.devices.update([{
-            "id": dev_id, "status": "offline",
-            "custom_fields": {"cam_enabled": False},
-        }])
-        log("WARN", f"  camera marked offline: {dev_name} (id={dev_id})")
-    except Exception as e:
-        log("ERROR", f"  Could not mark camera offline {dev_name}: {e}")
+    return _mark_offline(dev_id, dev_name, "cam_enabled", "camera")
 
 
 def ensure_custom_fields_if_set():
@@ -1290,6 +1075,21 @@ def ensure_custom_fields():
     if created:
         log("INFO", f"  custom fields: created {created} missing field(s)")
     ensure_custom_fields_if_set()
+    # Guard: verify custom-field filters actually filter. If a required field
+    # is missing (misspelled, deleted in the UI, API hiccup), NetBox silently
+    # ignores the filter and returns every device — which once mass-offlined
+    # the fleet. Fail fast so the operator sees it immediately.
+    try:
+        probe = api.extras.custom_fields.get(name="redfish_enabled")
+        if probe is None:
+            raise RuntimeError(
+                "Custom field 'redfish_enabled' missing after bootstrap — "
+                "aborting to prevent unfiltered cf_* sweeps. "
+                "Check NetBox /extras/custom-fields/ or re-run the sync.")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        log("WARN", f"  custom-field guard check failed (non-fatal): {e}")
 
 
 _WLAN_AUTH_MAP = {"open": "open", "wpa": "wpa-personal",

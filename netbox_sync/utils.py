@@ -4,6 +4,7 @@ import ipaddress
 import re
 import socket
 import time
+from dataclasses import dataclass, field
 
 from netbox_sync.config import (SITE_KEYWORD_MAP, SITE_UNKNOWN, SITE_IP_MAP,
                                 BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
@@ -332,3 +333,79 @@ def is_port_open(ip, port, timeout=5, retries=3, retry_delay=2):
         except Exception:
             if attempt < retries: time.sleep(retry_delay)
     return False
+
+
+# ── structured records (probe / FTD / AP / camera) ───────────────────────────
+# Use dataclasses so IDEs and type-checkers see the fields. Each record is
+# still usable as a dict via __getitem__ (no forced migration of call sites).
+@dataclass
+class Probe:
+    ip: str
+    serial: str | None = None
+    model: str | None = None
+    hostname: str | None = None
+    reported_ip: str | None = None
+    mac: str | None = None
+    manufacturer: str | None = None
+    firmware: str | None = None
+    host: str | None = None
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+
+@dataclass
+class Ftd:
+    name: str | None = None
+    model: str | None = None
+    serial: str | None = None
+    mgmt_ip: str | None = None
+    sw_version: str | None = None
+    health: str | None = None
+    mode: str | None = None
+    group: str | None = None
+    connected: bool = True
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+
+@dataclass
+class Ap:
+    mac: str
+    group: str | None = None
+    model: str | None = None
+    name: str | None = None
+    ip: str | None = None
+    approved: bool = True
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+
+@dataclass
+class Camera:
+    serial: str
+    channel: int | None = None
+    name: str | None = None
+    ip: str | None = None
+    model: str | None = None
+    mac: str | None = None
+    online: bool = True
+    manufacturer: str | None = None
+    firmware: str | None = None
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)

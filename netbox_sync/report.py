@@ -14,10 +14,26 @@ _lock = threading.Lock()
 _failures = []  # list of (family, ip, category, reason)
 
 
+class CollectorAuthError(RuntimeError):
+    """Device rejected the credentials."""
+
+class CollectorConnectionError(RuntimeError):
+    """Device unreachable at the TCP/TLS layer."""
+
+class CollectorNotFoundError(RuntimeError):
+    """Device answered but reported no usable data (empty inventory, etc.)."""
+
+
 def classify_error(exc):
     """Map a low-level exception to a short, operator-readable reason."""
     if exc is None:
         return "unknown error"
+    if isinstance(exc, CollectorAuthError):
+        return "authentication failure"
+    if isinstance(exc, CollectorConnectionError):
+        return f"connection error: {exc}"
+    if isinstance(exc, CollectorNotFoundError):
+        return str(exc)
     status = getattr(getattr(exc, "response", None), "status_code", None)
     if status is not None:
         if status == 401:
