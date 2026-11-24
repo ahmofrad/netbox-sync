@@ -18,6 +18,7 @@ Running-1405-04-21/
 __pycache__/
 *.pyc
 .venv/
+.venv-*/
 venv/
 
 # Local design and brainstorming sessions

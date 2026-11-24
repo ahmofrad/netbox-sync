@@ -20,6 +20,11 @@ def test_acceptance_runtime_and_results_are_ignored():
     assert "acceptance/results/" in ignore
 
 
+def test_plugin_tests_declare_the_django_dependency():
+    requirements = (ROOT / "requirements-dev.txt").read_text().lower()
+    assert any(line.startswith("django>=5.2,<5.3") for line in requirements.splitlines())
+
+
 def test_acceptance_credentials_are_generated_and_loaded_from_ignored_runtime():
     harness = "\n".join(path.read_text() for path in (ROOT / "acceptance").rglob("*.py"))
     fixed_secrets = (
