@@ -1,6 +1,16 @@
+import os
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_MCP_E2E") != "1",
+    reason="live MCP E2E requires RUN_MCP_E2E=1 and a disposable service",
+)
+if os.getenv("RUN_MCP_E2E") != "1":
+    pytest.skip("live MCP E2E is opt-in", allow_module_level=True)
+
 import asyncio
 import json
-import os
 
 import httpx
 

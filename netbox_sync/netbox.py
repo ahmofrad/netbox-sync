@@ -21,11 +21,130 @@ from netbox_sync.utils import (slugify, normalize_model, resolve_site,
 
 nb = None
 
+
+def _value(record, key):
+    if isinstance(record, dict):
+        return record.get(key)
+    return getattr(record, key, None)
+
+
+def _comparable(value):
+    """Normalize NetBox choice/relation response shapes for comparison only."""
+    if isinstance(value, pynetbox.core.response.Record):
+        if hasattr(value, "id"):
+            return value.id
+        if hasattr(value, "value"):
+            return value.value
+        value = dict(value)
+    if isinstance(value, dict):
+        if "id" in value:
+            return value["id"]
+        if "value" in value:
+            return value["value"]
+        return {key: _comparable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_comparable(item) for item in value]
+    return value
+
+
+class ReportingDevices:
+    """Transparent device endpoint which records actual reconciliation writes."""
+
+    def __init__(self, endpoint, reporter):
+        self._endpoint = endpoint
+        self._reporter = reporter
+        self._current = {}
+
+    def __getattr__(self, name):
+        return getattr(self._endpoint, name)
+
+    def _remember(self, records):
+        for record in records:
+            self._current[record.id] = record
+        return records
+
+    def get(self, *args, **kwargs):
+        record = self._endpoint.get(*args, **kwargs)
+        return self._remember([record])[0] if record is not None else None
+
+    def filter(self, *args, **kwargs):
+        # pynetbox RecordSet is a one-shot iterator: materialize exactly once
+        # so caching cannot exhaust the records returned to reconciliation.
+        records = list(self._endpoint.filter(*args, **kwargs))
+        return self._remember(records)
+
+    def create(self, payload):
+        result = self._endpoint.create(payload)
+        self._remember(result if isinstance(result, list) else [result])
+        count = len(payload) if isinstance(payload, list) else 1
+        self._reporter.record_device_outcome("created", count=count)
+        return result
+
+    def update(self, payload, *, current=None, report=True):
+        values = payload if isinstance(payload, list) else [payload]
+        current_values = current if isinstance(current, (list, tuple)) else [current]
+        outcomes = []
+        for index, update in enumerate(values):
+            previous = current_values[index] if index < len(current_values) else None
+            if previous is None:
+                previous = self._current.get(update.get("id"))
+            if previous is None:
+                continue
+            changed = False
+            for key, value in update.items():
+                if key == "id":
+                    continue
+                if key == "custom_fields":
+                    before = _value(previous, key) or {}
+                    changed |= any(_comparable(before.get(name)) != _comparable(item)
+                                   for name, item in value.items())
+                else:
+                    changed |= _comparable(_value(previous, key)) != _comparable(value)
+            outcomes.append("updated" if changed else "unchanged")
+        result = self._endpoint.update(payload)
+        if report:
+            for outcome in outcomes:
+                self._reporter.record_device_outcome(outcome)
+        for update in values:
+            previous = self._current.get(update.get("id"))
+            if previous is not None:
+                for key, value in update.items():
+                    if key == "id":
+                        continue
+                    if key == "custom_fields":
+                        merged = dict(_value(previous, key) or {})
+                        merged.update(value)
+                        value = merged
+                    if isinstance(previous, dict):
+                        previous[key] = value
+                    else:
+                        setattr(previous, key, value)
+        return result
+
+
+def _reporting_api(api):
+    from netbox_sync.report import get_reporter
+    if hasattr(api, "dcim") and hasattr(api.dcim, "devices") \
+            and not isinstance(api.dcim.devices, ReportingDevices):
+        api.dcim.devices = ReportingDevices(api.dcim.devices, get_reporter())
+    return api
+
+
+def _device_endpoint(api):
+    """Use the instrumented endpoint with both real and lightweight fake APIs."""
+    from netbox_sync.report import get_reporter
+    global nb
+    if nb is None and hasattr(api, "http_session"):
+        nb = _reporting_api(api)
+    devices = api.dcim.devices
+    return devices if isinstance(devices, ReportingDevices) else ReportingDevices(devices, get_reporter())
+
+
 def get_netbox():
     global nb
     if nb is not None:
         return nb
-    nb = pynetbox.api(NETBOX_URL, token=NETBOX_TOKEN)
+    nb = _reporting_api(pynetbox.api(NETBOX_URL, token=NETBOX_TOKEN))
     # TLS verification for NetBox is opt-in (NETBOX_VERIFY_TLS=true) since
     # many internal NetBox installs use self-signed certs.
     nb.http_session.verify = _env_bool("NETBOX_VERIFY_TLS", False)
@@ -338,6 +457,12 @@ def _device_name(probe, prefix="server"):
     return hn.strip()[:64]
 
 
+def _successful_reconciliation_fields(device, discovered_fields):
+    """Preserve collector fields and clear durable misses on every normal hit."""
+    current = getattr(device, "custom_fields", None) or {} if device else {}
+    return {**current, **discovered_fields, "scan_misses": 0}
+
+
 def _ensure_device(*, probe, manufacturer, role_name, role_color="9e9e9e",
                    cf, model_map=None, prefix, name=None, serial=None,
                    site_ip=None, site_host=None, adopt_any_role=False,
@@ -375,6 +500,9 @@ def _ensure_device(*, probe, manufacturer, role_name, role_color="9e9e9e",
         dev = find_device(serial, role_name=None if adopt_any_role else role_name)
     if dev is None and extra_find is not None:
         dev = extra_find(api, role_id)
+    adopted = False
+    if dev is not None and adopt_any_role:
+        adopted = not getattr(getattr(dev, "role", None), "name", None) == role_name
     if dev is None:
         kwargs = {"name": name, "site_id": site_id}
         if not name_any_role:
@@ -385,18 +513,24 @@ def _ensure_device(*, probe, manufacturer, role_name, role_color="9e9e9e",
                      if not (c.custom_fields or {}).get(name_exclude_cf)]
         dev = cands[0] if cands else None
         if dev:
+            adopted = adopt_any_role and not getattr(getattr(dev, "role", None), "name", None) == role_name
             log("INFO", f"  Found {prefix} by name+site: {name} (id={dev.id})")
     if dev is None and _invalid_serial(serial) and blank_serial_find is not None:
         dev = blank_serial_find(api, role_id, name)
+        adopted = dev is not None and getattr(
+            getattr(dev, "role", None), "name", None) != role_name
     payload = {"name": name, "status": "active", "site": site_id,
                "device_type": dtype_id, "role": role_id,
-               "custom_fields": cf}
+               "custom_fields": _successful_reconciliation_fields(dev, cf)}
     if not _invalid_serial(serial):
         payload["serial"] = serial
     elif create_serial_empty_string:
         payload["serial"] = ""
     if dev:
-        api.dcim.devices.update([{"id": dev.id, **payload}])
+        if adopted:
+            from netbox_sync.report import get_reporter
+            get_reporter().record_adoption(dev.id)
+        _device_endpoint(api).update([{"id": dev.id, **payload}], current=dev)
         log("INFO", f"  {label} updated: {name} (id={dev.id})")
         return dev.id
     new = api.dcim.devices.create(payload)
@@ -568,10 +702,12 @@ def ensure_fortigate_device(probe, ha=None):
 
 def _mark_offline(dev_id, dev_name, cf_key, label):
     try:
-        get_netbox().dcim.devices.update([{
+        _device_endpoint(get_netbox()).update([{
             "id": dev_id, "status": "offline",
             "custom_fields": {cf_key: False},
         }])
+        from netbox_sync.report import get_reporter
+        get_reporter().record_device_outcome("offline", dev_id)
         log("WARN", f"  {label} marked offline: {dev_name} (id={dev_id})")
     except Exception as e:
         log("ERROR", f"  Could not mark {label} offline {dev_name}: {e}")
@@ -757,12 +893,12 @@ def ensure_ap_device(ap, wlc_name, role_name=None, manufacturer="Ruckus",
     payload = {
         "name": name, "status": "active", "site": site_id,
         "device_type": dtype_id, "role": role_id,
-        "custom_fields": {
+        "custom_fields": _successful_reconciliation_fields(dev, {
             "wap_mac":    mac,
             "wap_enabled": True,
             "wap_group":  ap.get("group"),
             "wap_wlc":    wlc_name,
-        },
+        }),
     }
     if ap.get("serial") and not _invalid_serial(ap["serial"]):
         payload["serial"] = ap["serial"].strip()
@@ -771,7 +907,7 @@ def ensure_ap_device(ap, wlc_name, role_name=None, manufacturer="Ruckus",
         # from the MAC (colons stripped) so NetBox matches AE records.
         payload["serial"] = mac.replace(":", "").lower()
     if dev:
-        api.dcim.devices.update([{"id": dev.id, **payload}])
+        _device_endpoint(api).update([{"id": dev.id, **payload}], current=dev)
         return dev.id
     new = api.dcim.devices.create(payload)
     log("INFO", f"  AP created: {name} (id={new.id})")
@@ -925,10 +1061,10 @@ def ensure_camera_device(cam, nvr_name, role_name=None, manufacturer="Hikvision"
         cf["cam_mac"] = cam["mac"]
     payload = {"name": name, "status": "active", "site": site_id,
                "device_type": dtype_id, "role": role_id,
-               "custom_fields": cf,
+               "custom_fields": _successful_reconciliation_fields(dev, cf),
                **({"serial": serial} if not _invalid_serial(serial) else {})}
     if dev:
-        api.dcim.devices.update([{"id": dev.id, **payload}])
+        _device_endpoint(api).update([{"id": dev.id, **payload}], current=dev)
         return dev.id
     new = api.dcim.devices.create(payload)
     log("INFO", f"  camera created: {name} (id={new.id})")
@@ -986,6 +1122,8 @@ def ensure_custom_fields_if_set():
 # Every custom field the tool writes/filters, on dcim.device. Source of truth
 # for automatic creation — keep in sync with the README tables.
 CUSTOM_FIELDS = [
+    # Durable offline sweep state (managed only by netbox-sync).
+    ("scan_misses",               "integer", "Consecutive scan misses"),
     # (name, type, label) — servers (Redfish)
     ("bmc_ip",                    "text",    "BMC IP"),
     ("redfish_enabled",           "boolean", "Redfish enabled"),
@@ -1245,15 +1383,16 @@ def ensure_ruckus_device(probe, role, vip):
         cf["wlc_vip"] = vip
     payload = {"name": name, "status": "active", "site": site_id,
                "device_type": dtype_id, "role": role_id,
-               "custom_fields": cf,
+               "custom_fields": _successful_reconciliation_fields(dev, cf),
                **({"serial": serial} if not _invalid_serial(serial) else {})}
     if dev:
         if role == "secondary":
             # never overwrite cluster identity from a secondary-unit probe
-            api.dcim.devices.update([{"id": dev.id, "status": "active",
-                                      "custom_fields": cf}])
+            _device_endpoint(api).update([{"id": dev.id, "status": "active",
+                                           "custom_fields": _successful_reconciliation_fields(dev, cf)}],
+                                          current=dev)
         else:
-            api.dcim.devices.update([{"id": dev.id, **payload}])
+            _device_endpoint(api).update([{"id": dev.id, **payload}], current=dev)
         log("INFO", f"  ZD updated: {name} (id={dev.id})")
         return dev.id
     new = api.dcim.devices.create(payload)
@@ -1266,18 +1405,63 @@ def ensure_ruckus_device(probe, role, vip):
 # in process memory and resets to 0 the moment the device is seen again.
 _scan_fail_counts = {}   # {ip: consecutive_miss_count}
 
-def _check_offline(ip, live_ips, dev_id, dev_name, mark_fn, label):
-    """Shared logic: increment miss counter if absent, mark offline only
-    when the threshold is reached. Reset counter when the device is present."""
-    if ip in live_ips:
-        if ip in _scan_fail_counts:
+def _persist_scan_misses(device, misses, endpoint=None):
+    """Merge only the scan-miss counter; never replace unrelated custom data."""
+    from netbox_sync.report import classify_error, record_processing_failure
+
+    current = getattr(device, "custom_fields", None) or {}
+    try:
+        if int(current.get("scan_misses") or 0) == misses:
+            return True
+        endpoint = endpoint or get_netbox().dcim.devices
+        if isinstance(endpoint, ReportingDevices):
+            endpoint.update([{
+                "id": device.id,
+                "custom_fields": {**current, "scan_misses": misses},
+            }], report=False)
+        else:
+            endpoint.update([{
+                "id": device.id,
+                "custom_fields": {**current, "scan_misses": misses},
+            }])
+        current["scan_misses"] = misses
+        device.custom_fields = current
+        return True
+    except Exception as exc:
+        record_processing_failure("Offline sweep", str(getattr(device, "name", device.id)),
+                                  classify_error(exc))
+        log("ERROR", f"  scan-miss state update failed for {device.name}: {exc}")
+        return False
+
+
+def _check_offline(ip, live_ips, dev_id, dev_name, mark_fn, label, device=None,
+                   endpoint=None):
+    """Persist miss state when supplied a device; retain legacy callers too."""
+    if device is None:
+        if ip in live_ips:
             _scan_fail_counts.pop(ip, None)
+            return
+        misses = _scan_fail_counts.get(ip, 0) + 1
+        _scan_fail_counts[ip] = misses
+        if misses >= OFFLINE_THRESHOLD:
+            mark_fn(dev_id, dev_name)
+            _scan_fail_counts.pop(ip, None)
+        else:
+            log("INFO", f"  {label} {dev_name} not seen this run "
+                f"(miss {misses}/{OFFLINE_THRESHOLD}) -- keeping active")
         return
-    misses = _scan_fail_counts.get(ip, 0) + 1
-    _scan_fail_counts[ip] = misses
-    if misses >= OFFLINE_THRESHOLD:
+
+    cf = getattr(device, "custom_fields", None) or {}
+    previous = int(cf.get("scan_misses") or 0)
+    if ip in live_ips:
+        _persist_scan_misses(device, 0, endpoint)
+        return
+    misses = previous + 1
+    threshold_reached = misses >= OFFLINE_THRESHOLD
+    if not _persist_scan_misses(device, 0 if threshold_reached else misses, endpoint):
+        return
+    if threshold_reached:
         mark_fn(dev_id, dev_name)
-        _scan_fail_counts.pop(ip, None)   # reset after marking
     else:
         log("INFO", f"  {label} {dev_name} not seen this run "
             f"(miss {misses}/{OFFLINE_THRESHOLD}) -- keeping active")

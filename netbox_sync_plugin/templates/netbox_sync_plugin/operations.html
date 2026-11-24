@@ -1,0 +1,196 @@
+{% extends "base/layout.html" %}
+{% load static %}
+
+{% block title %}Netbox-sync Operations{% endblock %}
+
+{% block head %}
+  <link rel="stylesheet" href="{% static 'netbox_sync_plugin/operations.css' %}">
+{% endblock %}
+
+{% block content %}
+<main class="sync-operations" aria-labelledby="sync-operations-title">
+  <header class="sync-header">
+    <div class="sync-identity">
+      <span class="sync-app-icon" aria-hidden="true"><i class="mdi mdi-database-sync"></i></span>
+      <div>
+        <p class="sync-eyebrow">Netbox-sync / Operations</p>
+        <h1 id="sync-operations-title">Operations dashboard</h1>
+        <p class="sync-subtitle">Synchronization and infrastructure health at a glance.</p>
+      </div>
+    </div>
+    {% if can_run %}
+      <form method="post" action="{{ run_action }}" class="sync-run-form">
+        {% csrf_token %}
+        <input type="hidden" name="confirm" value="yes">
+        <button class="sync-run-button" type="submit"
+                data-sync-confirm="Start discovery followed by AssetExplorer? This queues one background synchronization."
+                {% if active_run %}disabled title="A synchronization is already queued or running"{% endif %}>
+          <i class="mdi mdi-sync" aria-hidden="true"></i>
+          {% if active_run %}Synchronization active{% else %}Run synchronization{% endif %}
+        </button>
+      </form>
+    {% endif %}
+  </header>
+
+  {% if history_error %}
+    <div class="sync-alert sync-alert-warning" role="alert">
+      <i class="mdi mdi-alert-outline" aria-hidden="true"></i>
+      Some operational history is temporarily unavailable. No action has been taken.
+    </div>
+  {% endif %}
+
+  <section class="sync-banner {% if active_run %}sync-status-{{ active_run.status }}{% elif selected_run %}sync-status-{{ selected_run.status }}{% else %}sync-status-empty{% endif %}" aria-label="Synchronization status">
+    <span class="sync-banner-icon" aria-hidden="true">
+      {% if active_run %}<i class="mdi mdi-progress-clock"></i>
+      {% elif selected_run.status == 'succeeded' %}<i class="mdi mdi-check"></i>
+      {% elif selected_run %}<i class="mdi mdi-alert-outline"></i>
+      {% else %}<i class="mdi mdi-information-outline"></i>{% endif %}
+    </span>
+    <div class="sync-banner-main">
+      {% if active_run %}
+        <strong>Synchronization {{ active_run.status }}</strong>
+        <span>Run #{{ active_run.pk }} · {{ active_run.trigger|title }} · {% if worker_state == 'queued' %}Waiting for a background worker{% else %}Background worker execution{% endif %}</span>
+      {% elif selected_run %}
+        <strong>Selected run {{ selected_run.get_status_display }}</strong>
+        <span>Run #{{ selected_run.pk }} · Finished {{ selected_run.finished_at|default:'time unavailable' }} · {{ selected_run.duration_seconds|default:'0' }} seconds · AssetExplorer {{ selected_run.assetexplorer_state }}</span>
+      {% else %}
+        <strong>No completed synchronization history</strong>
+        <span>Use a confirmed manual run or the configured schedule to begin.</span>
+      {% endif %}
+    </div>
+    <div class="sync-worker-state">
+      {% if worker_state == 'queued' %}<i class="mdi mdi-circle-outline" aria-hidden="true"></i> Queued; worker not started
+      {% elif worker_state == 'running' %}<i class="mdi mdi-circle sync-live-dot" aria-hidden="true"></i> Synchronization running · Heartbeat {{ heartbeat_state }}
+      {% elif heartbeat_state == 'fresh' %}<i class="mdi mdi-circle" aria-hidden="true"></i> Recent worker heartbeat
+      {% elif heartbeat_state == 'stale' %}<i class="mdi mdi-circle-outline" aria-hidden="true"></i> Worker heartbeat stale · {{ state.last_heartbeat }}
+      {% else %}<i class="mdi mdi-circle-outline" aria-hidden="true"></i> Worker heartbeat unavailable{% endif %}
+      <span>
+        {% if state.schedule_enabled %}Schedule every {{ state.interval_minutes }} minutes · Next run {{ next_scheduled_run|default:'not scheduled' }}{% else %}Recurring schedule disabled{% endif %}
+      </span>
+    </div>
+  </section>
+  {% if state.last_enqueue_error %}
+    <div class="sync-alert sync-alert-warning" role="alert">{{ state.last_enqueue_error }}</div>
+  {% endif %}
+
+  <section class="sync-kpis" aria-label="Selected run totals">
+    <article class="sync-card sync-kpi sync-accent-blue">
+      <div class="sync-kpi-top"><span>Devices reconciled</span><i class="mdi mdi-server" aria-hidden="true"></i></div>
+      <strong class="sync-number">{{ selected_run.discovered|default:0 }}</strong>
+      <span class="sync-small">{{ families|length }} device families in selected history</span>
+    </article>
+    <article class="sync-card sync-kpi sync-accent-green">
+      <div class="sync-kpi-top"><span>Changes applied</span><i class="mdi mdi-sync" aria-hidden="true"></i></div>
+      <strong class="sync-number">{{ changes }}</strong>
+      <span class="sync-small">{{ selected_run.created|default:0 }} created · {{ selected_run.updated|default:0 }} updated · {{ selected_run.adopted|default:0 }} adopted</span>
+    </article>
+    <article class="sync-card sync-kpi sync-accent-orange">
+      <div class="sync-kpi-top"><span>Failed operations</span><i class="mdi mdi-alert-outline" aria-hidden="true"></i></div>
+      <strong class="sync-number">{{ selected_run.failed|default:0 }}</strong>
+      <span class="sync-small">{{ issues|length }} bounded issue groups shown below</span>
+    </article>
+    <article class="sync-card sync-kpi sync-accent-red">
+      <div class="sync-kpi-top"><span>Offline devices</span><i class="mdi mdi-lan-disconnect" aria-hidden="true"></i></div>
+      <strong class="sync-number">{{ selected_run.offline|default:0 }}</strong>
+      <span class="sync-small">Recorded during this historical run</span>
+    </article>
+  </section>
+
+  <div class="sync-columns">
+    <section class="sync-card sync-history" aria-labelledby="sync-history-title">
+      <div class="sync-panel-heading">
+        <h2 id="sync-history-title">Selected run by family</h2>
+        {% if selected_run %}<span class="sync-tag">Run #{{ selected_run.pk }}</span>{% endif %}
+      </div>
+      <div class="sync-history-controls">
+        <form method="get">
+          <label for="sync-run-select">Recent completed runs</label>
+          <select id="sync-run-select" name="run" onchange="this.form.submit()">
+            {% for run in runs %}
+              <option value="{{ run.pk }}" {% if selected_run.pk == run.pk %}selected{% endif %}>
+                #{{ run.pk }} · {{ run.get_status_display }} · {{ run.finished_at|date:'Y-m-d H:i' }}
+              </option>
+            {% empty %}<option value="">No completed runs</option>{% endfor %}
+          </select>
+          <noscript><button type="submit">Show run</button></noscript>
+        </form>
+        <span class="sync-small">Latest success: {% if latest_success %}run #{{ latest_success.pk }} · {{ latest_success.finished_at }}{% else %}not recorded{% endif %}</span>
+      </div>
+      <div class="sync-families">
+        <div class="sync-bar-label"><span>{{ selected_run.discovered|default:0 }} devices processed</span><span>{{ completion_percent }}% reconciled</span></div>
+        <div class="sync-completion-bar" role="progressbar" aria-label="Devices reconciled" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ completion_percent }}">
+          <span style="width: {{ completion_percent }}%"></span>
+        </div>
+        {% if families %}
+          <div class="sync-family-row sync-family-heading" aria-hidden="true"><span>Family</span><span>Status</span><span>Devices</span><span>Changes</span></div>
+          {% for family in families %}
+            <div class="sync-family-row">
+              <span class="sync-family"><i class="mdi mdi-lan" aria-hidden="true"></i>{{ family.display_label }}</span>
+              <span class="sync-family-status sync-status-{{ family.status }}">{{ family.status|title }}</span>
+              <span>{{ family.discovered }}</span>
+              <span>{{ family.changes }}</span>
+            </div>
+          {% endfor %}
+        {% else %}
+          <p class="sync-empty">No per-family results are available for this run.</p>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="sync-card sync-health" aria-labelledby="sync-health-title">
+      <div class="sync-panel-heading"><h2 id="sync-health-title">Inventory health</h2><span class="sync-tag">Current NetBox</span></div>
+      {% if health.available %}
+        <div class="sync-health-chart">
+          <div class="sync-donut" data-health-chart role="img"
+               aria-label="Current health: {{ health.healthy }} healthy, {{ health.attention }} attention, {{ health.offline }} offline"
+               data-healthy="{{ health.healthy }}" data-attention="{{ health.attention }}" data-offline="{{ health.offline }}">
+            <svg viewBox="0 0 42 42" aria-hidden="true" focusable="false">
+              <circle class="sync-donut-track" cx="21" cy="21" r="15.9155"></circle>
+            </svg>
+            <div class="sync-donut-copy"><strong>{{ health.healthy_percent }}%</strong><span>healthy</span></div>
+          </div>
+          <dl class="sync-legend">
+            <div><dt><span class="sync-dot sync-dot-green"></span>Healthy</dt><dd>{{ health.healthy }}</dd></div>
+            <div><dt><span class="sync-dot sync-dot-orange"></span>Attention</dt><dd>{{ health.attention }}</dd></div>
+            <div><dt><span class="sync-dot sync-dot-red"></span>Offline</dt><dd>{{ health.offline }}</dd></div>
+          </dl>
+        </div>
+        <p class="sync-small">{{ health.total }} managed devices. Offline takes precedence over attention; detailed checks may overlap.</p>
+        {% for check in health.checks.values %}
+          {% if check.count %}
+            <div class="sync-health-item">
+              <i class="mdi mdi-identifier" aria-hidden="true"></i>
+              <div><strong>{{ check.label }}</strong><span>Current managed inventory</span></div>
+              {% if check.ids %}<a href="{{ check.url }}" aria-label="View {{ check.label }} devices">{{ check.count }}</a>{% else %}<strong>{{ check.count }}</strong>{% endif %}
+              {% if check.link_truncated %}<span class="sync-small">First 100 IDs linked</span>{% endif %}
+            </div>
+          {% endif %}
+        {% empty %}<p class="sync-empty">All managed devices passed the current health checks.</p>{% endfor %}
+      {% elif health is None %}
+        <p class="sync-empty"><i class="mdi mdi-lock-outline" aria-hidden="true"></i> Device-view permission is required for current health.</p>
+      {% else %}
+        <p class="sync-empty"><i class="mdi mdi-alert-circle-outline" aria-hidden="true"></i> {{ health.message }}</p>
+      {% endif %}
+    </section>
+  </div>
+
+  <section class="sync-card sync-issues" aria-labelledby="sync-issues-title">
+    <div class="sync-panel-heading"><h2 id="sync-issues-title">Selected run issues</h2><span class="sync-small">Sanitized and bounded</span></div>
+    {% for issue in issues %}
+      <article class="sync-issue">
+        <span class="sync-issue-icon" aria-hidden="true"><i class="mdi mdi-alert-outline"></i></span>
+        <span class="sync-issue-category">{{ issue.category }}</span>
+        <div><span>{{ issue.message }}</span>{% if issue.source %}<small>{{ issue.source }}</small>{% endif %}</div>
+        <span class="sync-issue-count" title="Aggregated occurrences">×{{ issue.occurrences }}</span>
+      </article>
+    {% empty %}
+      <p class="sync-empty">No issues recorded for the selected run.</p>
+    {% endfor %}
+  </section>
+  <p class="sync-footnote">Historical run results and current inventory health are evaluated independently. This page never performs discovery in the web process.</p>
+</main>
+{% endblock %}
+
+{% block javascript %}
+  <script src="{% static 'netbox_sync_plugin/operations.js' %}" defer></script>
+{% endblock %}

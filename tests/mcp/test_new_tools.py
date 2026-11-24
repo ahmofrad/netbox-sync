@@ -1,8 +1,11 @@
 import os
 os.environ.setdefault('NETBOX_TOKEN','unit-test-token')
 os.environ.setdefault('NETBOX_URL','https://unit.test')
-import ast, json, sys, types, pathlib
-sys.path.insert(0, r'G:\NetBoX\code\github\netbox-mcp')
+import importlib.util
+import json
+import sys
+import types
+from pathlib import Path
 
 # FastMCP may be absent locally; stub only its decorator machinery for unit tests.
 class _StubMCP:
@@ -15,13 +18,13 @@ class _StubMCP:
         return deco
     def run(self, *a, **kw): pass
 
-mcp_mod = types.ModuleType('mcp.server.fastmcp')
-mcp_mod.FastMCP = lambda *a, **kw: _StubMCP()
-sys.modules['mcp.server.fastmcp'] = mcp_mod
+if importlib.util.find_spec('mcp.server.fastmcp') is None:
+    mcp_mod = types.ModuleType('mcp.server.fastmcp')
+    mcp_mod.FastMCP = lambda *a, **kw: _StubMCP()
+    sys.modules['mcp.server.fastmcp'] = mcp_mod
 
-import importlib
-import server as srv
-import netbox_api as nb
+from netbox_sync_mcp import server as srv
+from netbox_sync_mcp import netbox_api as nb
 
 
 class FakeGet:
@@ -37,6 +40,7 @@ class FakeGet:
             '/api/ipam/prefixes/413/': {'id':413,'prefix':'10.0.0.0/24','status':{'value':'active'},'vrf':{'name':'HA'},'vlan':{'vid':100,'name':'vlan100'},'site':{'name':'HQ'},'role':None,'description':'Test prefix','tenant':None,'custom_fields':{}},
             '/api/dcim/cables/': {'results':[{'id':2958,'type':'copper','status':{'value':'connected'},'a_terminations':[{'object_type':'dcim.interface','object':{'name':'eth0','device':{'name':'HOST-A'}}}],'b_terminations':[{'object_type':'dcim.interface','object':{'name':'swp1','device':{'name':'SW-1'}}}],'description':'Test cable','length':2.0,'length_unit':'m'}]},
             '/api/dcim/interfaces/11/': {'id':11,'name':'eth0','device':{'id':8,'name':'HOST-A'},'type':{'value':'1000base-t'},'enabled':True,'mac_address':'00:11:22:33:44:55','mtu':1500,'mode':{'value':'access'},'description':'Test iface','cable':{'id':2958}},
+            '/api/dcim/devices/': {'results':[{'id':8,'name':'HOST-A'}]},
         }
         if path in table: return table[path]
         if path == '/api/ipam/ip-addresses/': return {'results':[{'address':'10.0.0.10/24','status':{'value':'active'},'dns_name':'host-a.example','description':'x'}]}
@@ -44,7 +48,7 @@ class FakeGet:
 
 
 def test_get_only_guard():
-    src = pathlib.Path(r'G:\NetBoX\code\github\netbox-mcp\netbox_api.py').read_text()
+    src = Path(nb.__file__).read_text()
     assert 'requests.post' not in src and 'requests.put' not in src and 'requests.delete' not in src and 'requests.patch' not in src
     for func in srv.netbox_list_vlans, srv.netbox_vlan_detail, srv.netbox_list_vrfs, srv.netbox_list_prefixes, srv.netbox_prefix_detail, srv.netbox_list_cables, srv.netbox_interface_details:
         assert callable(func)

@@ -667,6 +667,8 @@ def _adopt_name_collision(api, rec, payload, orig_exc):
             return None     # different real serial — never hijack
         api.dcim.devices.update([{"id": dev.id, "serial": rec["serial"],
                                   "asset_tag": rec.get("asset_tag")}])
+        from netbox_sync.report import get_reporter
+        get_reporter().record_adoption(dev.id, family="assetexplorer")
         log("INFO", f"  AE adopted blank-serial device: {rec['name']} "
                     f"(id={dev.id}, serial={rec['serial']})")
         return dev
@@ -687,7 +689,12 @@ def main():
         log("ERROR", "AE_URL / AE_API_KEY not set — nothing to do.")
         return 1
     try:
-        sync_assetexplorer()
+        if os.getenv("SYNC_LOCK_BACKEND", "file").lower() == "redis":
+            from netbox_sync.locking import configured_execution_lock
+            with configured_execution_lock():
+                sync_assetexplorer()
+        else:
+            sync_assetexplorer()
     except KeyboardInterrupt:
         log("INFO", "Aborted by user.")
         return 130

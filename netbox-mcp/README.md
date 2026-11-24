@@ -18,7 +18,7 @@ Read-only MCP server exposing NetBox inventory to Brain Bot (NanoCortex).
 - Service: `systemctl status netbox-mcp` (systemd, auto-restart)
 - Endpoint (via nginx on 443): `https://<your-netbox-host>/mcp/sse`
 - Backend (localhost only): `127.0.0.1:8901`
-- Token: `NETBOX_TOKEN` in `/home/sina/netbox-mcp/.env` (0600), read-only (`write_enabled: False`)
+- Token: `MCP_NETBOX_TOKEN` in a protected server-side environment file (0600), read-only (`write_enabled: False`); never reuse the synchronization `NETBOX_TOKEN`
 - venv: `/home/sina/netbox-mcp/.venv` (fully offline-installed)
 
 ## NanoCortex registration
@@ -32,10 +32,21 @@ https://<your-netbox-host>/mcp/sse
 - Name: `netbox`
 - Grant it to Brain Bot's agent (or make public for your team).
 
+## Transports and compatibility
+
+```bash
+netbox-sync-mcp         # STDIO (default)
+netbox-sync-mcp --sse   # SSE behind the existing /mcp/sse reverse proxy
+netbox-sync-mcp --http  # Streamable HTTP
+python server.py        # Legacy STDIO launcher, same packaged implementation
+```
+
+Backend defaults are loopback `127.0.0.1:8901`; `MCP_MOUNT_PATH` defaults to `/mcp`. Set `NETBOX_URL` separately. See [the plugin deployment guide](../docs/netbox-sync-plugin.md) for least-privilege setup, TLS, shared-lock cutover, and acceptance checks.
+
 ## Verify
 
 ```bash
-python e2e_test.py   # full protocol test from anywhere that reaches the URL
+RUN_MCP_E2E=1 python e2e_test.py   # Explicit opt-in protocol test against a disposable service
 ```
 
 ## Security model

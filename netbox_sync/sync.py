@@ -43,7 +43,7 @@ from netbox_sync.config import (log, BMC_RANGES, STORAGE_RANGES, SAN_RANGES,
                                  FMC_RANGES, POWER_SYNC_ENABLED,
                                  power_watts_for_model)
 from netbox_sync.report import (classify_error, clear as clear_scan_report,
-                                print_summary, record_processing_failure)
+                                get_reporter, print_summary, record_processing_failure)
 from netbox_sync.ipam import (_prefix_from_ip, _iface_addr_with_prefixlen,
                               ensure_prefix, ensure_host_ip,
                               _containing_prefix, _prefix_masklen,
@@ -169,12 +169,15 @@ def process_nvrs(probes, collect_fn, ensure_fn, family, mac_map,
     sync each camera (device, eth0, primary IP, MAC-table cable) and sweep
     cameras that disappeared."""
     live_ips = set()
+    reporter = get_reporter()
+    reporter.start_family(f"{family}_nvrs", f"{family} NVRs")
     for probe in probes:
         ip = probe["ip"]
         live_ips.add(ip)
         log("INFO", f"Processing {family} NVR {ip}  "
                     f"({probe.get('model')} / {probe.get('serial')})")
         data = None
+        nvr_name = _unique_nvr_name(None, probe.get("hostname"), ip, family)
         for collect_attempt in (1, 2):
             try:
                 data = collect_fn(ip)
@@ -203,7 +206,6 @@ def process_nvrs(probes, collect_fn, ensure_fn, family, mac_map,
                       "nvr_firmware": probe.get("firmware")}
                 api.dcim.devices.update([{"id": dev_id, "status": "active",
                                           "custom_fields": cf}])
-                nvr_name = _unique_nvr_name(None, probe.get("hostname"), ip, family)
                 ensure_primary_ip(dev_id, ip, nvr_name)
             except Exception as e:
                 log("ERROR", f"  ensure device failed for {ip}: {e}")
@@ -216,7 +218,9 @@ def process_nvrs(probes, collect_fn, ensure_fn, family, mac_map,
         try:
             dev_id = ensure_fn(probe)
         except Exception as e:
-            log("ERROR", f"  ensure device failed for {ip}: {e}"); continue
+            log("ERROR", f"  ensure device failed for {ip}: {e}")
+            record_processing_failure(f"{family} NVR", ip, classify_error(e))
+            continue
 
         nvr_name = _unique_nvr_name(data["summary"].get("name"),
                                     probe.get("hostname"), ip, family)
@@ -229,6 +233,7 @@ def process_nvrs(probes, collect_fn, ensure_fn, family, mac_map,
                                       "custom_fields": cf}])
         except Exception as e:
             log("ERROR", f"  NVR update failed for {ip}: {e}")
+            record_processing_failure(f"{family} NVR", ip, classify_error(e))
 
         try:
             ensure_primary_ip(dev_id, ip, nvr_name)
@@ -296,6 +301,7 @@ def process_nvrs(probes, collect_fn, ensure_fn, family, mac_map,
             log("ERROR", f"  camera offline sweep failed for {ip}: {e}")
 
         log("INFO", f"  [OK] {family} NVR {ip} — {len(data['cameras'])} cameras synced")
+    reporter.finish_family(f"{family}_nvrs")
     return live_ips
 
 
@@ -319,6 +325,10 @@ def run_sync():
     log("INFO", "Unified sync started (servers + storage + SAN + Cisco switches)")
     log("INFO", "=" * 60)
 
+    reporter = get_reporter()
+    clear_scan_report()
+    reporter.clear()
+
     # Custom fields MUST exist before anything runs: every lookup/sweep uses
     # cf_* filters, and NetBox silently ignores filters on nonexistent fields
     # (matches ALL devices — mass-offlined a fresh NetBox once).
@@ -326,12 +336,16 @@ def run_sync():
         ensure_custom_fields()
     except Exception as e:
         log("ERROR", f"  custom-field bootstrap failed: {e}")
+        record_processing_failure("bootstrap", "custom fields", classify_error(e))
 
-    clear_scan_report()
     found = scan_all()
+    for family, probes in found.items():
+        reporter.start_family(family)
+        reporter.record_device_outcome("discovered", family=family, count=len(probes))
     api = get_netbox()
 
     # ── Process servers ───────────────────────────────────────────────────────
+    reporter.start_family("servers", "Servers")
     live_server_ips = {h["ip"] for h in found["servers"]}
     for probe in found["servers"]:
         ip = probe["ip"]
@@ -341,7 +355,9 @@ def run_sync():
         try:
             dev_id = ensure_server_device(probe)
         except Exception as e:
-            log("ERROR", f"  ensure_server_device failed for {ip}: {e}"); continue
+            log("ERROR", f"  ensure_server_device failed for {ip}: {e}")
+            record_processing_failure("servers", ip, classify_error(e))
+            continue
 
         try:
             ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"))
@@ -352,7 +368,9 @@ def run_sync():
             data = rf_collect_inventory(host)
         except KeyboardInterrupt: raise
         except Exception as e:
-            log("ERROR", f"  inventory collection failed for {ip}: {e}"); continue
+            log("ERROR", f"  inventory collection failed for {ip}: {e}")
+            record_processing_failure("servers", ip, classify_error(e))
+            continue
 
         s   = data["summary"]
         inv = data["inventory"]
@@ -381,14 +399,18 @@ def run_sync():
             api.dcim.devices.update([payload])
         except Exception as e:
             log("ERROR", f"  server update failed for {ip}: {e}")
+            record_processing_failure("servers", ip, classify_error(e))
 
         try:
             sync_inventory(dev_id, inv)
             log("INFO", f"  [OK] Server {ip} — {len(inv)} items synced")
         except Exception as e:
             log("ERROR", f"  inventory sync failed for {ip}: {e}")
+            record_processing_failure("servers", ip, classify_error(e))
 
+    reporter.finish_family("servers")
     # ── Process storage ──────────────────────────────────────────────────────
+    reporter.start_family("storage", "Storage")
     live_storage_ips = {h["ip"] for h in found["storage"]}
     for probe in found["storage"]:
         ip = probe["ip"]
@@ -397,7 +419,9 @@ def run_sync():
         try:
             dev_id = ensure_storage_device(probe)
         except Exception as e:
-            log("ERROR", f"  ensure_storage_device failed for {ip}: {e}"); continue
+            log("ERROR", f"  ensure_storage_device failed for {ip}: {e}")
+            record_processing_failure("storage", ip, classify_error(e))
+            continue
 
         try:
             ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"))
@@ -408,7 +432,9 @@ def run_sync():
             data = storage_collect_inventory(ip)
         except KeyboardInterrupt: raise
         except Exception as e:
-            log("ERROR", f"  inventory collection failed for {ip}: {e}"); continue
+            log("ERROR", f"  inventory collection failed for {ip}: {e}")
+            record_processing_failure("storage", ip, classify_error(e))
+            continue
 
         summary = data["summary"]
         inv = data["inventory"]
@@ -431,14 +457,18 @@ def run_sync():
             api.dcim.devices.update([payload])
         except Exception as e:
             log("ERROR", f"  storage update failed for {ip}: {e}")
+            record_processing_failure("storage", ip, classify_error(e))
 
         try:
             sync_inventory(dev_id, inv)
             log("INFO", f"  [OK] Storage {ip} — {len(inv)} items synced")
         except Exception as e:
             log("ERROR", f"  inventory sync failed for {ip}: {e}")
+            record_processing_failure("storage", ip, classify_error(e))
 
+    reporter.finish_family("storage")
     # ── Process SAN switches ──────────────────────────────────────────────────
+    reporter.start_family("san_switches", "SAN switches")
     live_san_ips = {h["ip"] for h in found["san_switches"]}
     for probe in found["san_switches"]:
         ip = probe["ip"]
@@ -447,7 +477,9 @@ def run_sync():
         try:
             dev_id = ensure_san_switch_device(probe)
         except Exception as e:
-            log("ERROR", f"  ensure_san_switch_device failed for {ip}: {e}"); continue
+            log("ERROR", f"  ensure_san_switch_device failed for {ip}: {e}")
+            record_processing_failure("san_switches", ip, classify_error(e))
+            continue
 
         try:
             ensure_primary_ip(dev_id, probe["ip"], probe.get("hostname"))
@@ -458,7 +490,9 @@ def run_sync():
             data = san_collect_inventory(ip)
         except KeyboardInterrupt: raise
         except Exception as e:
-            log("ERROR", f"  SAN inventory collection failed for {ip}: {e}"); continue
+            log("ERROR", f"  SAN inventory collection failed for {ip}: {e}")
+            record_processing_failure("san_switches", ip, classify_error(e))
+            continue
 
         summary = data["summary"]
         ports = data["ports"]
@@ -482,20 +516,25 @@ def run_sync():
             api.dcim.devices.update([payload])
         except Exception as e:
             log("ERROR", f"  SAN switch update failed for {ip}: {e}")
+            record_processing_failure("san_switches", ip, classify_error(e))
 
         try:
             sync_san_interfaces(dev_id, ports, nameserver)
             log("INFO", f"  [OK] SAN {ip} — {len(ports)} ports, {len(nameserver)} nameserver entries")
         except Exception as e:
             log("ERROR", f"  SAN interface sync failed for {ip}: {e}")
+            record_processing_failure("san_switches", ip, classify_error(e))
 
         try:
             sync_inventory(dev_id, inv)
             log("INFO", f"  [OK] SAN {ip} — {len(inv)} inventory items synced")
         except Exception as e:
             log("ERROR", f"  SAN inventory sync failed for {ip}: {e}")
+            record_processing_failure("san_switches", ip, classify_error(e))
 
+    reporter.finish_family("san_switches")
     # ── Process Cisco switches ────────────────────────────────────────────────
+    reporter.start_family("cisco_switches", "Cisco switches")
     live_cisco_ips = {h["ip"] for h in found["cisco_switches"]}
     group_vlan_seen = {}
     switch_group_ips = {}
@@ -515,12 +554,16 @@ def run_sync():
             data = cisco_collect_inventory(ip)
         except KeyboardInterrupt: raise
         except Exception as e:
-            log("ERROR", f"  Cisco inventory collection failed for {ip}: {e}"); continue
+            log("ERROR", f"  Cisco inventory collection failed for {ip}: {e}")
+            record_processing_failure("cisco_switches", ip, classify_error(e))
+            continue
 
         try:
             dev_id = ensure_cisco_device(probe, stack=data.get("stack"))
         except Exception as e:
-            log("ERROR", f"  ensure_cisco_device failed for {ip}: {e}"); continue
+            log("ERROR", f"  ensure_cisco_device failed for {ip}: {e}")
+            record_processing_failure("cisco_switches", ip, classify_error(e))
+            continue
 
         collected.append((probe, dev_id, data))
 
@@ -584,6 +627,7 @@ def run_sync():
             api.dcim.devices.update([payload])
         except Exception as e:
             log("ERROR", f"  Cisco switch update failed for {ip}: {e}")
+            record_processing_failure("cisco_switches", ip, classify_error(e))
 
         site_id = site_of_ip.get(ip)
         vid_map = {}
@@ -605,6 +649,7 @@ def run_sync():
             log("INFO", f"  [OK] Cisco {ip} — {len(ports)} interfaces synced")
         except Exception as e:
             log("ERROR", f"  Cisco interface sync failed for {ip}: {e}")
+            record_processing_failure("cisco_switches", ip, classify_error(e))
 
         if vid_map:
             try:
@@ -612,6 +657,7 @@ def run_sync():
                 log("INFO", f"  [OK] Cisco {ip} — VLAN linkage synced")
             except Exception as e:
                 log("ERROR", f"  Cisco VLAN linkage failed for {ip}: {e}")
+                record_processing_failure("cisco_switches", ip, classify_error(e))
 
         # Primary IPv4 goes on the real management interface (SVI from
         # show ip interface brief) when identifiable; synthetic mgmt fallback.
@@ -654,18 +700,21 @@ def run_sync():
             sweep_stale_host_ips(dev_id, seen_host_ips | ({ip} if carrier else set()))
         except Exception as e:
             log("ERROR", f"  host IP sweep failed for {ip}: {e}")
+            record_processing_failure("cisco_switches", ip, classify_error(e))
 
         try:
             sync_inventory(dev_id, inv)
             log("INFO", f"  [OK] Cisco {ip} — {len(inv)} inventory items synced")
         except Exception as e:
             log("ERROR", f"  Cisco inventory sync failed for {ip}: {e}")
+            record_processing_failure("cisco_switches", ip, classify_error(e))
 
         try:
             sync_cdp_cables(dev_id, neighbors)
             log("INFO", f"  [OK] Cisco {ip} — {len(neighbors)} neighbors processed")
         except Exception as e:
             log("ERROR", f"  Cisco cable sync failed for {ip}: {e}")
+            record_processing_failure("cisco_switches", ip, classify_error(e))
 
     # MAC -> switch-port map for camera cabling. Empty when no Cisco
     # switches were scanned (family disabled) — cabling then no-ops.
@@ -677,6 +726,7 @@ def run_sync():
                     f"from {len(collected)} switch(es)")
 
     # ── Process FortiGates ────────────────────────────────────────────────────
+    reporter.start_family("fortigates", "FortiGates")
     live_fortigate_ips = {h["ip"] for h in found["fortigates"]}
     nat_seen = set()
     for probe in found["fortigates"]:
@@ -687,13 +737,17 @@ def run_sync():
             data = fortigate_collect(ip)
         except KeyboardInterrupt: raise
         except Exception as e:
-            log("ERROR", f"  FortiGate inventory collection failed for {ip}: {e}"); continue
+            log("ERROR", f"  FortiGate inventory collection failed for {ip}: {e}")
+            record_processing_failure("fortigates", ip, classify_error(e))
+            continue
 
         ha = data.get("ha") or {}
         try:
             dev_id = ensure_fortigate_device(probe, ha=ha)
         except Exception as e:
-            log("ERROR", f"  ensure_fortigate_device failed for {ip}: {e}"); continue
+            log("ERROR", f"  ensure_fortigate_device failed for {ip}: {e}")
+            record_processing_failure("fortigates", ip, classify_error(e))
+            continue
 
         summary = data["summary"]
         ports = data["ports"]
@@ -721,6 +775,7 @@ def run_sync():
             api.dcim.devices.update([payload])
         except Exception as e:
             log("ERROR", f"  FortiGate update failed for {ip}: {e}")
+            record_processing_failure("fortigates", ip, classify_error(e))
 
         site_id = None
         try:
@@ -780,6 +835,7 @@ def run_sync():
             log("INFO", f"  [OK] FortiGate {ip} — {len(ports)} interfaces synced")
         except Exception as e:
             log("ERROR", f"  FortiGate interface sync failed for {ip}: {e}")
+            record_processing_failure("fortigates", ip, classify_error(e))
 
         # IPAM: prefixes from interface IPs (real masks) + gateway addresses
         if site_id:
@@ -813,6 +869,7 @@ def run_sync():
                 sweep_stale_host_ips(dev_id, seen_host_ips | {ip})
             except Exception as e:
                 log("ERROR", f"  host IP sweep failed for {ip}: {e}")
+                record_processing_failure("fortigates", ip, classify_error(e))
 
         # Primary IPv4 goes on the real carrier subinterface (matched from
         # cmdb interface IPs) when identifiable; synthetic mgmt fallback.
@@ -840,6 +897,7 @@ def run_sync():
             log("INFO", f"  [OK] FortiGate {ip} — {len(inv)} inventory items synced")
         except Exception as e:
             log("ERROR", f"  FortiGate inventory sync failed for {ip}: {e}")
+            record_processing_failure("fortigates", ip, classify_error(e))
 
         # NAT: VIPs become external IPs with nat_inside to their mapped
         # addresses (per-port fidelity via NetBox Services); pools plain
@@ -852,20 +910,25 @@ def run_sync():
                         f"{len(fw.get('ippools') or [])} pools -> IPAM + services")
         except Exception as e:
             log("ERROR", f"  NAT IPAM sync failed for {ip}: {e}")
+            record_processing_failure("fortigates", ip, classify_error(e))
 
         try:
             sync_cdp_cables(dev_id, neighbors, protocol="lldp")
             log("INFO", f"  [OK] FortiGate {ip} — {len(neighbors)} neighbors processed")
         except Exception as e:
             log("ERROR", f"  FortiGate cable sync failed for {ip}: {e}")
+            record_processing_failure("fortigates", ip, classify_error(e))
 
     if found["fortigates"]:
         try:
             sweep_nat_ips(nat_seen)
         except Exception as e:
             log("ERROR", f"  NAT IP sweep failed: {e}")
+            record_processing_failure("fortigates", ip, classify_error(e))
 
+    reporter.finish_family("fortigates")
     # ── Process FortiWeb WAFs ────────────────────────────────────────────────
+    reporter.start_family("fortiwebs", "FortiWeb WAFs")
     # Device-level inventory only (identity/model/firmware/mode/HA/ports).
     # Serial is the identity; a factory box may have no hostname -> fallback.
     live_fortiweb_ips = {h["ip"] for h in found["fortiwebs"]}
@@ -876,7 +939,9 @@ def run_sync():
             data = fortiweb_collect(ip)
         except KeyboardInterrupt: raise
         except Exception as e:
-            log("ERROR", f"  FortiWeb collection failed for {ip}: {e}"); continue
+            log("ERROR", f"  FortiWeb collection failed for {ip}: {e}")
+            record_processing_failure("fortiwebs", ip, classify_error(e))
+            continue
 
         summary = data["summary"]
         ha_members = data.get("ha_members") or []
@@ -896,7 +961,9 @@ def run_sync():
         try:
             dev_id = ensure_fortiweb_device(eff_probe, extra)
         except Exception as e:
-            log("ERROR", f"  ensure_fortiweb_device failed for {ip}: {e}"); continue
+            log("ERROR", f"  ensure_fortiweb_device failed for {ip}: {e}")
+            record_processing_failure("fortiwebs", ip, classify_error(e))
+            continue
 
         # standalone boxes get their primary IP here; the HA path assigns the
         # shared mgmt IP to each node inside ensure_fortiweb_device.
@@ -910,7 +977,9 @@ def run_sync():
                     f"({summary.get('op_mode')}, HA {summary.get('ha_status')}"
                     + (f", {n} nodes" if n > 1 else "") + ")")
 
+    reporter.finish_family("fortiwebs")
     # ── Process Cisco FTDs (via FMC) ─────────────────────────────────────────
+    reporter.start_family("ftds", "Cisco FTDs")
     # Each found entry is an FMC appliance; its managed FTDs are the targets.
     # Each FTD is its own device with its own distinct mgmt IP (no shared-IP).
     live_ftd_ips = set()
@@ -921,7 +990,9 @@ def run_sync():
             data = ftd_collect(fmc_ip)
         except KeyboardInterrupt: raise
         except Exception as e:
-            log("ERROR", f"  FTD collection failed for FMC {fmc_ip}: {e}"); continue
+            log("ERROR", f"  FTD collection failed for FMC {fmc_ip}: {e}")
+            record_processing_failure("ftds", fmc_ip, classify_error(e))
+            continue
 
         for ftd in data["ftds"]:
             mgmt_ip = ftd.get("mgmt_ip")
@@ -935,9 +1006,12 @@ def run_sync():
                         log("WARN", f"  FTD {ftd.get('name')} primary IP failed: {e}")
             except Exception as e:
                 log("ERROR", f"  FTD sync failed for {ftd.get('name')}: {e}")
+                record_processing_failure("ftds", ftd.get('name'), classify_error(e))
         log("INFO", f"  [OK] FMC {fmc_ip} — {len(data['ftds'])} FTDs synced")
 
+    reporter.finish_family("ftds")
     # ── Process Ruckus ZoneDirectors ──────────────────────────────────────────
+    reporter.start_family("ruckus", "Ruckus")
     live_ruckus_ips = {h["ip"] for h in found["ruckus"]}
     ruckus_ha_map = _parse_ha_map(RUCKUS_HA_MAP)
     for probe in found["ruckus"]:
@@ -948,14 +1022,18 @@ def run_sync():
             data = ruckus_collect(ip)
         except KeyboardInterrupt: raise
         except Exception as e:
-            log("ERROR", f"  Ruckus collection failed for {ip}: {e}"); continue
+            log("ERROR", f"  Ruckus collection failed for {ip}: {e}")
+            record_processing_failure("ruckus", ip, classify_error(e))
+            continue
 
         # cluster identity comes only from vip/primary probes
         eff_probe = probe if role != "secondary" else dict(probe, serial="")
         try:
             dev_id = ensure_ruckus_device(eff_probe, role, vip)
         except Exception as e:
-            log("ERROR", f"  ensure_ruckus_device failed for {ip}: {e}"); continue
+            log("ERROR", f"  ensure_ruckus_device failed for {ip}: {e}")
+            record_processing_failure("ruckus", ip, classify_error(e))
+            continue
 
         wlc_name = (data["summary"].get("name") or probe.get("hostname") or ip)
         try:
@@ -972,6 +1050,7 @@ def run_sync():
             api.dcim.devices.update([payload])
         except Exception as e:
             log("ERROR", f"  ZD update failed for {ip}: {e}")
+            record_processing_failure("ruckus", ip, classify_error(e))
 
         try:
             ensure_primary_ip(dev_id, vip or probe.get("reported_ip") or ip,
@@ -991,6 +1070,7 @@ def run_sync():
                         log("WARN", f"  AP {ap.get('name')} primary IP failed: {e}")
             except Exception as e:
                 log("ERROR", f"  AP sync failed for {ap.get('mac')}: {e}")
+                record_processing_failure("ruckus", ap.get('mac'), classify_error(e))
         try:
             for d in list(api.dcim.devices.filter(cf_wap_wlc=wlc_name,
                                                   cf_wap_enabled=True)):
@@ -999,6 +1079,7 @@ def run_sync():
                     mark_ap_offline(d.id, d.name)
         except Exception as e:
             log("ERROR", f"  AP offline sweep failed for {ip}: {e}")
+            record_processing_failure("ruckus", ip, classify_error(e))
 
         try:
             dev_rec = api.dcim.devices.get(id=dev_id)
@@ -1036,6 +1117,7 @@ def run_sync():
                             f"{len(seen_ssids)} WLANs synced")
             except Exception as e:
                 log("ERROR", f"  Ruckus WLAN sync failed for {ip}: {e}")
+                record_processing_failure("ruckus", ip, classify_error(e))
         else:
             log("WARN", f"  no site on device for {ip} — skipping WLAN sync")
 
@@ -1057,8 +1139,11 @@ def run_sync():
                     mark_ruckus_offline(dev.id, dev.name)
         except Exception as e:
             log("ERROR", f"  Ruckus offline sweep failed: {e}")
+            record_processing_failure("ruckus", ip, classify_error(e))
 
+    reporter.finish_family("ruckus")
     # ── Process UniFi OS consoles ────────────────────────────────────────────
+    reporter.start_family("unifi", "UniFi consoles")
     # One console manages many sites. APs reuse the shared AP machinery
     # (wap_* fields; wap_group = UniFi site desc, wap_wlc = console name).
     # WLANs are aggregated console-globally (unique SSIDs, first site wins);
@@ -1071,13 +1156,17 @@ def run_sync():
             data = unifi_collect(ip)
         except KeyboardInterrupt: raise
         except Exception as e:
-            log("ERROR", f"  UniFi collection failed for {ip}: {e}"); continue
+            log("ERROR", f"  UniFi collection failed for {ip}: {e}")
+            record_processing_failure("unifi", ip, classify_error(e))
+            continue
 
         try:
             dev_id = ensure_unifi_console(probe, ap_count=len(data["aps"]),
                                           site_count=len(data["sites"]))
         except Exception as e:
-            log("ERROR", f"  ensure_unifi_console failed for {ip}: {e}"); continue
+            log("ERROR", f"  ensure_unifi_console failed for {ip}: {e}")
+            record_processing_failure("unifi", ip, classify_error(e))
+            continue
 
         console_name = (data["summary"].get("name") or probe.get("hostname") or ip)
         try:
@@ -1086,6 +1175,7 @@ def run_sync():
                                       "custom_fields": {"unifi_version": version}}])
         except Exception as e:
             log("ERROR", f"  UniFi console update failed for {ip}: {e}")
+            record_processing_failure("unifi", ip, classify_error(e))
 
         try:
             ensure_primary_ip(dev_id, ip, console_name)
@@ -1115,6 +1205,7 @@ def run_sync():
                         log("WARN", f"  AP {ap.get('name')} primary IP failed: {e}")
             except Exception as e:
                 log("ERROR", f"  UniFi AP sync failed for {ap.get('mac')}: {e}")
+                record_processing_failure("unifi", ap.get('mac'), classify_error(e))
         try:
             for d in list(api.dcim.devices.filter(cf_wap_wlc=console_name,
                                                   cf_wap_enabled=True)):
@@ -1123,12 +1214,15 @@ def run_sync():
                     mark_ap_offline(d.id, d.name)
         except Exception as e:
             log("ERROR", f"  UniFi AP offline sweep failed for {ip}: {e}")
+            record_processing_failure("unifi", ip, classify_error(e))
 
         try:
             sync_unifi_wlans(data, console_name, desc_site_votes,
                              site_indexes, group_vlan_seen, legacy_sites)
         except Exception as e:
             log("ERROR", f"  UniFi WLAN sync failed for {ip}: {e}")
+            record_processing_failure("unifi", ip, classify_error(e))
+    reporter.finish_family("unifi")
     # ── Process NVRs (Hikvision / Dahua / Uniview) ───────────────────────────
     # The NVR is the device; each camera becomes its own device (serial is the
     # identity) with the parent NVR recorded in cam_nvr. Camera IPs are set as
@@ -1183,6 +1277,7 @@ def run_sync():
             log("ERROR", f"  stale group sweep failed for site {site_id}: {e}")
 
     # ── Mark unreachable devices offline ─────────────────────────────────────
+    reporter.start_family("offline_sweeps", "Offline sweeps")
     # A device must be missing from OFFLINE_THRESHOLD consecutive scans before
     # being marked offline. This prevents transient iLO slowness under load
     # from causing false offline markings. Families whose ranges are disabled
@@ -1213,6 +1308,7 @@ def run_sync():
     _offline_sweep(api, bool(UNIFI_RANGES), "cf_unifi_enabled", "unifi_ip",
                    live_unifi_ips, mark_unifi_offline, "UniFi consoles")
 
+    reporter.finish_family("offline_sweeps")
     # Custom-field hygiene: every CF stays ui_visible=if-set (including any
     # added manually between runs).
     try:
@@ -1226,6 +1322,10 @@ def run_sync():
     except Exception as e:
         log("ERROR", f"  power sync pass failed: {e}")
 
+    # Families stay active through reconciliation and offline handling. A
+    # discovery hit alone is not a successful family reconciliation.
+    for family in found:
+        reporter.finish_family(family)
     log("INFO", "Unified sync complete")
     log("INFO", "=" * 60)
     print_summary(found)
@@ -1306,6 +1406,13 @@ def _offline_sweep(api, enabled, cf_field, ip_field, live_ips, mark_fn, label,
     if not enabled:
         return
     log("INFO", f"Checking for unreachable {label} ...")
+    family = {
+        "Server": "servers", "Storage": "storage", "SAN switch": "san_switches",
+        "Cisco switch": "cisco_switches", "FortiGate": "fortigates",
+        "FortiWeb": "fortiwebs", "FTD": "ftds", "UniFi": "unifi",
+        "Hikvision NVRs": "hikvision_nvrs", "Dahua NVRs": "dahua_nvrs",
+        "Uniview NVRs": "unv_nvrs",
+    }.get(label)
     try:
         for dev in list(api.dcim.devices.filter(**{cf_field: True})):
             if mfr and (getattr(getattr(dev, "manufacturer", None), "name", "")
@@ -1314,6 +1421,7 @@ def _offline_sweep(api, enabled, cf_field, ip_field, live_ips, mark_fn, label,
             stored_ip = (dev.custom_fields or {}).get(ip_field)
             if not stored_ip: continue
             ip = str(stored_ip).split("/")[0].strip()
-            _check_offline(ip, live_ips, dev.id, dev.name, mark_fn, label)
+            _check_offline(ip, live_ips, dev.id, dev.name, mark_fn, label, dev,
+                           api.dcim.devices)
     except Exception as e:
         log("ERROR", f"{label} offline check failed: {e}")

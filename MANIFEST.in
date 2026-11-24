@@ -1,0 +1,9 @@
+include README.md pyproject.toml
+recursive-include netbox_sync *.py
+recursive-include netbox_sync_mcp *.py
+recursive-include netbox_sync_plugin *.py *.html *.css *.js
+prune tests
+prune docs
+prune netbox-mcp
+prune .superpowers
+global-exclude *.py[cod] *.env *.log netbox-sync.lock

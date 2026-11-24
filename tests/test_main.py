@@ -13,6 +13,14 @@ def test_lock_acquire_and_conflict(tmp_path):
     assert main_mod._acquire_lock(lock) is False
 
 
+def test_lock_path_can_be_moved_outside_read_only_package(monkeypatch, tmp_path):
+    lock = tmp_path / "worker.lock"
+    monkeypatch.setenv("NETBOX_SYNC_LOCK_FILE", str(lock))
+    monkeypatch.setattr(main_mod, "LOCK_FILE", "/read-only/site-packages/netbox-sync.lock")
+    assert main_mod._acquire_lock() is True
+    assert lock.exists()
+
+
 def test_stale_lock_is_replaced(tmp_path):
     lock = str(tmp_path / "x.lock")
     with open(lock, "w") as f:

@@ -6,10 +6,9 @@
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![NetBox](https://img.shields.io/badge/netbox-4.x-blueviolet)
-![Tests](https://img.shields.io/badge/tests-316%20passing-brightgreen)
 ![Device families](https://img.shields.io/badge/device%20families-10%2BME-orange)
 
-Servers · Storage · SAN & LAN switches · Firewalls · Wireless · NVRs & Hard Drives · Cameras · ManageEngine AssetExplorer inventory enrichment — devices, interfaces, VLANs, IPAM, cables, and hardware inventory.
+Servers · Storage · SAN & LAN switches · Firewalls · Wireless · NVRs · Cameras · ManageEngine AssetExplorer inventory enrichment — devices, interfaces, VLANs, IPAM, cables, and hardware inventory.
 
 🇬🇧 **English below** · مستندات **فارسی** در انتها 🇮🇷
 
@@ -41,7 +40,7 @@ Point the tool at your IP ranges (CIDR notation) and it identifies every device 
 | | |
 |---|---|
 | 🔌 **Ten live device families** | Native protocols: Redfish, XML API, SSH CLI, REST, digest ISAPI/CGI/LAPI |
-| 🧩 **Component-level inventory** | CPUs, RAM, disks, PSUs, NICs, HBAs, SFPs, FC ports, NVR hard drives |
+| 🧩 **Component-level inventory** | CPUs, RAM, supported disks, PSUs, NICs, HBAs, SFPs, and FC ports |
 | 🏢 **ManageEngine Integration** | Asset Tag sync on serial match; imports offline & warehouse inventory |
 | 🕸️ **Topology-aware** | CDP/LLDP inter-switch cables, camera↔switch cables from MAC tables, broadcast-domain VLAN groups |
 | 🛡️ **Careful by design** | Never overwrites automation data from ME, never deletes devices on flap, manages marker-owned objects only |
@@ -54,7 +53,7 @@ Point the tool at your IP ranges (CIDR notation) and it identifies every device 
 flowchart TD
     subgraph S1["1. Live Infrastructure Discovery (sync_all_to_netbox.py)"]
         A[IP Ranges Scan] --> B[Direct Device APIs / SSH]
-        B --> C[Active Devices · Interfaces · VLANs · Cables · Components · NVR HDDs]
+        B --> C[Active Devices · Interfaces · VLANs · Cables · Supported Components]
         C --> D[(NetBox DCIM & IPAM)]
     end
 
@@ -87,7 +86,7 @@ Every family is **opt-in**: set its `*_RANGES` in `.env`; leave empty to disable
 | 🛡️ **WAFs** | FortiWeb 1000E/1000F (7.2+) | HTTPS header-token API | `Authorization: base64({"username","password","vdom"})`; `/api/v2.0/system/status.systemstatus`, `status.systemresource`, `/cmdb/system/interface` |
 | 📡 **Wireless (Ruckus)** | ZoneDirector ZD1200-class | SSH interactive shell | `show sysinfo`, `show ap all`, `show ap <mac>` (AP serials), `show wlan all` |
 | 📶 **Wireless (Ubiquiti)** | UniFi OS consoles (UDM/CloudKey/Server) | HTTPS session API | `POST /api/login`, `/api/self/sites`, per-site `stat/device`, `rest/wlanconf`, `rest/networkconf` |
-| 🎥 **NVRs (Hikvision)** | DS-96xx/77xx NVRs | HTTP digest (ISAPI) | `/ISAPI/System/deviceInfo`, `ContentMgmt/InputProxy/channels(+status)`, `ContentMgmt/Storage/hdd` (NVR disks), per-channel proxied `deviceInfo` |
+| 🎥 **NVRs (Hikvision)** | DS-96xx/77xx NVRs | HTTP digest (ISAPI) | `/ISAPI/System/deviceInfo`, `ContentMgmt/InputProxy/channels(+status)`, per-channel proxied `deviceInfo` |
 | 🎥 **NVRs (Dahua)** | NVR4X/NVR6xx-class | HTTP digest (CGI) | `magicBox.cgi` (system info), `configManager.cgi RemoteDevice` + `ChannelTitle` |
 | 🎥 **NVRs (Uniview)** | NVR30x-class | HTTP digest (LAPI) | `/LAPI/V1.0/System/DeviceInfo`, `Channels/System/ChannelDetailInfos`, `DeviceInfos` |
 
@@ -119,7 +118,7 @@ ManageEngine AssetExplorer (`sync_assetexplorer.py`) runs as a secondary data so
 | Ruckus ZD | `Wireless Controller` | serial | HA pairs merge via `RUCKUS_HA_MAP` |
 | UniFi console | `Wireless Controller` | console UUID | per-site AP/WLAN aggregation |
 | APs (Ruckus + UniFi) | `Access Point` | **MAC** (`wap_mac`) / Serial | Serial collected via `show ap <mac>` (Ruckus) or derived from MAC (UniFi) |
-| NVRs (3 vendors) | `NVR` | serial | `nvr_*` fields; installed physical HDDs synced as inventory items |
+| NVRs (3 vendors) | `NVR` | serial | `nvr_*` fields; NVR hard-disk discovery is not performed |
 | **Cameras** | `Camera` | **serial** | `cam_*` fields, `cam_nvr` parent link, real MAC when available |
 | ME In-Store Assets | Respective role | serial | Status `Inventory`, Department custom field, ME Asset ID |
 
@@ -172,7 +171,9 @@ cp .env.example .env     # fill in your values
 
 ---
 
-## ⏱️ Running & scheduling (Automated Pipeline)
+## 🧩 NetBox plugin and read-only MCP
+
+The `netbox-sync-plugin` distribution also provides a NetBox 4.5.1 Operations dashboard, native scheduled/background execution, durable run history, and the GET-only MCP service. See **[NetBox plugin deployment](docs/netbox-sync-plugin.md)** for installation, dedicated-worker configuration, permissions, health definitions, shared Redis locking, migration/cutover, MCP transports, and disposable-instance acceptance. Test only on a disposable NetBox instance before requesting production deployment.
 
 ### Manual runs
 
@@ -182,9 +183,6 @@ python sync_all_to_netbox.py
 
 # Run ManageEngine sync only:
 python sync_assetexplorer.py
-
-# Wipe all devices & cables cleanly (for fresh sync):
-python wipe_all_devices.py
 ```
 
 ### Automated daily pipeline (`run_daily_sync.sh`)
@@ -213,7 +211,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/
 ```
 
-288 tests, all offline — fixtures captured from real devices and APIs, plus NetBox reconciliation against in-memory fakes.
+The hermetic suite covers synchronization against in-memory fakes, plugin history and permissions, read-only MCP behavior, subprocess/locking boundaries, and built distribution contents. See the deployment guide for the separate disposable-NetBox acceptance checklist.
 
 ---
 
@@ -235,7 +233,7 @@ netbox_sync/
 ├── config.py                # .env loading, ranges, validation, logging
 ├── scanner.py               # Thread-pooled probing of all device families
 ├── report.py                # Failure categorization and scan summary generator
-├── sync.py                  # Orchestration: live reconciliation, sweeps, cabling, HDDs
+├── sync.py                  # Orchestration: live reconciliation, sweeps, and cabling
 ├── assetexplorer_sync.py    # ManageEngine AssetExplorer sync (tags, offline stock, items)
 ├── netbox.py                # Device/inventory/custom-field helpers
 ├── ipam.py                  # Prefixes, host IPs, NAT + services
@@ -249,15 +247,16 @@ netbox_sync/
     ├── fortigate.py         # Firewalls
     ├── ruckus.py            # Ruckus ZD & APs (serial collection)
     ├── unifi.py             # UniFi consoles & APs
-    ├── hikvision.py         # Hikvision NVRs, HDDs & cameras
+    ├── hikvision.py         # Hikvision NVRs and cameras
     ├── dahua.py             # Dahua NVRs & cameras
     ├── unv.py               # Uniview NVRs & cameras
     └── assetexplorer.py     # ManageEngine API collector & normalizer
 
 sync_all_to_netbox.py        # CLI entry point for live discovery
 sync_assetexplorer.py        # CLI entry point for ManageEngine sync
-run_daily_sync.sh            # Production sequential daily wrapper
-wipe_all_devices.py          # Fast inventory cleanup utility
+run_daily_sync.sh            # Sequential daily wrapper
+netbox_sync_plugin/          # NetBox Operations, jobs, history, and scheduling
+netbox_sync_mcp/             # Separate read-only MCP service
 ```
 
 ---

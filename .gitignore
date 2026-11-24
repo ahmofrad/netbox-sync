@@ -20,12 +20,26 @@ __pycache__/
 .venv/
 venv/
 
+# Local design and brainstorming sessions
+.superpowers/
+
 # OS / editor
 .DS_Store
 *.swp
 
 # Runtime lock
 netbox-sync.lock
+
+# Build and test artifacts
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Disposable acceptance runtime and evidence
+acceptance/runtime/
+acceptance/results/
 
 # Audit artifacts — never commit
 netbox_duplicate_audit_*.xlsx

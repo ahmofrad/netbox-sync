@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-sync-plugin"
+version = "1.0.0"
+description = "NetBox synchronization, operations dashboard, and read-only MCP service"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+authors = [{name = "NetBox sync maintainers"}]
+dependencies = [
+    "requests>=2.31.0",
+    "pynetbox>=7.3.0",
+    "python-dotenv>=1.0.0",
+    "paramiko>=3.4.0",
+    "netmiko>=4.3.0",
+    "mcp<2",
+]
+
+[project.scripts]
+netbox-sync = "netbox_sync.pipeline:main"
+netbox-sync-mcp = "netbox_sync_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["netbox_sync*", "netbox_sync_mcp*", "netbox_sync_plugin*"]
+exclude = ["tests*", "netbox-mcp*"]
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]
+netbox_sync_plugin = [
+    "migrations/*.py",
+    "templates/netbox_sync_plugin/*.html",
+    "static/netbox_sync_plugin/*.css",
+    "static/netbox_sync_plugin/*.js",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "netbox-mcp"]
