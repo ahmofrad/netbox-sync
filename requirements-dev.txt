@@ -1,2 +1,5 @@
 -r requirements.txt
 pytest>=8.0.0
+mcp<2
+build>=1.0
+Django>=5.2,<5.3

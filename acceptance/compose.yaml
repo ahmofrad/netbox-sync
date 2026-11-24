@@ -1,0 +1,70 @@
+name: netbox-sync-acceptance
+
+x-netbox: &netbox
+  image: netbox-sync-acceptance:v4.5.1
+  build:
+    context: ..
+    dockerfile: acceptance/Dockerfile
+  user: "netbox:root"
+  env_file: runtime/netbox.env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  volumes:
+    - ./configuration.py:/etc/netbox/config/configuration.py:ro
+    - ../dist/netbox_sync_plugin-1.0.0-py3-none-any.whl:/tmp/netbox-sync-plugin.whl:ro
+    - ./checks:/opt/netbox-sync-acceptance:ro
+    - ./runtime/credentials.json:/opt/netbox-sync-runtime/credentials.json:ro
+    - netbox-media:/opt/netbox/netbox/media
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://localhost:8080/login/ >/dev/null || exit 1"]
+    interval: 10s
+    timeout: 5s
+    retries: 30
+    start_period: 120s
+
+services:
+  netbox:
+    <<: *netbox
+    ports:
+      - "127.0.0.1:18080:8080"
+  worker:
+    <<: *netbox
+    ports: []
+    depends_on:
+      netbox:
+        condition: service_healthy
+    command: ["/opt/netbox/venv/bin/python", "/opt/netbox/netbox/manage.py", "rqworker", "netbox_sync_plugin.sync"]
+    healthcheck:
+      test: ["CMD-SHELL", "ps -ef | grep '[r]qworker' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+  postgres:
+    image: postgres:16-alpine
+    env_file: runtime/postgres.env
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres-data:
+  redis-data:
+  netbox-media:

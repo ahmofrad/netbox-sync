@@ -11,6 +11,7 @@ Examples:
     python sync_single_device.py 192.168.16.143 --type ftd    # FMC IP, syncs all managed FTDs
 """
 import argparse
+import os
 import sys
 
 from netbox_sync.config import log, _validate_config
@@ -62,6 +63,21 @@ def main():
         log("ERROR", str(exc))
         return 1
 
+    if os.getenv("SYNC_LOCK_BACKEND", "file").lower() == "redis":
+        from netbox_sync.locking import configured_execution_lock
+        try:
+            with configured_execution_lock():
+                return _run_single(args)
+        except KeyboardInterrupt:
+            log("INFO", "Aborted by user.")
+            return 130
+        except Exception as exc:
+            log("ERROR", str(exc))
+            return 1
+    return _run_single(args)
+
+
+def _run_single(args):
     api = get_netbox()
     ensure_custom_fields()
 

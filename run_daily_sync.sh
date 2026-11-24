@@ -21,6 +21,12 @@ MAIN_LOG="$LOGDIR/main-$STAMP.log"
 AE_LOG="$LOGDIR/ae-$STAMP.log"
 LOCKFILE="/tmp/netbox-daily.lock"
 
+# Optional shared Redis ownership uses one lock around this ordered pipeline.
+# The child scripts are explicitly kept in file mode to avoid recursive Redis locks.
+if [ "${SYNC_LOCK_BACKEND:-file}" = "redis" ]; then
+    exec python "$BASE/sync_daily_redis.py"
+fi
+
 # Prevent overlap if yesterday's run is somehow still going
 exec 9>"$LOCKFILE"
 if ! flock -n 9; then

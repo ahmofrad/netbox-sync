@@ -14,10 +14,11 @@ LOCK_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 LOCK_MAX_AGE_SECONDS = 24 * 3600
 
 
-def _acquire_lock(path=LOCK_FILE):
+def _acquire_lock(path=None):
     """Create the lockfile exclusively; returns True when held. An existing
     lock older than LOCK_MAX_AGE_SECONDS is considered stale (crash) and
     replaced. The lock is released automatically at process exit."""
+    path = path or os.getenv("NETBOX_SYNC_LOCK_FILE") or LOCK_FILE
     if os.path.exists(path):
         age = time.time() - os.path.getmtime(path)
         if age > LOCK_MAX_AGE_SECONDS:
@@ -46,11 +47,17 @@ def main():
     except RuntimeError as exc:
         log("ERROR", str(exc))
         return 1
-    if not _acquire_lock():
+    redis_mode = os.getenv("SYNC_LOCK_BACKEND", "file").lower() == "redis"
+    if not redis_mode and not _acquire_lock():
         log("ERROR", f"Another instance is running (lock: {LOCK_FILE}) — exiting.")
         return 1
     try:
-        run_sync()
+        if redis_mode:
+            from netbox_sync.locking import configured_execution_lock
+            with configured_execution_lock():
+                run_sync()
+        else:
+            run_sync()
     except KeyboardInterrupt:
         log("INFO", "Aborted by user.")
         return 130

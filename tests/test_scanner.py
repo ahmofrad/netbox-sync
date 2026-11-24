@@ -115,6 +115,103 @@ def test_offline_sweep_without_mfr_keeps_legacy_behavior(monkeypatch):
                             lambda *a: None, "Hikvision NVRs")
     assert len(calls) == 1
 
+def test_persisted_scan_misses_survive_fresh_sweeps_and_merge_fields():
+    nbx._scan_fail_counts.clear()
+    dev = FakeRecord(1, name="srv1", cf_redfish_enabled=True,
+                     custom_fields={"bmc_ip": "192.0.2.5", "scan_misses": 1,
+                                    "owner": "preserved"})
+    api = _fake_api(devices=FakeEndpoint([dev]))
+    offlined = []
+    for expected, expected_offlined in ((0, [1]), (1, [1])):
+        sync_mod._offline_sweep(api, True, "cf_redfish_enabled", "bmc_ip",
+                                set(), lambda i, n: offlined.append(i), "Server")
+        nbx._scan_fail_counts.clear()
+        assert dev.custom_fields["scan_misses"] == expected
+        assert dev.custom_fields["owner"] == "preserved"
+        assert offlined == expected_offlined
+    assert offlined == [1]
+    assert all(set(p["custom_fields"]) == {"bmc_ip", "scan_misses", "owner"}
+               for p in api.dcim.devices.updated)
+
+
+def test_sweep_hit_and_write_failure_have_safe_miss_behavior(monkeypatch):
+    nbx._scan_fail_counts.clear()
+    hit = FakeRecord(1, name="srv1", cf_redfish_enabled=True,
+                     custom_fields={"bmc_ip": "192.0.2.5", "scan_misses": 2})
+    api = _fake_api(devices=FakeEndpoint([hit]))
+    sync_mod._offline_sweep(api, True, "cf_redfish_enabled", "bmc_ip",
+                            {"192.0.2.5"}, lambda i, n: None, "Server")
+    assert hit.custom_fields["scan_misses"] == 0
+
+    def fail_update(values):
+        raise RuntimeError("write failed")
+    monkeypatch.setattr(api.dcim.devices, "update", fail_update)
+    offlined = []
+    sync_mod._offline_sweep(api, True, "cf_redfish_enabled", "bmc_ip",
+                            set(), lambda i, n: offlined.append(i), "Server")
+    assert offlined == []
+
+
+def test_successful_normal_ensure_resets_durable_misses_immediately(monkeypatch):
+    """A normal hit must not wait for the later offline sweep to clear state."""
+    from tests.test_netbox_sync import FakeEndpoint, FakeRecord
+    existing = FakeRecord(7, name="server-one", serial="SERIAL-ONE",
+                          custom_fields={"bmc_ip": "192.0.2.5", "scan_misses": 2,
+                                         "owner": "preserved"})
+    endpoint = FakeEndpoint([existing])
+    monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(devices=endpoint))
+    monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda name: 1)
+    monkeypatch.setattr(nbx, "get_or_create_role", lambda *args: 2)
+    monkeypatch.setattr(nbx, "get_or_create_site", lambda name: 3)
+    monkeypatch.setattr(nbx, "get_or_create_device_type", lambda *args: 4)
+    monkeypatch.setattr(nbx, "find_device", lambda *args, **kwargs: existing)
+
+    result = nbx._ensure_device(
+        probe={"ip": "192.0.2.5", "hostname": "server-one", "serial": "SERIAL-ONE"},
+        manufacturer="HPE", role_name="Server", prefix="server",
+        cf={"bmc_ip": "192.0.2.5", "redfish_enabled": True})
+
+    assert result == 7
+    assert existing.custom_fields["scan_misses"] == 0
+    assert existing.custom_fields["owner"] == "preserved"
+
+
+def test_direct_ap_camera_and_ruckus_ensures_reset_durable_misses(monkeypatch):
+    from tests.test_netbox_sync import FakeEndpoint, FakeRecord
+    for ensure_name, args in (
+        ("ensure_ap_device", ({"mac": "00:11:22:33:44:55", "name": "ap-one", "ip": "192.0.2.5"}, "wlc")),
+        ("ensure_camera_device", ({"serial": "CAM-ONE", "channel": 1, "name": "cam-one", "ip": "192.0.2.5", "online": True}, "nvr-one")),
+        ("ensure_ruckus_device", ({"ip": "192.0.2.5", "hostname": "wlc-one", "serial": "WLC-ONE"}, "primary", None)),
+    ):
+        identity_fields = {
+            "ensure_ap_device": {"wap_mac": "00:11:22:33:44:55"},
+            "ensure_camera_device": {"cam_serial": "CAM-ONE"},
+            "ensure_ruckus_device": {},
+        }[ensure_name]
+        existing = FakeRecord(7, name="device-one",
+                              custom_fields={"scan_misses": 2, "owner": "preserved",
+                                             **identity_fields})
+        endpoint = FakeEndpoint([existing])
+        monkeypatch.setattr(nbx, "get_netbox", lambda: _fake_api(devices=endpoint))
+        monkeypatch.setattr(nbx, "get_or_create_manufacturer", lambda name: 1)
+        monkeypatch.setattr(nbx, "get_or_create_role", lambda *args: 2)
+        monkeypatch.setattr(nbx, "get_or_create_site", lambda name: 3)
+        monkeypatch.setattr(nbx, "get_or_create_device_type", lambda *args: 4)
+        monkeypatch.setattr(nbx, "find_device", lambda *args, **kwargs: existing)
+        getattr(nbx, ensure_name)(*args)
+        assert existing.custom_fields["scan_misses"] == 0, ensure_name
+        assert existing.custom_fields["owner"] == "preserved", ensure_name
+
+
+def test_legacy_six_argument_offline_counter_is_unchanged():
+    nbx._scan_fail_counts.clear()
+    offlined = []
+    nbx._check_offline("192.0.2.8", set(), 8, "legacy", lambda i, n: offlined.append(i), "Legacy")
+    assert nbx._scan_fail_counts["192.0.2.8"] == 1
+    assert offlined == []
+    nbx._scan_fail_counts.clear()
+
+
 def test_process_nvrs_sweep_keeps_camera_when_channel_still_reported(monkeypatch):
     """Serial fetch failed (503) but the channel is still in the list ->
     the camera must NOT be marked offline."""
